@@ -4,7 +4,7 @@ type AIClient = {
   run: (
     model: string,
     input: {
-      messages: Array<{ role: 'system' | 'user'; content: string }>
+      messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
       max_tokens: number
     }
   ) => Promise<{ response?: string }>
@@ -16,6 +16,14 @@ type Bindings = {
   AI_ACCESS_KEY: string
   TELEGRAM_WEBHOOK_SECRET: string
   AI: AIClient
+  MEMORY_DB: {
+    prepare: (query: string) => {
+      bind: (...params: (string | number)[]) => {
+        run: () => Promise<{ meta: { changes: number } }>
+        all: <T>() => Promise<{ results: T[] }>
+      }
+    }
+  }
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -154,22 +162,73 @@ app.post('/telegram/webhook', async (c) => {
   if (!token || !c.env.AI) return c.json({ ok: false }, 503)
 
   const processMessage = async () => {
+    const db = c.env.MEMORY_DB
+    if (!db) {
+      console.error('Telegram memory binding missing')
+      return
+    }
+    const key = String(chatId)
+    const send = async (reply: string) => {
+      const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: reply.slice(0, 3900),
+          reply_parameters: { message_id: msg.message_id }
+        })
+      })
+      if (!resp.ok) throw new Error('Telegram send failed')
+    }
     try {
+      if (text.toLowerCase() === '/forget' || text.toLowerCase() === '/reset') {
+        await db.prepare('DELETE FROM messages WHERE chat_id = ?').bind(key).run()
+        await send('Conversation memory cleared. We can start fresh.')
+        return
+      }
+      if (text === '/start') {
+        await send('Hello! I can remember our recent conversation. Send /forget to clear my memory.')
+        return
+      }
+      // Delete old messages for this chat after 7 days.
+      await db.prepare("DELETE FROM messages WHERE chat_id = ? AND created_at < unixepoch() - 604800").bind(key).run()
+
+      // Store once per Telegram message, avoiding duplicate processing on retries.
+      const inserted = await db.prepare(
+        "INSERT OR IGNORE INTO messages (chat_id, message_id, role, content) VALUES (?, ?, 'user', ?)"
+      ).bind(key, msg.message_id, text).run()
+      if (inserted.meta.changes === 0) return
+
+      const records = await db.prepare(
+        "SELECT role, content FROM messages WHERE chat_id = ? AND (message_id < ? OR (message_id = ? AND role = 'user')) ORDER BY message_id DESC, role DESC LIMIT 20"
+      ).bind(key, msg.message_id, msg.message_id).all<{ role: 'user' | 'assistant'; content: string }>()
+      const history = records.results.reverse().map(row => ({
+        role: row.role,
+        content: row.content
+      }))
       const answer = await c.env.AI.run('@cf/meta/llama-3.1-8b-instruct-fp8', {
         messages: [
-          { role: 'system', content: 'You are an English-only AI assistant on Telegram. Respond in English in every message, even if the user writes in Burmese or previously requested another language. Do not write Burmese script. Answer questions clearly, accurately, and concisely. Treat each message independently because conversation history is not available.' },
-          { role: 'user', content: text }
+          {
+            role: 'system',
+            content: 'You are a helpful English-only AI Telegram assistant. Respond only in English, regardless of the language used. Use recent conversation messages to understand follow-up questions. Be clear, accurate, and concise. If context is missing, ask for clarification.'
+          },
+          ...history
         ],
         max_tokens: 400
       })
-      const reply = typeof answer.response === 'string' ? answer.response.slice(0, 3900) : 'No AI response was returned.'
-      await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: reply, reply_parameters: { message_id: msg.message_id } })
-      })
+      const reply = typeof answer.response === 'string' && answer.response.trim()
+        ? answer.response.trim().slice(0, 3900)
+        : 'I could not produce an answer. Please try asking again.'
+      await send(reply)
+      await db.prepare(
+        "INSERT OR REPLACE INTO messages (chat_id, message_id, role, content) VALUES (?, ?, 'assistant', ?)"
+      ).bind(key, msg.message_id, reply).run()
+      // Keep at most 20 recent messages per chat.
+      await db.prepare(
+        'DELETE FROM messages WHERE chat_id = ? AND rowid NOT IN (SELECT rowid FROM messages WHERE chat_id = ? ORDER BY message_id DESC, role DESC LIMIT 20)'
+      ).bind(key, key).run()
     } catch (error) {
-      console.error('Telegram AI processing failed', error instanceof Error ? error.message : 'unknown')
+      console.error('Telegram memory processing failed', error instanceof Error ? error.message : 'unknown')
     }
   }
   c.executionCtx.waitUntil(processMessage())
