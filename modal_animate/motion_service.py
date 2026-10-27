@@ -1,7 +1,7 @@
 """Isolated authenticated Modal service for Telegram Wan2.2 Animate 14B.
 
 Deploy on purpose: modal deploy motion_service.py
-The HTTP endpoint deploys WITHOUT launching any GPU.
+Create the wan22-motion-flags secret with MOTION_GPU_ENABLED=0 before deploy.\nThe HTTP endpoint deploys WITHOUT launching any GPU.
 To allow new paid jobs: modal secret create wan22-motion-flags MOTION_GPU_ENABLED=1
 and redeploy, then explicitly configure the Telegram Worker secrets.
 
@@ -19,7 +19,7 @@ results = modal.Volume.from_name("wan22-animate-test-results", create_if_missing
 # Existing generated Motion API secret: MOTION_API_KEY
 AUTH = modal.Secret.from_name("wan22-animate-auth")
 # Separate *disabled by default* authorization for billable generation.
-FLAGS = modal.Secret.from_name("wan22-motion-flags", required=False)
+FLAGS = modal.Secret.from_name("wan22-motion-flags")
 
 api_image = modal.Image.debian_slim(python_version="3.11").apt_install("ffmpeg").pip_install(
     "fastapi>=0.115,<1", "python-multipart>=0.0.12,<1", "pillow>=11,<13"
@@ -256,7 +256,7 @@ def web_api():
         if outcome is None:
             raise HTTPException(409, "Motion video not ready")
         relative = outcome.get("video_path", "")
-        if not re.fullmatch(r"/telegram-motion/generated/motion-[a-f0-9]{32}\\.mp4", relative):
+        if not re.fullmatch(r"/telegram-motion/generated/motion-[a-f0-9]{32}\.mp4", relative):
             raise HTTPException(502, "Invalid render output location")
         results.reload()
         file = Path("/results") / relative.lstrip("/")
