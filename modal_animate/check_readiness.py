@@ -29,6 +29,7 @@ CORE = (
 PREPROCESS_MANDATORY = (
     "process_checkpoint/det/yolov10m.onnx",
     "process_checkpoint/pose2d/vitpose_h_wholebody.onnx",
+    "process_checkpoint/pose2d/vitpose_h_wholebody_data.bin",
 )
 PREPROCESS_OPTIONAL_FOR_ANIMATION = (
     "process_checkpoint/sam2/sam2_hiera_large.pt",
@@ -59,6 +60,12 @@ def verify_assets() -> dict:
         if not file.is_file() or file.stat().st_size <= 0:
             missing.append(name)
 
+    pose_target = ROOT / "process_checkpoint/pose2d/vitpose_h_wholebody.onnx"
+    if pose_target.is_dir():
+        missing.append(
+            "ViTPose target is a DIRECTORY, not an ONNX file. "
+            "Run: modal run repair_vitpose.py"
+        )
     optional = {name: (ROOT / name).is_file() for name in PREPROCESS_OPTIONAL_FOR_ANIMATION}
 
     # Validate the root diffusion weight index, including its shard references.
@@ -84,6 +91,8 @@ def verify_assets() -> dict:
         "core_size_gb": round(core_bytes / 1e9, 2),
         "diffusion_shards_indexed": len(index_shards),
         "optional_checkpoint_present": optional,
+        "vitpose_onnx_is_file": pose_target.is_file(),
+        "vitpose_external_data_is_file": (ROOT / "process_checkpoint/pose2d/vitpose_h_wholebody_data.bin").is_file(),
         "gpu_started": False,
         "runtime_or_inference_tested": False,
     }
