@@ -238,3 +238,24 @@ Official evidence:
 - https://github.com/Wan-Video/Wan2.2/blob/main/wan/animate.py
 - https://huggingface.co/Wan-AI/Wan2.2-Animate-14B/tree/main/google/umt5-xxl
 - https://huggingface.co/Wan-AI/Wan2.2-Animate-14B/tree/main/xlm-roberta-large
+
+
+### Tokenizer image build dependency fix
+
+If the initial `download_tokenizers.py` image fails to build, note that `transformers==4.51.3` has an explicit dependency on `huggingface-hub>=0.30.0,<1.0`. The initial downloader mistakenly requested `huggingface_hub>=1.0,<2`, a conflicting constraint. It now uses `huggingface_hub>=0.34,<1.0` instead, with no changes to the stored model weights.
+
+Additionally, Wan's XLM-R directory can validly contain `config.json` and `sentencepiece.bpe.model` without a `tokenizer_config.json`; the readiness checker now allows that upstream layout.
+
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+modal run download_tokenizers.py
+modal run check_readiness.py
+```
+
+If a *new* image build still fails, inspect `modal image logs <IMAGE_ID>` and capture the **first** pip error lines; the generic `ImageBuildError` summary does not identify the cause by itself. No GPU is enabled by these commands.
+
+Evidence:
+- https://raw.githubusercontent.com/huggingface/transformers/v4.51.3/setup.py
+- https://huggingface.co/Wan-AI/Wan2.2-Animate-14B/tree/main/xlm-roberta-large
