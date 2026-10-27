@@ -362,3 +362,20 @@ modal run gpu_smoke.py
 ```
 
 Expect `'official_generate_cli_cpu_import': True`, `'simulated_cuda_lookup_in_cpu_probe': True`, and `'gpu_started': False`. If an import error remains, fix that without launching paid GPU. Only after preflight passes, `modal run gpu_smoke.py --execute` remains the *separate*, explicitly paid attempt.
+
+
+### CPU inference-import preflight found missing librosa
+
+The CPU-only CLI test now passes Wan's import-time `torch.cuda.current_device()` by stubbing that lookup **only within its child process**. It next discovered `ModuleNotFoundError: No module named 'librosa'`, because upstream `wan/__init__.py` eagerly imports `WanS2V` and `wan/modules/s2v/audio_encoder.py` imports `librosa`, even for Animate-14B. Upstream `requirements_s2v.txt` also lists `librosa`. `gpu_smoke.py` now installs `librosa==0.11.0` alongside `einops==0.8.1`.
+
+Retry **CPU-only** first:
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+modal run gpu_smoke.py
+```
+
+Do **not** run `modal run gpu_smoke.py --execute` while the CPU preflight reports an import error. The previous A100 failure was unrelated to the 51.19 GB model weights, which remain mounted read-only. This code update has been committed but has not yet been executed on the user's Modal account.
+
+Evidence: https://github.com/Wan-Video/Wan2.2/blob/main/wan/modules/s2v/audio_encoder.py and https://github.com/Wan-Video/Wan2.2/blob/main/requirements_s2v.txt
