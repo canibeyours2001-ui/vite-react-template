@@ -1,19 +1,30 @@
-
 import { Hono } from 'hono'
+
+type AIClient = {
+  run: (
+    model: string,
+    input: {
+      messages: Array<{ role: 'system' | 'user'; content: string }>
+      max_tokens: number
+    }
+  ) => Promise<{ response?: string }>
+}
 
 type Bindings = {
   TELEGRAM_BOT_TOKEN: string
   TELEGRAM_CHAT_ID: string
+  AI_ACCESS_KEY: string
+  AI: AIClient
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
 
-// Existing API
+// Keep the original API working
 app.get('/api/', (c) => {
   return c.json({ name: 'Cloudflare' })
 })
 
-// Send a Telegram message
+// Keep the original Telegram integration working
 app.post('/api/telegram', async (c) => {
   const token = c.env.TELEGRAM_BOT_TOKEN
   const chatId = c.env.TELEGRAM_CHAT_ID
@@ -47,6 +58,69 @@ app.post('/api/telegram', async (c) => {
     return c.json({
       ok: false,
       error: 'Telegram request failed'
+    }, 502)
+  }
+})
+
+// Ask Cloudflare Workers AI. Disabled until a private access key is configured.
+app.post('/api/ai', async (c) => {
+  const configuredKey = c.env.AI_ACCESS_KEY
+  if (!configuredKey || configuredKey.length < 24) {
+    return c.json({
+      ok: false,
+      error: 'Set a strong AI_ACCESS_KEY secret in Cloudflare first'
+    }, 503)
+  }
+
+  const providedKey = c.req.header('X-AI-Access-Key') || ''
+  if (providedKey !== configuredKey) {
+    return c.json({ ok: false, error: 'Incorrect AI access key' }, 401)
+  }
+
+  if (!c.env.AI) {
+    return c.json({ ok: false, error: 'Workers AI binding is missing' }, 503)
+  }
+
+  let payload: unknown
+  try {
+    payload = await c.req.json()
+  } catch {
+    return c.json({ ok: false, error: 'Invalid JSON body' }, 400)
+  }
+
+  const prompt =
+    typeof payload === 'object' && payload !== null && 'prompt' in payload
+      ? (payload as { prompt?: unknown }).prompt
+      : undefined
+
+  if (typeof prompt !== 'string' || prompt.trim().length < 1 || prompt.length > 2000) {
+    return c.json({
+      ok: false,
+      error: 'Enter a question between 1 and 2000 characters'
+    }, 400)
+  }
+
+  try {
+    const result = await c.env.AI.run('@cf/meta/llama-3.1-8b-instruct-fp8', {
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a helpful AI assistant. Answer clearly and concisely. Respond in Burmese if the user asks in Burmese.'
+        },
+        { role: 'user', content: prompt.trim() }
+      ],
+      max_tokens: 400
+    })
+
+    if (!result || typeof result.response !== 'string') {
+      return c.json({ ok: false, error: 'The AI did not return a text answer' }, 502)
+    }
+
+    return c.json({ ok: true, answer: result.response })
+  } catch {
+    return c.json({
+      ok: false,
+      error: 'AI request failed. Check your Workers AI usage and try again.'
     }, 502)
   }
 })
