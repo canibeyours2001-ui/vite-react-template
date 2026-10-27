@@ -245,10 +245,20 @@ app.post('/telegram/webhook', async (c) => {
         ).bind(key,msg.message_id).run()
         if (inserted.meta.changes === 0) return
         try {
-          const headers: Record<string,string> = {'content-type':'application/json'}
+          // Modal's FastAPI route uses Form(...) fields, not a JSON body.
+          const form = new FormData()
+          form.set('prompt', prompt)
+          form.set('width', '1280')
+          form.set('height', '704')
+          form.set('seed', '-1')
+          const headers: Record<string,string> = {}
           if (c.env.MODAL_WAN_API_KEY) headers.Authorization = 'Bearer ' + c.env.MODAL_WAN_API_KEY
+          // fetch() sets the multipart boundary automatically. Do not set Content-Type.
           const response = await fetch(base.toString().replace(/\/$/, '') + '/v1/generations', {
-            method:'POST',headers,body:JSON.stringify({prompt, width: 1280, height: 704, seed: -1}),signal:AbortSignal.timeout(20000)
+            method: 'POST',
+            headers,
+            body: form,
+            signal: AbortSignal.timeout(20000)
           })
           if (!response.ok) {
             if (response.status === 422) {
