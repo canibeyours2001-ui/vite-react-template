@@ -9,6 +9,11 @@ function App() {
   const [count, setCount] = useState(0);
   const [name, setName] = useState("unknown");
   const [sending, setSending] = useState(false);
+  const [aiAccessKey, setAiAccessKey] = useState("");
+  const [question, setQuestion] = useState("");
+  const [aiAnswer, setAiAnswer] = useState("");
+  const [aiError, setAiError] = useState("");
+  const [askingAI, setAskingAI] = useState(false);
 
   const getName = async () => {
     try {
@@ -40,6 +45,40 @@ function App() {
       alert("❌ API connection failed");
     } finally {
       setSending(false);
+    }
+  };
+
+  const askAI = async () => {
+    if (!aiAccessKey || !question.trim()) return;
+    setAskingAI(true);
+    setAiAnswer("");
+    setAiError("");
+
+    try {
+      const response = await fetch("/api/ai", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-AI-Access-Key": aiAccessKey,
+        },
+        body: JSON.stringify({ prompt: question.trim() }),
+      });
+
+      const data = (await response.json()) as {
+        ok: boolean;
+        answer?: string;
+        error?: string;
+      };
+
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || "AI request failed");
+      }
+
+      setAiAnswer(data.answer || "No text returned.");
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : "AI request failed");
+    } finally {
+      setAskingAI(false);
     }
   };
 
@@ -84,6 +123,48 @@ function App() {
         <button onClick={sendTelegram} disabled={sending}>
           {sending ? "Sending..." : "🚀 Send Telegram Message"}
         </button>
+      </div>
+
+      <div className="card">
+        <h2>Ask Cloudflare AI</h2>
+        <p>Llama 3.1 8B — uses your Cloudflare Workers AI free allocation.</p>
+        <label htmlFor="ai-key">Private AI access key</label>
+        <br />
+        <input
+          id="ai-key"
+          type="password"
+          autoComplete="off"
+          placeholder="Enter your AI_ACCESS_KEY secret"
+          value={aiAccessKey}
+          onChange={(event) => setAiAccessKey(event.target.value)}
+          style={{ width: "100%", maxWidth: "34rem", boxSizing: "border-box", padding: "0.7rem", margin: "0.5rem 0 1rem" }}
+        />
+        <br />
+        <label htmlFor="ai-question">Your question</label>
+        <br />
+        <textarea
+          id="ai-question"
+          placeholder="Ask me something, in English or Burmese..."
+          value={question}
+          onChange={(event) => setQuestion(event.target.value)}
+          rows={4}
+          maxLength={2000}
+          style={{ width: "100%", maxWidth: "34rem", boxSizing: "border-box", padding: "0.7rem", margin: "0.5rem 0 1rem" }}
+        />
+        <br />
+        <button
+          onClick={askAI}
+          disabled={askingAI || !aiAccessKey || !question.trim()}
+        >
+          {askingAI ? "Thinking..." : "✨ Ask AI"}
+        </button>
+        {aiError && <p role="alert">❌ {aiError}</p>}
+        {aiAnswer && (
+          <div style={{ textAlign: "left", whiteSpace: "pre-wrap", marginTop: "1rem" }}>
+            <strong>AI answer:</strong>
+            <p>{aiAnswer}</p>
+          </div>
+        )}
       </div>
 
       <p className="read-the-docs">
