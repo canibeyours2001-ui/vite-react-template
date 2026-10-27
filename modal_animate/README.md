@@ -192,3 +192,19 @@ References:
 - https://github.com/Wan-Video/Wan2.2/blob/main/wan/modules/animate/preprocess/UserGuider.md
 - https://github.com/Wan-Video/Wan2.2/blob/main/requirements_animate.txt
 - https://modal.com/docs/guide/volumes
+
+
+### SAM2 build fix for CPU-only preprocessing smoke test
+
+If the previous image build failed with `OSError: CUDA_HOME environment variable is not set`, the `preprocess_smoke.py` build now uses the **official** SAM2 `SAM2_BUILD_CUDA=0` switch in the SAM2 package-install step. This disables its optional CUDA post-processing extension. Do not install CUDA or set a fake `CUDA_HOME` for this CPU-only test.
+
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+modal run preprocess_smoke.py
+```
+
+The new run has **not yet been verified** to pass all other preprocessing steps. If another error occurs, inspect the next first failure. This change does not start any GPU, alter model files, or redeploy the production endpoints.
+
+Official source: https://github.com/facebookresearch/sam2/blob/main/INSTALL.md
