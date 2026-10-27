@@ -150,6 +150,7 @@ type TelegramUpdate = {
     text?: string
     caption?: string
     photo?: TelegramPhoto[]
+    document?: { file_id: string; mime_type?: string; file_name?: string; file_size?: number }
     message_id: number
   }
 }
@@ -164,7 +165,7 @@ app.post('/telegram/webhook', async (c) => {
   catch { return c.text('Bad request', 400) }
 
   const msg = update.message
-  if (!msg || String(msg.chat.id) !== c.env.TELEGRAM_CHAT_ID || (!msg.text && !msg.caption && !msg.photo?.length)) {
+  if (!msg || String(msg.chat.id) !== c.env.TELEGRAM_CHAT_ID || (!msg.text && !msg.caption && !msg.photo?.length && !msg.document)) {
     return c.json({ ok: true })
   }
   const chatId = msg.chat.id
@@ -296,19 +297,54 @@ app.post('/telegram/webhook', async (c) => {
         }
         return
       }
+      // A photo and its command may be sent as separate Telegram updates.
+      // Hold the first component for up to ten minutes, then atomically claim the pair.
+      let videoText = text
+      let imageFileId = msg.photo?.at(-1)?.file_id || ''
+      let imageMime = 'image/jpeg'
+      let imageName = 'telegram-photo.jpg'
+      if (msg.document && /^image\/(jpeg|png|webp)$/.test(msg.document.mime_type || '')) {
+        imageFileId = msg.document.file_id
+        imageMime = msg.document.mime_type || 'image/jpeg'
+        imageName = (msg.document.file_name || 'upload.jpg').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 80)
+      }
+      const pendingPrompt = text.startsWith('/image2video ') && !imageFileId
+      const pendingImage = !!imageFileId && !text.startsWith('/image2video ')
+      if (pendingPrompt || pendingImage) {
+        await db.prepare("DELETE FROM wan_image_pending WHERE chat_id = ? AND created_at < unixepoch() - 600").bind(key).run()
+        if (pendingPrompt) {
+          await db.prepare(
+            "INSERT INTO wan_image_pending (chat_id, prompt, created_at) VALUES (?, ?, unixepoch()) ON CONFLICT(chat_id) DO UPDATE SET prompt = excluded.prompt, created_at = unixepoch()"
+          ).bind(key, text.slice('/image2video '.length).trim()).run()
+        } else {
+          await db.prepare(
+            "INSERT INTO wan_image_pending (chat_id, file_id, mime_type, filename, created_at) VALUES (?, ?, ?, ?, unixepoch()) ON CONFLICT(chat_id) DO UPDATE SET file_id = excluded.file_id, mime_type = excluded.mime_type, filename = excluded.filename, created_at = unixepoch()"
+          ).bind(key, imageFileId, imageMime, imageName).run()
+        }
+        const paired = await db.prepare(
+          "DELETE FROM wan_image_pending WHERE chat_id = ? AND prompt != '' AND file_id != '' RETURNING prompt, file_id, mime_type, filename"
+        ).bind(key).all<{ prompt: string; file_id: string; mime_type: string; filename: string }>()
+        const item = paired.results[0]
+        if (!item) {
+          await send(pendingPrompt
+            ? 'Motion prompt saved. Send your image now as a photo or image document (within 10 minutes).'
+            : 'Image received. Send /image2video followed by the motion prompt (within 10 minutes).')
+          return
+        }
+        videoText = '/image2video ' + item.prompt
+        imageFileId = item.file_id
+        imageMime = item.mime_type
+        imageName = item.filename
+      }
       if (text === '/image2video' || text === '/image2video_help') {
         await send('Attach a photo and set its caption to: /image2video A slow cinematic push-in, gentle wind moving the hair')
         return
       }
-      if (msg.photo?.length && !text.startsWith('/image2video ') && !text.startsWith('/video ')) {
-        await send('Photo received. To animate it, send the photo again with caption: /image2video your motion prompt')
-        return
-      }
-      if (text.startsWith('/video ') || text.startsWith('/image2video ')) {
-        const isImageCommand = text.startsWith('/image2video ')
-        const prompt = text.slice(isImageCommand ? '/image2video '.length : '/video '.length).trim()
+      if (videoText.startsWith('/video ') || videoText.startsWith('/image2video ')) {
+        const isImageCommand = videoText.startsWith('/image2video ')
+        const prompt = videoText.slice(isImageCommand ? '/image2video '.length : '/video '.length).trim()
         if (!prompt || prompt.length > 1500) { await send('Please provide a video prompt of 1–1500 characters.'); return }
-        if (isImageCommand && !msg.photo?.length) {
+        if (isImageCommand && !imageFileId) {
           await send('Image-to-video needs a photo. Attach a photo with the caption: /image2video ' + prompt)
           return
         }
@@ -338,14 +374,10 @@ app.post('/telegram/webhook', async (c) => {
           form.set('width', '1280')
           form.set('height', '704')
           form.set('seed', '-1')
-          if (msg.photo?.length) {
-            // Telegram compresses photos to JPEG. Select a suitable variant.
+          if (imageFileId) {
             const maximumImageBytes = 4 * 1024 * 1024
-            const candidates = [...msg.photo].filter(p => !p.file_size || p.file_size <= maximumImageBytes)
-            const photo = candidates.sort((a, b) => (a.file_size || 0) - (b.file_size || 0)).at(-1)
-            if (!photo) throw new Error('Photo exceeds the 4 MB image-upload limit')
             const infoResponse = await fetch(
-              'https://api.telegram.org/bot' + token + '/getFile?file_id=' + encodeURIComponent(photo.file_id),
+              'https://api.telegram.org/bot' + token + '/getFile?file_id=' + encodeURIComponent(imageFileId),
               { signal: AbortSignal.timeout(10000) }
             )
             if (!infoResponse.ok) throw new Error('Telegram image lookup failed')
@@ -367,7 +399,7 @@ app.post('/telegram/webhook', async (c) => {
             if (!imageBytes.byteLength || imageBytes.byteLength > maximumImageBytes) {
               throw new Error('Photo is empty or exceeds the 4 MB image-upload limit')
             }
-            form.set('image', new Blob([imageBytes], { type: 'image/jpeg' }), 'telegram-photo.jpg')
+            form.set('image', new Blob([imageBytes], { type: imageMime }), imageName)
           }
           const headers: Record<string,string> = {}
           if (c.env.MODAL_WAN_API_KEY) headers.Authorization = 'Bearer ' + c.env.MODAL_WAN_API_KEY
@@ -414,7 +446,7 @@ app.post('/telegram/webhook', async (c) => {
           if (!jobId) throw new Error('Missing job identifier')
           await db.prepare('UPDATE wan_video_jobs SET job_id = ?, status = ?, updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?')
             .bind(jobId,status,key,msg.message_id).run()
-          await send((msg.photo?.length ? 'Wan 2.2 image-to-video submitted.' : 'Wan 2.2 text-to-video submitted.') + '\nJob ID: ' + jobId + '\nUse /video_status to check progress.')
+          await send((isImageCommand ? 'Wan 2.2 image-to-video submitted.' : 'Wan 2.2 text-to-video submitted.') + '\nJob ID: ' + jobId + '\nUse /video_status to check progress.')
         } catch (error) {
           await db.prepare("UPDATE wan_video_jobs SET status = 'failed', updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?").bind(key,msg.message_id).run()
           console.error('Modal job request failed',error instanceof Error ? error.message : 'unknown')
