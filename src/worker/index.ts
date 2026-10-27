@@ -250,7 +250,35 @@ app.post('/telegram/webhook', async (c) => {
           const response = await fetch(base.toString().replace(/\/$/, '') + '/v1/generations', {
             method:'POST',headers,body:JSON.stringify({prompt}),signal:AbortSignal.timeout(20000)
           })
-          if (!response.ok) throw new Error('Modal HTTP ' + response.status)
+          if (!response.ok) {
+            if (response.status === 422) {
+              let description = 'Request parameters were rejected'
+              try {
+                const details: unknown = await response.json()
+                if (typeof details === 'object' && details !== null && 'detail' in details) {
+                  const errors = (details as { detail?: unknown }).detail
+                  if (Array.isArray(errors)) {
+                    const entries = errors.slice(0, 6).map((item: unknown) => {
+                      if (typeof item !== 'object' || item === null) return 'Invalid parameter'
+                      const entry = item as { loc?: unknown; msg?: unknown }
+                      const loc = Array.isArray(entry.loc)
+                        ? entry.loc.map(String).join('.')
+                        : 'request'
+                      const msg = typeof entry.msg === 'string' ? entry.msg : 'Invalid parameter'
+                      return loc.slice(0, 100) + ': ' + msg.slice(0, 180)
+                    })
+                    description = entries.join('; ') || description
+                  } else if (typeof errors === 'string') {
+                    description = errors.slice(0, 500)
+                  }
+                }
+              } catch {
+                // Avoid exposing upstream response bodies or credentials.
+              }
+              throw new Error('Modal HTTP 422: ' + description)
+            }
+            throw new Error('Modal HTTP ' + response.status)
+          }
           const data: unknown = await response.json()
           const obj = typeof data === 'object' && data !== null ? data as Record<string,unknown> : {}
           const jobId = typeof obj.id === 'string' ? obj.id : typeof obj.job_id === 'string' ? obj.job_id : ''
@@ -262,7 +290,11 @@ app.post('/telegram/webhook', async (c) => {
         } catch (error) {
           await db.prepare("UPDATE wan_video_jobs SET status = 'failed', updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?").bind(key,msg.message_id).run()
           console.error('Modal job request failed',error instanceof Error ? error.message : 'unknown')
-          await send('The video job could not be submitted. No successful job was confirmed.')
+          const reason = error instanceof Error ? error.message : 'Unknown error'
+          const safeReason = reason.startsWith('Modal HTTP ')
+            ? reason.slice(0, 900)
+            : 'A connection or response-format error occurred'
+          await send('Video job rejected. ' + safeReason + '\nNo successful job was confirmed.')
         }
         return
       }
