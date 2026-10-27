@@ -102,8 +102,16 @@ def check_gpu_image_cpu() -> dict:
         raise RuntimeError(
             "Official Wan generate.py cannot import on CPU; do NOT run paid GPU."
         )
-    if "--task" not in inspect.stdout or "--src_root_path" not in inspect.stdout:
-        raise RuntimeError("Unexpected Wan generate.py CLI; do NOT run paid GPU.")
+    required_flags = (
+        "--task",
+        "--src_root_path",
+        "--frame_num",
+        "--sample_steps",
+        "--offload_model",
+        "--convert_model_dtype",
+    )
+    if any(flag not in inspect.stdout for flag in required_flags):
+        raise RuntimeError("Unexpected Wan generate.py CLI flags; do NOT run paid GPU.")
     print(
         "Official Wan generate.py --help: OK "
         "(CPU dependency check with simulated CUDA device lookup)",
