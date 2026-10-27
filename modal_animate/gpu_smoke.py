@@ -33,7 +33,13 @@ gpu_image = (
     preprocess_image
     # Required by official wan/modules/vae2_1.py (not listed explicitly
     # in Wan2.2's requirements.txt). Missing it caused the first GPU failure.
-    .pip_install("einops==0.8.1")
+    .pip_install(
+        "einops==0.8.1",
+        # Upstream wan/__init__.py eagerly imports S2V, whose
+        # wan/modules/s2v/audio_encoder.py unconditionally imports librosa,
+        # even for animate-14B and the --help-only CPU preflight.
+        "librosa==0.11.0",
+    )
     .pip_install(FLASH_ATTN_WHEEL, extra_options="--no-deps")
     # Modal 1.x no longer automatically mounts imported sibling modules.
     # gpu_smoke.py imports preprocess_image from preprocess_smoke.py;
