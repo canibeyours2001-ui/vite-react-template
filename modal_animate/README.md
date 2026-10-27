@@ -196,7 +196,9 @@ References:
 
 ### SAM2 build fix for CPU-only preprocessing smoke test
 
-If the previous image build failed with `OSError: CUDA_HOME environment variable is not set`, the `preprocess_smoke.py` build now uses the **official** SAM2 `SAM2_BUILD_CUDA=0` switch in the SAM2 package-install step. This disables its optional CUDA post-processing extension. Do not install CUDA or set a fake `CUDA_HOME` for this CPU-only test.
+If the previous image build failed with `OSError: CUDA_HOME environment variable is not set`, the reason is that **Wan's officially pinned SAM2 commit** (`0e78a118995e66bb27d78518c4bd9a3e95b4e266`) has an older `setup.py` that **always** requests the CUDA extension and **does not** support the `SAM2_BUILD_CUDA=0` switch. (The switch only appears in newer SAM2 releases.)
+
+The `preprocess_smoke.py` image now fetches the **exact upstream Wan-pinned SAM2 revision**, verifies that its setup code contains the expected optional extension call, patches **only the build-time copy of `setup.py`** to omit `ext_modules`, then installs it editable with `--no-build-isolation` and checks its imports. The original SAM2 GitHub repository is unmodified. Do not install a CUDA toolkit or change the Oracle VPS CUDA settings for this CPU-only smoke test.
 
 ```bash
 cd "$HOME/wan22-animate-setup"
