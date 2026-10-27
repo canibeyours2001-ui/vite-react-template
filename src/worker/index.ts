@@ -14,6 +14,7 @@ type Bindings = {
   TELEGRAM_BOT_TOKEN: string
   TELEGRAM_CHAT_ID: string
   AI_ACCESS_KEY: string
+  TELEGRAM_WEBHOOK_SECRET: string
   AI: AIClient
 }
 
@@ -123,6 +124,57 @@ app.post('/api/ai', async (c) => {
       error: 'AI request failed. Check your Workers AI usage and try again.'
     }, 502)
   }
+})
+
+export default app
+
+type TelegramUpdate = {
+  message?: {
+    chat: { id: number }
+    text?: string
+    message_id: number
+  }
+}
+
+app.post('/telegram/webhook', async (c) => {
+  const configured = c.env.TELEGRAM_WEBHOOK_SECRET
+  if (!configured || c.req.header('X-Telegram-Bot-Api-Secret-Token') !== configured) {
+    return c.text('Unauthorized', 401)
+  }
+  let update: TelegramUpdate
+  try { update = await c.req.json<TelegramUpdate>() }
+  catch { return c.text('Bad request', 400) }
+
+  const msg = update.message
+  if (!msg || String(msg.chat.id) !== c.env.TELEGRAM_CHAT_ID || !msg.text) {
+    return c.json({ ok: true })
+  }
+  const chatId = msg.chat.id
+  const token = c.env.TELEGRAM_BOT_TOKEN
+  const text = msg.text.trim().slice(0, 2000)
+  if (!token || !c.env.AI) return c.json({ ok: false }, 503)
+
+  const processMessage = async () => {
+    try {
+      const answer = await c.env.AI.run('@cf/meta/llama-3.1-8b-instruct-fp8', {
+        messages: [
+          { role: 'system', content: 'You are a helpful AI Telegram assistant. Answer clearly and briefly. Reply in Burmese when the message is Burmese.' },
+          { role: 'user', content: text }
+        ],
+        max_tokens: 400
+      })
+      const reply = typeof answer.response === 'string' ? answer.response.slice(0, 3900) : 'No AI response was returned.'
+      await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: reply, reply_parameters: { message_id: msg.message_id } })
+      })
+    } catch (error) {
+      console.error('Telegram AI processing failed', error instanceof Error ? error.message : 'unknown')
+    }
+  }
+  c.executionCtx.waitUntil(processMessage())
+  return c.json({ ok: true })
 })
 
 export default app
