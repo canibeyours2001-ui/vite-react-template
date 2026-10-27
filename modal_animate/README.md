@@ -304,3 +304,27 @@ Sources:
 - https://github.com/Dao-AILab/flash-attention/releases/tag/v2.8.3.post2
 - https://modal.com/pricing
 - https://modal.com/docs/cli/latest/volume
+
+
+### Fix for `ModuleNotFoundError: No module named 'preprocess_smoke'` in GPU container
+
+The GPU image successfully installed the precompiled FlashAttention wheel, but the first A100 run failed **during container function loading**, before starting native Wan inference: Modal's version 1.x behavior does not automatically mount an imported sibling Python file. The script imported `preprocess_image` from `preprocess_smoke.py` without adding the imported module to the GPU image.
+
+The script now explicitly calls `.add_local_python_source("preprocess_smoke")` on the GPU image, following the official Modal documentation. It also runs `check_gpu_image_cpu` with the **same image**, checks that the module and FlashAttention can be imported, and verifies the saved model and preprocessing assets **without a GPU**.
+
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+
+# CPU-only; verifies the fixed container imports without paying for an A100:
+modal run gpu_smoke.py
+
+# Once the preflight reports cpu_preflight_passed: True,
+# explicitly authorize a new paid attempt:
+modal run gpu_smoke.py --execute
+```
+
+Do not repeat `modal run preprocess_smoke.py`: its successful output is already stored in `wan22-animate-test-results/upstream-demo/preprocessed`. If CPU preflight fails, share its first traceback; **do not** start another GPU test. The fix and preflight are committed in GitHub but have not yet been run on your Modal account. The earlier failed GPU import may already have incurred limited GPU startup charges.
+
+Reference: https://modal.com/docs/sdk/py/latest/Image#add_local_python_source
