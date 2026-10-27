@@ -70,8 +70,20 @@ def check_gpu_image_cpu() -> dict:
     # Run argparse --help on CPU: Wan and its core modules must import
     # successfully, but no weights are loaded and no CUDA device is needed.
     import subprocess
+    # Wan's upstream T5EncoderModel defines a constructor default of
+    # device=torch.cuda.current_device(). This executes at *import time*
+    # even for --help. On CPU preflight only, stub that default lookup
+    # in a disposable child process. The real paid GPU runner remains
+    # untouched and calls the unmodified native generate.py directly.
+    # This tests dependencies/CLI imports, NOT actual GPU inference.
+    cpu_help_probe = (
+        "import sys, runpy, torch; "
+        "torch.cuda.current_device = lambda: 0; "
+        "sys.argv = ['generate.py', '--help']; "
+        "runpy.run_path('generate.py', run_name='__main__')"
+    )
     inspect = subprocess.run(
-        ["python", "-u", "generate.py", "--help"],
+        ["python", "-u", "-c", cpu_help_probe],
         cwd="/opt/Wan2.2",
         text=True,
         capture_output=True,
@@ -86,7 +98,11 @@ def check_gpu_image_cpu() -> dict:
         )
     if "--task" not in inspect.stdout or "--src_root_path" not in inspect.stdout:
         raise RuntimeError("Unexpected Wan generate.py CLI; do NOT run paid GPU.")
-    print("Official Wan generate.py --help: OK (CPU import check)", flush=True)
+    print(
+        "Official Wan generate.py --help: OK "
+        "(CPU dependency check with simulated CUDA device lookup)",
+        flush=True,
+    )
 
     if not hasattr(module, "preprocess_image"):
         raise RuntimeError("Imported preprocessing module lacks its image definition")
@@ -110,6 +126,7 @@ def check_gpu_image_cpu() -> dict:
         "preprocessed_example_available": True,
         "model_files_available": True,
         "official_generate_cli_cpu_import": True,
+        "simulated_cuda_lookup_in_cpu_probe": True,
         "gpu_started": False,
     }
     print("GPU IMAGE CPU PREFLIGHT:", summary, flush=True)
