@@ -210,3 +210,31 @@ modal run preprocess_smoke.py
 The new run has **not yet been verified** to pass all other preprocessing steps. If another error occurs, inspect the next first failure. This change does not start any GPU, alter model files, or redeploy the production endpoints.
 
 Official source: https://github.com/facebookresearch/sam2/blob/main/INSTALL.md
+
+
+## Stage 6: Native Animate inference tokenizers (CPU, no GPU)
+
+The official `wan/configs/wan_animate_14B.py` points at two **local tokenizer directories**:
+
+- `google/umt5-xxl/`
+- `xlm-roberta-large/`
+
+The earlier core downloader intentionally fetched just the 10 large root files. The official `WanAnimate` constructor uses these additional directories before any generation; without them an expensive GPU container would hit a missing-tokenizer error.
+
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+modal run download_tokenizers.py
+modal run check_readiness.py
+```
+
+The downloader fetches just first-level JSON, text, vocabulary, and SentencePiece files from the official `Wan-AI/Wan2.2-Animate-14B` repository. It rejects any single file over 150 MB and total over 250 MB; it excludes redundant multi-gigabyte encoder weight formats and ONNX weight directories. It verifies that `transformers.AutoTokenizer.from_pretrained` can tokenize entirely offline from both local directories and commits the result to the existing `wan22-animate-models` Volume. **It does not start a GPU**. Download, CPU, memory and persisted storage may incur charges.
+
+The corrected readiness checker now checks both tokenizer directories before returning `readiness_check_passed: true`. An inference run still needs a separately prepared CUDA-capable image and a controlled GPU invocation. We have **not** tested GPU inference or created a Telegram video endpoint; the existing HTTP preflight remains unchanged.
+
+Official evidence:
+- https://github.com/Wan-Video/Wan2.2/blob/main/wan/configs/wan_animate_14B.py
+- https://github.com/Wan-Video/Wan2.2/blob/main/wan/animate.py
+- https://huggingface.co/Wan-AI/Wan2.2-Animate-14B/tree/main/google/umt5-xxl
+- https://huggingface.co/Wan-AI/Wan2.2-Animate-14B/tree/main/xlm-roberta-large
