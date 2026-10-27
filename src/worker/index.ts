@@ -182,6 +182,31 @@ app.post('/telegram/webhook', async (c) => {
       })
       if (!resp.ok) throw new Error('Telegram send failed')
     }
+    // Fetch an existing video only after Modal confirms its job succeeded.
+    // This does not start generation or invoke the GPU worker.
+    const sendCompletedVideo = async (jobId: string, headers: Record<string, string>, base: string): Promise<void> => {
+      if (!/^[a-f0-9]{32}$/.test(jobId)) throw new Error('Invalid video job ID')
+      const media = await fetch(base + '/v1/generations/' + jobId + '/video', {
+        headers,
+        signal: AbortSignal.timeout(30000)
+      })
+      if (!media.ok) throw new Error('Modal video HTTP ' + media.status)
+      const announcedSize = Number(media.headers.get('content-length') || 0)
+      const maxSize = 45 * 1024 * 1024 // Below Telegram Bot API upload limits.
+      if (announcedSize > maxSize) { await media.body?.cancel(); throw new Error('Video exceeds Telegram upload limit') }
+      const blob = await media.blob()
+      if (!blob.size || blob.size > maxSize) throw new Error('Video is empty or too large')
+      const form = new FormData()
+      form.set('chat_id', key)
+      form.set('caption', 'Wan 2.2 video completed.\nJob ID: ' + jobId)
+      form.set('video', blob, jobId + '.mp4')
+      const sent = await fetch('https://api.telegram.org/bot' + token + '/sendVideo', {
+        method: 'POST',
+        body: form,
+        signal: AbortSignal.timeout(30000)
+      })
+      if (!sent.ok) throw new Error('Telegram sendVideo HTTP ' + sent.status)
+    }
     try {
       if (text.toLowerCase() === '/forget' || text.toLowerCase() === '/reset') {
         await db.prepare('DELETE FROM messages WHERE chat_id = ?').bind(key).run()
@@ -194,7 +219,37 @@ app.post('/telegram/webhook', async (c) => {
       }
       // Video commands use a separate job table and do not enter AI chat memory.
       if (text === '/video' || text === '/video_help') {
-        await send('Video generation: /video your prompt\nCheck progress: /video_status\nExample: /video A cinematic sunset over a lake')
+        await send('Video generation: /video your prompt\nCheck progress and receive video: /video_status\nRetrieve existing video: /video_get JOB_ID\nExample: /video A cinematic sunset over a lake')
+        return
+      }
+      if (text.startsWith('/video_get ')) {
+        const jobId = text.slice('/video_get '.length).trim()
+        if (!/^[a-f0-9]{32}$/.test(jobId)) {
+          await send('Invalid video ID. Use /video_get followed by the 32-character Modal job ID.')
+          return
+        }
+        if (!c.env.MODAL_WAN_API_BASE || !c.env.MODAL_WAN_API_KEY) {
+          await send('Modal video API is not configured.')
+          return
+        }
+        const base = c.env.MODAL_WAN_API_BASE.replace(/\/$/, '')
+        const headers = { Authorization: 'Bearer ' + c.env.MODAL_WAN_API_KEY }
+        try {
+          const response = await fetch(base + '/v1/generations/' + jobId, {
+            headers, signal: AbortSignal.timeout(12000)
+          })
+          if (!response.ok) throw new Error('Modal status HTTP ' + response.status)
+          const data: unknown = await response.json()
+          const status = typeof data === 'object' && data !== null && 'status' in data ? String(data.status) : 'unknown'
+          if (status !== 'succeeded') {
+            await send('Video status: ' + status + '\nJob ID: ' + jobId)
+            return
+          }
+          await sendCompletedVideo(jobId, headers, base)
+        } catch (error) {
+          console.error('Modal video delivery failed', error instanceof Error ? error.message : 'unknown')
+          await send('Could not deliver that video. Confirm its Modal job succeeded and try again.')
+        }
         return
       }
       if (text === '/video_status') {
@@ -216,7 +271,17 @@ app.post('/telegram/webhook', async (c) => {
           const data: unknown = await response.json()
           const status = typeof data === 'object' && data !== null && 'status' in data ? String(data.status) : 'unknown'
           await db.prepare('UPDATE wan_video_jobs SET status = ?, updated_at = unixepoch() WHERE chat_id = ? AND job_id = ?').bind(status,key,latest.job_id).run()
-          await send('Video status: ' + status + '\nJob ID: ' + latest.job_id + '\n' + JSON.stringify(data).slice(0,2000))
+          if (status === 'succeeded') {
+            await send('Video status: succeeded. Delivering MP4 to this chat.')
+            try {
+              await sendCompletedVideo(latest.job_id, headers, base)
+            } catch (error) {
+              console.error('Modal video delivery failed', error instanceof Error ? error.message : 'unknown')
+              await send('Video succeeded, but Telegram delivery failed. Retry /video_status or use /video_get ' + latest.job_id)
+            }
+          } else {
+            await send('Video status: ' + status + '\nJob ID: ' + latest.job_id)
+          }
         } catch {
           await send('Could not retrieve Modal job status. Check your endpoint availability and API format.')
         }
