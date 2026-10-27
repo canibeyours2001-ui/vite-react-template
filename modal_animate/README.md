@@ -68,3 +68,24 @@ Official references:
 - https://github.com/Wan-Video/Wan2.2/blob/main/wan/modules/animate/preprocess/UserGuider.md
 - https://modal.com/docs/guide/webhooks
 - https://modal.com/docs/cli/latest/secret
+
+
+## Stage 2: Download the official preprocessing checkpoints to your Modal volume (CPU only)
+
+The Modal volume `wan22-animate-models` must already exist. To update your existing Oracle VPS clone and download only the official preprocessing assets, run:
+
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+modal run download_models.py
+modal volume ls wan22-animate-models /
+```
+
+This downloads approximately 4.17 GB from `Wan-AI/Wan2.2-Animate-14B/process_checkpoint` directly to Modal's persisted volume, where it is saved under `/Wan2.2-Animate-14B/process_checkpoint`. It does not need that disk space on the VPS. No GPU is configured; CPU and persistent storage may still incur Modal charges. The script commits the Volume after validating that the `det`, `pose2d`, and `sam2` folders have files.
+
+This is **not** the full model or a working GPU pipeline. The official model weights (~72.4 GB total repository) and official inference dependencies need another validated stage before enabling /motion generation. Do not deploy or overwrite your existing Wan TI2V service.
+
+Sources:
+- https://huggingface.co/Wan-AI/Wan2.2-Animate-14B/tree/main/process_checkpoint
+- https://modal.com/docs/guide/volumes
