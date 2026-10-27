@@ -66,6 +66,24 @@ def verify_assets() -> dict:
             "ViTPose target is a DIRECTORY, not an ONNX file. "
             "Run: modal run repair_vitpose.py"
         )
+    # Native WanAnimateModel reads these local Hugging Face tokenizer
+    # directories as part of T5 and CLIP initialization. The initial
+    # 10-file core download did not include them.
+    tokenizer_files = {}
+    for directory in ("google/umt5-xxl", "xlm-roberta-large"):
+        folder = ROOT / directory
+        has_config = (folder / "tokenizer_config.json").is_file()
+        has_vocab = (
+            (folder / "tokenizer.json").is_file()
+            or any(folder.glob("*.model"))
+        ) if folder.is_dir() else False
+        tokenizer_files[directory] = bool(has_config and has_vocab)
+        if not tokenizer_files[directory]:
+            missing.append(
+                "missing tokenizer: " + directory
+                + " (run: modal run download_tokenizers.py)"
+            )
+
     optional = {name: (ROOT / name).is_file() for name in PREPROCESS_OPTIONAL_FOR_ANIMATION}
 
     # Validate the root diffusion weight index, including its shard references.
@@ -91,6 +109,7 @@ def verify_assets() -> dict:
         "core_size_gb": round(core_bytes / 1e9, 2),
         "diffusion_shards_indexed": len(index_shards),
         "optional_checkpoint_present": optional,
+        "tokenizer_files_present": tokenizer_files,
         "vitpose_onnx_is_file": pose_target.is_file(),
         "vitpose_external_data_is_file": (ROOT / "process_checkpoint/pose2d/vitpose_h_wholebody_data.bin").is_file(),
         "gpu_started": False,
