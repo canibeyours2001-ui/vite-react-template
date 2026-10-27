@@ -81,7 +81,7 @@ def check_gpu_image_cpu() -> dict:
         "cpu_preflight_passed": True,
         "sibling_import": "preprocess_smoke",
         "flash_attention_import": "OK",
-        "torch_version": torch.__version__,
+        "torch_version": str(torch.__version__),  # cast TorchVersion to built-in str for Modal client deserialization
         "preprocessed_example_available": True,
         "model_files_available": True,
         "gpu_started": False,
