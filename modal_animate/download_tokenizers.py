@@ -14,7 +14,9 @@ import modal
 app = modal.App("wan22-animate-tokenizer-download")
 volume = modal.Volume.from_name("wan22-animate-models", create_if_missing=False)
 image = modal.Image.debian_slim(python_version="3.11").pip_install(
-    "huggingface_hub>=1.0,<2",
+    # transformers==4.51.3 requires huggingface-hub>=0.30.0,<1.0.
+    # Keep both in the same compatible range to avoid pip ResolutionImpossible.
+    "huggingface_hub>=0.34,<1.0",
     "hf_xet>=1.0,<2",
     "transformers==4.51.3",
     "sentencepiece>=0.2,<1",
