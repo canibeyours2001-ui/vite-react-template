@@ -50,6 +50,8 @@ gpu_image = (
 ROOT = Path("/models/Wan2.2-Animate-14B")
 PREPARED = Path("/results/upstream-demo/preprocessed")
 OUT_DIR = Path("/results/upstream-demo/generated")
+LONG_PREPARED = Path("/results/upstream-demo-long/preprocessed")
+LONG_OUT_DIR = Path("/results/upstream-demo-long/generated")
 
 
 @app.function(
@@ -64,7 +66,7 @@ OUT_DIR = Path("/results/upstream-demo/generated")
     min_containers=0,
     max_containers=1,
 )
-def check_gpu_image_cpu() -> dict:
+def check_gpu_image_cpu(long: bool = False) -> dict:
     """Import the real GPU image and validate inputs, without allocating a GPU."""
     import importlib
     import torch
@@ -126,8 +128,22 @@ def check_gpu_image_cpu() -> dict:
         ROOT / "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
         ROOT / "Wan2.1_VAE.pth",
     ]
+    prepared = LONG_PREPARED if long else PREPARED
     for filename in ("src_ref.png", "src_pose.mp4", "src_face.mp4"):
-        needed.append(PREPARED / filename)
+        needed.append(prepared / filename)
+    if long:
+        import json
+        manifest_path = prepared / "manifest.json"
+        if not manifest_path.is_file():
+            raise RuntimeError(
+                "No 5-second inputs. First run: modal run preprocess_long.py"
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("fps") != 30 or manifest.get("frames") != 150:
+            raise RuntimeError(
+                "Long preprocessing must be exactly 150 frames at 30 FPS"
+            )
+
     for filename in needed:
         if not filename.is_file() or filename.stat().st_size == 0:
             raise RuntimeError("Missing preflight input: " + str(filename))
@@ -138,6 +154,7 @@ def check_gpu_image_cpu() -> dict:
         "flash_attention_import": "OK",
         "torch_version": str(torch.__version__),  # cast TorchVersion to built-in str for Modal client deserialization
         "preprocessed_example_available": True,
+        "long_motion_checked": long,
         "model_files_available": True,
         "official_generate_cli_cpu_import": True,
         "simulated_cuda_lookup_in_cpu_probe": True,
@@ -161,7 +178,7 @@ def check_gpu_image_cpu() -> dict:
     max_containers=1,
     scaledown_window=15,
 )
-def generate_short_preview(steps: int = 20) -> dict:
+def generate_short_preview(steps: int = 20, long: bool = False) -> dict:
     import subprocess
     import time
     import os
@@ -197,23 +214,36 @@ def generate_short_preview(steps: int = 20) -> dict:
     if not (ROOT / "xlm-roberta-large/tokenizer.json").is_file():
         raise RuntimeError("XLM-R tokenizer is missing")
 
+    prepared = LONG_PREPARED if long else PREPARED
+    output_dir = LONG_OUT_DIR if long else OUT_DIR
+    frame_num = 77 if long else 17
+
+    if long:
+        import json
+        manifest_path = prepared / "manifest.json"
+        if not manifest_path.is_file():
+            raise RuntimeError("Run modal run preprocess_long.py first")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("fps") != 30 or manifest.get("frames") != 150:
+            raise RuntimeError("Long assets are not 5 seconds at 30 FPS")
+
     for name in ("src_ref.png", "src_pose.mp4", "src_face.mp4"):
-        p = PREPARED / name
+        p = prepared / name
         if not p.is_file() or p.stat().st_size < 100:
             raise RuntimeError(
                 "Persisted preprocessed input missing: " + name
                 + ". First run: modal run preprocess_smoke.py"
             )
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    video_path = OUT_DIR / ("preview-" + uuid4().hex[:12] + ".mp4")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    video_path = output_dir / ("preview-" + uuid4().hex[:12] + ".mp4")
     command = [
         "python", "-u", "generate.py",
         "--task", "animate-14B",
         "--ckpt_dir", str(ROOT),
-        "--src_root_path", str(PREPARED),
+        "--src_root_path", str(prepared),
         "--refert_num", "1",
-        "--frame_num", "17",             # 4n+1, one short segment.
+        "--frame_num", str(frame_num),  # 17 short or 77 long (two segments).
         "--sample_steps", str(steps),    # 20 is official Wan Animate baseline
         "--sample_guide_scale", "1",
         # On a single A100 80GB, avoid the ~11 GB T5-XXL CPU bottleneck.
@@ -289,7 +319,10 @@ def generate_short_preview(steps: int = 20) -> dict:
         "elapsed_seconds": round(time.monotonic() - started, 1),
         "gpu": torch.cuda.get_device_name(0),
         "sampling_steps": steps,
-        "frame_num": 17,
+        "frame_num": frame_num,
+        "input_frames": 150 if long else 12,
+        "expected_duration_seconds": 5.0 if long else 0.4,
+        "input_set": "long_5_seconds" if long else "short_preview",
         "t5_on_gpu": True,
         "convert_model_dtype": True,
         "mode": "animation_only",
@@ -300,22 +333,24 @@ def generate_short_preview(steps: int = 20) -> dict:
 
 
 @app.local_entrypoint()
-def main(execute: bool = False, steps: int = 20):
+def main(execute: bool = False, steps: int = 20, long: bool = False):
     if steps not in (4, 10, 20):
         raise ValueError("Choose --steps 4, --steps 10, or --steps 20.")
 
     print("Checking the GPU image, sibling module imports and persisted inputs")
     print("using CPU only; no GPU is allocated for this preflight.")
-    check_gpu_image_cpu.remote()
+    print("Selected input:", "5 seconds at 30 FPS" if long else "short diagnostic")
+    check_gpu_image_cpu.remote(long)
 
     if not execute:
         print("CPU preflight passed. No GPU has been requested.")
         print("To authorize a PAID, bounded A100 GPU test, explicitly run:")
-        print("  modal run gpu_smoke.py --execute --steps 20")
+        print("  modal run gpu_smoke.py --execute --steps 20" + (" --long" if long else ""))
         return
 
     print("Explicit --execute received; starting one A100-80GB GPU test.")
     print("Sampling steps:", steps)
+    print("Expected output duration:", "5 seconds" if long else "0.4 seconds")
     print("Maximum GPU function runtime: 720 seconds (12 minutes).")
-    result = generate_short_preview.remote(steps)
+    result = generate_short_preview.remote(steps, long)
     print("RESULT:", result)
