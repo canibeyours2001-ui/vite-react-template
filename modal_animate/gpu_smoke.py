@@ -29,13 +29,65 @@ FLASH_ATTN_WHEEL = (
     "cp311-cp311-linux_x86_64.whl"
 )
 
-gpu_image = preprocess_image.pip_install(
-    FLASH_ATTN_WHEEL, extra_options="--no-deps"
+gpu_image = (
+    preprocess_image
+    .pip_install(FLASH_ATTN_WHEEL, extra_options="--no-deps")
+    # Modal 1.x no longer automatically mounts imported sibling modules.
+    # gpu_smoke.py imports preprocess_image from preprocess_smoke.py;
+    # the latter must exist when the remote function is hydrated.
+    .add_local_python_source("preprocess_smoke")
 )
 
 ROOT = Path("/models/Wan2.2-Animate-14B")
 PREPARED = Path("/results/upstream-demo/preprocessed")
 OUT_DIR = Path("/results/upstream-demo/generated")
+
+
+@app.function(
+    image=gpu_image,
+    cpu=2,
+    memory=4096,
+    volumes={
+        "/models": weights.with_mount_options(read_only=True),
+        "/results": results.with_mount_options(read_only=True),
+    },
+    timeout=180,
+    min_containers=0,
+    max_containers=1,
+)
+def check_gpu_image_cpu() -> dict:
+    """Import the real GPU image and validate inputs, without allocating a GPU."""
+    import importlib
+    import torch
+
+    module = importlib.import_module("preprocess_smoke")
+    from flash_attn import flash_attn_func
+
+    if not hasattr(module, "preprocess_image"):
+        raise RuntimeError("Imported preprocessing module lacks its image definition")
+    needed = [
+        ROOT / "config.json",
+        ROOT / "models_t5_umt5-xxl-enc-bf16.pth",
+        ROOT / "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+        ROOT / "Wan2.1_VAE.pth",
+    ]
+    for filename in ("src_ref.png", "src_pose.mp4", "src_face.mp4"):
+        needed.append(PREPARED / filename)
+    for filename in needed:
+        if not filename.is_file() or filename.stat().st_size == 0:
+            raise RuntimeError("Missing preflight input: " + str(filename))
+
+    summary = {
+        "cpu_preflight_passed": True,
+        "sibling_import": "preprocess_smoke",
+        "flash_attention_import": "OK",
+        "torch_version": torch.__version__,
+        "preprocessed_example_available": True,
+        "model_files_available": True,
+        "gpu_started": False,
+    }
+    print("GPU IMAGE CPU PREFLIGHT:", summary, flush=True)
+    return summary
 
 
 @app.function(
@@ -138,13 +190,16 @@ def generate_short_preview() -> dict:
 
 @app.local_entrypoint()
 def main(execute: bool = False):
+    print("Checking the GPU image, sibling module imports and persisted inputs")
+    print("using CPU only; no GPU is allocated for this preflight.")
+    check_gpu_image_cpu.remote()
+
     if not execute:
-        print("Safety stop: no GPU has been requested.")
-        print("First prepare persistent sample inputs:")
-        print("  modal run preprocess_smoke.py")
-        print("To authorize a PAID, bounded GPU test, explicitly run:")
+        print("CPU preflight passed. No GPU has been requested.")
+        print("To authorize a PAID, bounded A100 GPU test, explicitly run:")
         print("  modal run gpu_smoke.py --execute")
         return
+
     print("Explicit --execute received; starting one A100-80GB GPU test.")
     print("Maximum GPU function runtime: 1200 seconds (20 minutes).")
     result = generate_short_preview.remote()
