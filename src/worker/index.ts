@@ -194,7 +194,7 @@ app.post('/telegram/webhook', async (c) => {
       }
       // Video commands use a separate job table and do not enter AI chat memory.
       if (text === '/video' || text === '/video_help') {
-        await send('Video generation: /video your prompt\\nCheck progress: /video_status\\nExample: /video A cinematic sunset over a lake')
+        await send('Video generation: /video your prompt\nCheck progress: /video_status\nExample: /video A cinematic sunset over a lake')
         return
       }
       if (text === '/video_status') {
@@ -216,7 +216,7 @@ app.post('/telegram/webhook', async (c) => {
           const data: unknown = await response.json()
           const status = typeof data === 'object' && data !== null && 'status' in data ? String(data.status) : 'unknown'
           await db.prepare('UPDATE wan_video_jobs SET status = ?, updated_at = unixepoch() WHERE chat_id = ? AND job_id = ?').bind(status,key,latest.job_id).run()
-          await send('Video status: ' + status + '\\nJob ID: ' + latest.job_id + '\\n' + JSON.stringify(data).slice(0,2000))
+          await send('Video status: ' + status + '\nJob ID: ' + latest.job_id + '\n' + JSON.stringify(data).slice(0,2000))
         } catch {
           await send('Could not retrieve Modal job status. Check your endpoint availability and API format.')
         }
@@ -296,7 +296,7 @@ app.post('/telegram/webhook', async (c) => {
           if (!jobId) throw new Error('Missing job identifier')
           await db.prepare('UPDATE wan_video_jobs SET job_id = ?, status = ?, updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?')
             .bind(jobId,status,key,msg.message_id).run()
-          await send('Wan 2.2 video submitted.\\nJob ID: ' + jobId + '\\nUse /video_status to check progress.')
+          await send('Wan 2.2 video submitted.\nJob ID: ' + jobId + '\nUse /video_status to check progress.')
         } catch (error) {
           await db.prepare("UPDATE wan_video_jobs SET status = 'failed', updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?").bind(key,msg.message_id).run()
           console.error('Modal job request failed',error instanceof Error ? error.message : 'unknown')
