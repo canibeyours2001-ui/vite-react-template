@@ -168,3 +168,27 @@ Sources:
 - Official Hugging Face ONNX-named directory: https://huggingface.co/Wan-AI/Wan2.2-Animate-14B/tree/main/process_checkpoint/pose2d
 - Community-documented compatible ViTPose ONNX + external data: https://github.com/kijai/ComfyUI-WanAnimatePreprocess/blob/main/readme.md
 - Export files: https://huggingface.co/Kijai/vitpose_comfy/tree/main/onnx
+
+
+## Stage 5: Validate the **official** animation preprocessing runtime (CPU-only demo)
+
+Once `check_readiness.py` reports **true**, run a smoke test with the sample `examples/wan_animate/animate/image.jpeg` and `video.mp4` from the official `Wan-Video/Wan2.2` repository. This trial tests the actual upstream `preprocess_data.py` rather than only checking that checkpoint files are present.
+
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+modal run preprocess_smoke.py
+```
+
+The image build installs PyTorch, the official SAM2 revision, ONNX Runtime, decord, Diffusers with Flux-Kontext import support, and the preprocessing dependencies; it clones the **official** upstream Wan2.2 source. It may download several GB of dependency packages for the Docker image and incur Modal CPU/memory charges, but it **does not request any GPU**, start an Animate inference job, download model weights again, or modify the checkpoint volume. The checkpoint is mounted read-only.
+
+The script extracts a short 1.5 s, 12 fps segment of the official driving video, invokes the upstream preprocessing command without FLUX or retargeting, and checks for generated `src_ref.png`, `src_face.mp4` and `src_pose.mp4`. These demo outputs live in the temporary function container; do not expect a persisted MP4 yet.
+
+**Caveat:** Wan's pose detection implementation defaults to the CUDA provider, though ONNX Runtime may fall back to the CPU provider. We have not verified actual CPU preprocessing compatibility; if the smoke test fails, share the first meaningful error and inspect the runtime rather than downloading anything again. An A100/H100 GPU is **not** enabled by this module. The later full GPU inference implementation still requires a separate proof of compatibility and an explicitly controlled small test.
+
+References:
+- https://github.com/Wan-Video/Wan2.2/blob/main/README.md
+- https://github.com/Wan-Video/Wan2.2/blob/main/wan/modules/animate/preprocess/UserGuider.md
+- https://github.com/Wan-Video/Wan2.2/blob/main/requirements_animate.txt
+- https://modal.com/docs/guide/volumes
