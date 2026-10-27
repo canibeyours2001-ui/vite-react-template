@@ -72,7 +72,13 @@ def verify_assets() -> dict:
     tokenizer_files = {}
     for directory in ("google/umt5-xxl", "xlm-roberta-large"):
         folder = ROOT / directory
-        has_config = (folder / "tokenizer_config.json").is_file()
+        # UMT5 provides tokenizer_config.json, while Wan's XLM-R
+        # repository supplies config.json and sentencepiece.bpe.model
+        # without tokenizer_config.json. Both are valid local layouts.
+        has_config = (
+            (folder / "tokenizer_config.json").is_file()
+            or (folder / "config.json").is_file()
+        )
         has_vocab = (
             (folder / "tokenizer.json").is_file()
             or any(folder.glob("*.model"))
