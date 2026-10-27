@@ -48,8 +48,12 @@ preprocess_image = (
         "scipy",
         "pillow",
     )
+    # SAM2's optional CUDA post-processing extension requires nvcc/CUDA_HOME.
+    # This preprocessor smoke-test image is CPU-only, so use SAM2's official
+    # SAM2_BUILD_CUDA=0 build switch rather than adding a CUDA toolkit.
     .pip_install(
-        "git+https://github.com/facebookresearch/sam2.git@0e78a118995e66bb27d78518c4bd9a3e95b4e266"
+        "git+https://github.com/facebookresearch/sam2.git@0e78a118995e66bb27d78518c4bd9a3e95b4e266",
+        env={"SAM2_BUILD_CUDA": "0"},
     )
     .run_commands("git clone --depth 1 https://github.com/Wan-Video/Wan2.2.git /opt/Wan2.2")
 )
