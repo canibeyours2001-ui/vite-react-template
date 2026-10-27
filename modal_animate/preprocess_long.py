@@ -1,4 +1,4 @@
-"""Prepare five seconds of official Wan2.2 Animate demo motion at 30 FPS.
+"""Prepare three seconds of official Wan2.2 Animate demo motion at 30 FPS.
 
 CPU-only. Uses the already-proven Wan preprocessing environment and checkpoint
 volume; does not overwrite the short demo. The A100 is NOT started here.
@@ -20,9 +20,9 @@ result_volume = modal.Volume.from_name("wan22-animate-test-results", create_if_m
 image = preprocess_image.add_local_python_source("preprocess_smoke")
 MODEL = Path("/models/Wan2.2-Animate-14B")
 PREPARED = Path("/results/upstream-demo-long/preprocessed")
-DURATION = 5.0
+DURATION = 3.0
 FPS = 30
-EXPECTED_FRAMES = 150
+EXPECTED_FRAMES = 90
 
 
 def check_run(argv: list[str], cwd: str | None = None, timeout: int = 800) -> None:
@@ -77,13 +77,13 @@ def prepare_long_motion() -> dict:
     print("Official demo source duration (seconds):", source_duration, flush=True)
     if source_duration + 0.03 < DURATION:
         raise RuntimeError(
-            f"Official sample is only {source_duration:.2f}s, shorter than 5s. "
+            f"Official sample is only {source_duration:.2f}s, shorter than 3s. "
             "No repetitive looping was applied; choose a longer driving video."
         )
 
     work = Path("/tmp/animate-long-preprocess")
     work.mkdir(parents=True, exist_ok=True)
-    normalized = work / "drive_5s_30fps.mp4"
+    normalized = work / "drive_3s_30fps.mp4"
     processed = work / "processed"
     processed.mkdir(exist_ok=True)
 
@@ -100,7 +100,7 @@ def prepare_long_motion() -> dict:
             f"Expected {EXPECTED_FRAMES} normalized frames, got {num_input_frames}; "
             "aborting before paid GPU."
         )
-    print("Normalized driving video: 5 seconds, 30 FPS, 150 frames", flush=True)
+    print("Normalized driving video: 3 seconds, 30 FPS, 90 frames", flush=True)
 
     check_run([
         "python", "-u", "wan/modules/animate/preprocess/preprocess_data.py",
@@ -122,7 +122,7 @@ def prepare_long_motion() -> dict:
         if name.endswith(".mp4"):
             info["frames"] = video_frames(f)
             if info["frames"] != EXPECTED_FRAMES:
-                raise RuntimeError(f"{name} has {info['frames']} frames, expected 150.")
+                raise RuntimeError(f"{name} has {info['frames']} frames, expected 90.")
         output_info[name] = info
 
     PREPARED.mkdir(parents=True, exist_ok=True)
@@ -156,7 +156,7 @@ def prepare_long_motion() -> dict:
 
 @app.local_entrypoint()
 def main():
-    print("CPU-only 5-second/30-FPS preprocessing; no A100 will start.", flush=True)
+    print("CPU-only 3-second/30-FPS preprocessing; no A100 will start.", flush=True)
     print("Uses an independent results path; short demo and model weights untouched.")
     result = prepare_long_motion.remote()
     print("RESULT:", result)
