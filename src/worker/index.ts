@@ -248,7 +248,7 @@ app.post('/telegram/webhook', async (c) => {
           const headers: Record<string,string> = {'content-type':'application/json'}
           if (c.env.MODAL_WAN_API_KEY) headers.Authorization = 'Bearer ' + c.env.MODAL_WAN_API_KEY
           const response = await fetch(base.toString().replace(/\/$/, '') + '/v1/generations', {
-            method:'POST',headers,body:JSON.stringify({prompt}),signal:AbortSignal.timeout(20000)
+            method:'POST',headers,body:JSON.stringify({prompt, width: 1280, height: 704, seed: -1}),signal:AbortSignal.timeout(20000)
           })
           if (!response.ok) {
             if (response.status === 422) {
