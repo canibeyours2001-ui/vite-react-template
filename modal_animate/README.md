@@ -411,3 +411,34 @@ At an illustrative A100 GPU list rate of about $2.50/hour, 12 minutes of GPU alo
 Official Wan references:
 - https://github.com/Wan-Video/Wan2.2/blob/main/wan/animate.py
 - https://github.com/Wan-Video/Wan2.2
+
+
+### Cheapest quality improvement after the first successful Animate-14B preview
+
+The first end-to-end video was **only a 4-step diagnostic** with **12 frames of 640x360 conditioning video**, generated in ~120.8 sec on A100 80 GB and saved in `wan22-animate-test-results`. The upstream `WanAnimate` configuration uses **20 steps** for its base model, and increasing steps improves quality at additional render time (no distillation/acceleration LoRA is installed). The sample source was preprocessed at **12 FPS**, whereas the native `wan_animate_14B.py` output FPS is **30**; the final generator trims to the number of input frames. Therefore, the clip is very short and may play back faster than the original source. Higher denoising steps alone do not change the source resolution or that FPS mismatch.
+
+`gpu_smoke.py` now accepts `--steps` with values **4, 10, or 20**, default **20**, without modifying the checkpoint volume:
+
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+
+# CPU-only dependency and checkpoint preflight, no A100:
+modal run gpu_smoke.py
+
+# Optional paid quality test with the official 20-step baseline:
+modal run gpu_smoke.py --execute --steps 20
+
+# Optional slightly cheaper compromise when cost is paramount:
+modal run gpu_smoke.py --execute --steps 10
+```
+
+The `--execute` guard remains mandatory for paid GPU generation, with 11-minute subprocess and 12-minute function caps. The previously used `--convert_model_dtype`, GPU T5 inference and CPU offloading remain the same.
+
+**Before paying for longer video or 480p+ testing**, compare the same inputs/seed at 20 steps. Better spatial detail requires changing preprocessing resolution (currently 640x360), re-preprocessing only the small example input (not the 51 GB weights), and a new controlled test. For natural-speed output, align preprocessing source FPS with Wan's configured 30 FPS or adjust the export playback rate; simply raising sampling steps will not fix a fast-playback issue.
+
+The price estimate (~$0.12–$0.20 for the *short* 20-step test) is an extrapolation from the observed 120.8-second 4-step test plus Modal's GPU+CPU+RAM published rates, NOT a verified benchmark. H100 costs more per GPU-second; L40S has less VRAM and has not been proven with this 51 GB native model. Sources:
+- https://github.com/Wan-Video/Wan2.2/blob/main/wan/configs/wan_animate_14B.py
+- https://github.com/Wan-Video/Wan2.2/blob/main/wan/animate.py
+- https://modal.com/pricing
