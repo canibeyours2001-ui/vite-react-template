@@ -31,7 +31,7 @@ preprocess_image = (
         "numpy>=1.23.5,<2",
         "opencv-python-headless>=4.9,<5",
         "onnxruntime==1.22.1",
-        "diffusers==0.33.1",
+        "diffusers==0.35.1",
         "transformers==4.51.3",
         "accelerate>=1.1.1",
         "decord==0.6.0",
