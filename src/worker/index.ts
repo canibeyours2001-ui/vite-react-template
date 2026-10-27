@@ -251,7 +251,7 @@ app.post('/telegram/webhook', async (c) => {
         if (!c.env.MODAL_MOTION_API_KEY) throw new Error('Animate-14B secret is missing')
         return { base: url.origin, headers: { Authorization: 'Bearer ' + c.env.MODAL_MOTION_API_KEY } }
       }
-      const readTelegramFile = async (fileId: string, maximum: number): Promise<Uint8Array> => {
+      const readTelegramFile = async (fileId: string, maximum: number): Promise<ArrayBuffer> => {
         const infoResponse = await fetch(
           'https://api.telegram.org/bot' + token + '/getFile?file_id=' + encodeURIComponent(fileId),
           { signal: AbortSignal.timeout(12000) }
@@ -268,8 +268,8 @@ app.post('/telegram/webhook', async (c) => {
         const media = await fetch('https://api.telegram.org/file/bot' + token + '/' + filePath,
           { signal: AbortSignal.timeout(30000) })
         if (!media.ok) throw new Error('Telegram media download failed')
-        const data = new Uint8Array(await media.arrayBuffer())
-        if (!data.length || data.length > maximum) throw new Error('Uploaded media is empty or too large')
+        const data = await media.arrayBuffer()
+        if (!data.byteLength || data.byteLength > maximum) throw new Error('Uploaded media is empty or too large')
         return data
       }
       if (text === '/motion_help' || (text === '/motion' && !msg.video && !msg.document)) {
