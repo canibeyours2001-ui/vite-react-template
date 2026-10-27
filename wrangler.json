@@ -23,5 +23,8 @@
       "database_name": "hono-telegram-memory",
       "database_id": "6ce17b28-cdcb-4e89-a011-1748e736e43c"
     }
-  ]
+  ],
+  "vars": {
+    "MODAL_WAN_API_BASE": "https://canibeyours2001-ui--wan22-ti2v-5b-web-api.modal.run"
+  }
 }
