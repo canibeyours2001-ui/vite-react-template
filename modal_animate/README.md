@@ -444,11 +444,11 @@ The price estimate (~$0.12–$0.20 for the *short* 20-step test) is an extrapola
 - https://modal.com/pricing
 
 
-## Stage 8 — Real five-second motion-transfer diagnostic at 30 FPS
+## Stage 8 — 3-second Animate preview with real-time 30 FPS (corrected to fit official sample)
 
-The earlier proof-of-concept videos are too brief for meaningful quality evaluation: the short preprocessor extracted 12 frames at 12 FPS, but Wan's output is 30 FPS, yielding only `12/30 = 0.4` seconds at normal playback speed. Sampling 20 denoising steps improves quality but cannot increase playback duration.
+The initial 5-second preprocessing plan could not succeed: the *official* demo driving video is only **3.537 seconds**, as confirmed by the Modal preprocessing log. This is an input-length guard working correctly, not a checkpoint failure. **Do not loop, freeze or synthetically repeat the sample** just to force five seconds.
 
-A new **isolated CPU-only** `preprocess_long.py` extracts **5 seconds × 30 FPS = 150 source frames** from the same official Wan animation example and runs the already-proven pose/face preprocessing with the same saved checkpoints. It stores outputs in the separate `wan22-animate-test-results` Volume under `/upstream-demo-long/preprocessed`, leaving the short sample untouched. It verifies the official source is at least 5 seconds; if not, it fails **before allocating any GPU** rather than artificially looping the reference.
+The updated `preprocess_long.py` cuts **3.0 seconds at 30 FPS = 90 distinct source frames**, invokes the already-working official pose/face preprocessor, verifies both output videos contain 90 frames, and persists inputs at `wan22-animate-test-results:/upstream-demo-long/preprocessed`. The process uses CPU only and keeps the 51.19 GB model weights read-only.
 
 ```bash
 cd "$HOME/wan22-animate-setup"
@@ -458,26 +458,26 @@ modal run preprocess_long.py
 modal volume ls wan22-animate-test-results /upstream-demo-long/preprocessed
 ```
 
-Expected: `preprocessing_passed: True`, `frames: 150`, `fps: 30`, `gpu_started: False`; folder includes `src_ref.png`, `src_pose.mp4`, `src_face.mp4`, and `manifest.json`. This step uses CPU and storage only (potential compute charges), and no re-download of core model weights.
-
-Then run a **separate no-GPU** image/input check using the `--long` selector:
+Look for `preprocessing_passed: True`, `frames: 90`, `fps: 30`, `gpu_started: False`. Then validate the saved assets and GPU imports *without buying A100 time*:
 
 ```bash
 modal run gpu_smoke.py --long
 ```
 
-Only when it reports `cpu_preflight_passed: True` and `long_motion_checked: True` should you **choose** to authorize the paid run:
+Look for `cpu_preflight_passed: True` and `long_motion_checked: True`. Only after both pass, deliberately authorize **one** paid GPU run:
 
 ```bash
 modal run gpu_smoke.py --execute --steps 20 --long
 ```
 
-This uses the already-proven A100 80 GB image with T5 GPU encoding, `--convert_model_dtype`, `--offload_model True`, and upstream `generate.py --task animate-14B`. The long preset selects `--frame_num 77` (two segments for 150 input frames, resulting in **about 5 seconds at Wan's 30 FPS output**) and saves the MP4 under `/upstream-demo-long/generated/` (rather than overwriting prior 0.4-second previews). The GPU function has the unchanged 12-minute hard timeout / 11-minute subprocess timeout. This 150-frame configuration is **not yet performance-tested**, so cost and completion are not guaranteed. At Modal's published A100 80 GB rate $0.000694/sec, the function's 12-minute GPU component is approximately $0.50 at the cap, **plus CPU and memory charges**.
+The GPU runner uses **77 frames per Wan clip** with one-frame overlap, two denoising segments for 90 input frames, `--convert_model_dtype`, GPU T5 encoding and `--offload_model True`. It trims the generated sequence to the 90 real input frames, yielding an expected **3-second MP4** at Wan's 30 FPS (actual output must be verified).
 
-For the completed MP4:
+It retains the 11-minute subprocess timeout and 12-minute Modal hard timeout. At about $2.50/hour for the GPU component, a full 12-minute A100 container runtime is about $0.50 for GPU alone, excluding CPU/RAM and any additional applicable charges. The actual multi-segment generation time has **not yet been benchmarked**.
+
+Output files go to the independent `/upstream-demo-long/generated` directory:
+
 ```bash
 modal volume ls wan22-animate-test-results /upstream-demo-long/generated
-# modal volume get wan22-animate-test-results /upstream-demo-long/generated/<actual-file>.mp4 ./long-preview.mp4
 ```
 
-No preflight, model-only API, original TI2V 5B app, or existing Telegram Worker are modified or deployed. The `--execute` switch still explicitly controls paid inference.
+For **5 seconds or more**, provide a motion-driving video at least that long; the included official example is too short and should not be looped. No production Cloudflare Worker or existing Wan TI2V application was modified.
