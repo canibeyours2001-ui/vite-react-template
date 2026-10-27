@@ -346,3 +346,19 @@ modal run gpu_smoke.py
 Only after receiving `'official_generate_cli_cpu_import': True` and `'gpu_started': False` should another **optional paid** A100 inference be attempted with `modal run gpu_smoke.py --execute`. This source change is committed but **the new Modal CPU preflight is not yet executed**. Saved model weights and demo inputs do not need to be downloaded again.
 
 Sources: https://github.com/Wan-Video/Wan2.2/blob/main/wan/modules/vae2_1.py and https://github.com/Wan-Video/Wan2.2/blob/main/requirements.txt
+
+
+### CPU preflight false failure: upstream T5 import invokes CUDA
+
+Upstream `wan/modules/t5.py` defines `T5EncoderModel.__init__` with `device=torch.cuda.current_device()` as a **default-argument expression**. Python evaluates that expression when the module is imported, so even `python generate.py --help` fails in a CPU-only Modal container with `RuntimeError: Found no NVIDIA driver`. This does *not* indicate the actual GPU runtime is broken.
+
+The preflight now runs `generate.py --help` in a **separate CPU child Python process**, replacing `torch.cuda.current_device` in **only that child process** with a non-GPU stub returning `0`. The real `generate_short_preview()` GPU function still calls the original, unmodified `python generate.py` with CUDA available. This CPU check can catch further missing Python imports and CLI mismatches, but does **not** prove GPU inference, memory fit, or output quality.
+
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+modal run gpu_smoke.py
+```
+
+Expect `'official_generate_cli_cpu_import': True`, `'simulated_cuda_lookup_in_cpu_probe': True`, and `'gpu_started': False`. If an import error remains, fix that without launching paid GPU. Only after preflight passes, `modal run gpu_smoke.py --execute` remains the *separate*, explicitly paid attempt.
