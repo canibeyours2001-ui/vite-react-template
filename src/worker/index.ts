@@ -17,6 +17,8 @@ type Bindings = {
   TELEGRAM_WEBHOOK_SECRET: string
   MODAL_WAN_API_BASE?: string
   MODAL_WAN_API_KEY?: string
+  MODAL_MOTION_API_BASE?: string
+  MODAL_MOTION_API_KEY?: string
   AI: AIClient
   MEMORY_DB: {
     prepare: (query: string) => {
@@ -152,6 +154,11 @@ type TelegramUpdate = {
     photo?: TelegramPhoto[]
     document?: { file_id: string; mime_type?: string; file_name?: string; file_size?: number }
     message_id: number
+    video?: { file_id: string; file_size?: number; mime_type?: string }
+    reply_to_message?: {
+      photo?: TelegramPhoto[]
+      document?: { file_id: string; mime_type?: string; file_size?: number }
+    }
   }
 }
 
@@ -165,7 +172,7 @@ app.post('/telegram/webhook', async (c) => {
   catch { return c.text('Bad request', 400) }
 
   const msg = update.message
-  if (!msg || String(msg.chat.id) !== c.env.TELEGRAM_CHAT_ID || (!msg.text && !msg.caption && !msg.photo?.length && !msg.document)) {
+  if (!msg || String(msg.chat.id) !== c.env.TELEGRAM_CHAT_ID || (!msg.text && !msg.caption && !msg.photo?.length && !msg.document && !msg.video)) {
     return c.json({ ok: true })
   }
   const chatId = msg.chat.id
@@ -227,6 +234,141 @@ app.post('/telegram/webhook', async (c) => {
         await send('Hello! I can remember our recent conversation. Send /forget to clear my memory.')
         return
       }
+
+      // Separate Animate-14B motion-transfer flow. Requires no new D1 tables:
+      // sender REPLIES to a reference photo with a driving video and /motion
+      // caption; Telegram provides reply_to_message.photo in the update.
+      // The existing /video and /image2video (TI2V 5B) flows remain intact.
+      const motionIdPattern = /^fc-[A-Za-z0-9_-]{8,96}$/
+      const motionApi = () => {
+        const value = c.env.MODAL_MOTION_API_BASE
+        if (!value) throw new Error('Animate-14B Modal service not configured')
+        const url = new URL(value)
+        if (url.protocol !== 'https:' || !url.hostname.endsWith('.modal.run') ||
+            url.username || url.password || url.hash || url.search || url.pathname !== '/') {
+          throw new Error('Invalid Animate-14B API address')
+        }
+        if (!c.env.MODAL_MOTION_API_KEY) throw new Error('Animate-14B secret is missing')
+        return { base: url.origin, headers: { Authorization: 'Bearer ' + c.env.MODAL_MOTION_API_KEY } }
+      }
+      const readTelegramFile = async (fileId: string, maximum: number): Promise<ArrayBuffer> => {
+        const infoResponse = await fetch(
+          'https://api.telegram.org/bot' + token + '/getFile?file_id=' + encodeURIComponent(fileId),
+          { signal: AbortSignal.timeout(12000) }
+        )
+        if (!infoResponse.ok) throw new Error('Telegram media lookup failed')
+        const info = await infoResponse.json() as {
+          ok: boolean; result?: { file_path?: string; file_size?: number }
+        }
+        const filePath = info.result?.file_path || ''
+        if (!info.ok || !filePath || filePath.startsWith('/') || filePath.includes('..') ||
+            (info.result?.file_size || 0) > maximum) {
+          throw new Error('Telegram file missing or exceeds upload size limit')
+        }
+        const media = await fetch('https://api.telegram.org/file/bot' + token + '/' + filePath,
+          { signal: AbortSignal.timeout(30000) })
+        if (!media.ok) throw new Error('Telegram media download failed')
+        const data = await media.arrayBuffer()
+        if (!data.byteLength || data.byteLength > maximum) throw new Error('Uploaded media is empty or too large')
+        return data
+      }
+      if (text === '/motion_help' || (text === '/motion' && !msg.video && !msg.document)) {
+        await send('Wan2.2 Animate-14B motion transfer:\n1. Send me a reference PHOTO of the person.\n2. Reply directly to that photo with a short DRIVING VIDEO and caption /motion.\n3. Check /motion_status.\nMaximum 5 MB photo and 20 MB video, 1–10 sec input, first 3 sec rendered at 30 FPS. Paid GPU generation starts only if enabled by the owner.')
+        return
+      }
+      if (text === '/motion_status') {
+        const recent = await db.prepare(
+          "SELECT job_id, status FROM wan_video_jobs WHERE chat_id = ? AND status LIKE 'motion-%' ORDER BY created_at DESC LIMIT 1"
+        ).bind(key).all<{ job_id: string; status: string }>()
+        const latest = recent.results[0]
+        if (!latest) { await send('No Animate motion job submitted yet. Send /motion for instructions.'); return }
+        if (!motionIdPattern.test(latest.job_id || '')) {
+          await send('Motion submission: ' + latest.status.replace(/^motion-/, ''))
+          return
+        }
+        try {
+          const api = motionApi()
+          const statusResponse = await fetch(api.base + '/v1/motion/jobs/' + latest.job_id,
+            { headers: api.headers, signal: AbortSignal.timeout(15000) })
+          if (!statusResponse.ok) throw new Error('Motion status HTTP ' + statusResponse.status)
+          const statusJson = await statusResponse.json() as { status?: string }
+          const status = statusJson.status || 'unknown'
+          await db.prepare("UPDATE wan_video_jobs SET status = ?, updated_at = unixepoch() WHERE chat_id = ? AND job_id = ?")
+            .bind('motion-' + status, key, latest.job_id).run()
+          if (status !== 'succeeded') {
+            await send('Animate-14B motion status: ' + status + '\nJob ID: ' + latest.job_id)
+            return
+          }
+          const videoResponse = await fetch(api.base + '/v1/motion/jobs/' + latest.job_id + '/video',
+            { headers: api.headers, signal: AbortSignal.timeout(45000) })
+          if (!videoResponse.ok) throw new Error('Motion video HTTP ' + videoResponse.status)
+          const maxBytes = 45 * 1024 * 1024
+          if (Number(videoResponse.headers.get('content-length') || 0) > maxBytes) {
+            await videoResponse.body?.cancel()
+            throw new Error('Motion output exceeds Telegram limit')
+          }
+          const output = await videoResponse.blob()
+          if (!output.size || output.size > maxBytes) throw new Error('Motion video is empty or too large')
+          const form = new FormData()
+          form.set('chat_id', key)
+          form.set('caption', 'Wan2.2-Animate-14B motion transfer complete.')
+          form.set('video', output, 'wan-animate-motion.mp4')
+          const delivered = await fetch('https://api.telegram.org/bot' + token + '/sendVideo',
+            { method: 'POST', body: form, signal: AbortSignal.timeout(45000) })
+          if (!delivered.ok) throw new Error('Telegram delivery HTTP ' + delivered.status)
+          return
+        } catch (error) {
+          console.error('Motion status/delivery failed:', error instanceof Error ? error.message : 'unknown')
+          await send('Motion status or video delivery failed. Please retry /motion_status. The TI2V commands are unaffected.')
+          return
+        }
+      }
+      const wantsMotion = text === '/motion' || text.startsWith('/motion@')
+      if (wantsMotion && (!!msg.video || !!msg.document)) {
+        const source = msg.video ||
+          (msg.document && /^video\//.test(msg.document.mime_type || '') ? msg.document : undefined)
+        const reference = msg.reply_to_message?.photo?.at(-1) ||
+          (msg.reply_to_message?.document && /^image\//.test(msg.reply_to_message.document.mime_type || '')
+            ? msg.reply_to_message.document : undefined)
+        if (!source || !reference) {
+          await send('Reply to a reference PHOTO with your driving VIDEO captioned /motion. Send /motion for the instructions.')
+          return
+        }
+        const inserted = await db.prepare(
+          "INSERT OR IGNORE INTO wan_video_jobs (chat_id, telegram_message_id, status) VALUES (?, ?, 'motion-submitting')"
+        ).bind(key, msg.message_id).run()
+        if (inserted.meta.changes === 0) return
+        try {
+          const api = motionApi()
+          if ((reference.file_size || 0) > 5 * 1024 * 1024 ||
+              (source.file_size || 0) > 20 * 1024 * 1024)
+            throw new Error('Image or video exceeds maximum allowed size')
+          const imageBytes = await readTelegramFile(reference.file_id, 5 * 1024 * 1024)
+          const videoBytes = await readTelegramFile(source.file_id, 20 * 1024 * 1024)
+          const form = new FormData()
+          form.set('image', new Blob([imageBytes], { type: 'image/jpeg' }), 'reference.jpg')
+          form.set('driving_video', new Blob([videoBytes], { type: 'video/mp4' }), 'driving.mp4')
+          const submit = await fetch(api.base + '/v1/motion/jobs',
+            { method: 'POST', headers: api.headers, body: form, signal: AbortSignal.timeout(30000) })
+          if (!submit.ok) throw new Error('Animate API rejected job: HTTP ' + submit.status)
+          const outcome = await submit.json() as { id?: string; status?: string }
+          if (!outcome.id || !motionIdPattern.test(outcome.id))
+            throw new Error('Animate API returned invalid job identifier')
+          await db.prepare(
+            "UPDATE wan_video_jobs SET job_id = ?, status = 'motion-running', updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?"
+          ).bind(outcome.id, key, msg.message_id).run()
+          await send('Wan Animate motion submitted.\nJob ID: ' + outcome.id +
+            '\nUse /motion_status to check and receive the video. Modal A100 charges may apply.')
+          return
+        } catch (error) {
+          await db.prepare(
+            "UPDATE wan_video_jobs SET status = 'motion-failed', updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?"
+          ).bind(key, msg.message_id).run()
+          console.error('Motion submit failed:', error instanceof Error ? error.message : 'unknown')
+          await send('Motion submission failed or is disabled. Check service configuration. No successful GPU job was confirmed.')
+          return
+        }
+      }
       // Video commands use a separate job table and do not enter AI chat memory.
       if (text === '/video' || text === '/video_help') {
         await send('Text to video: /video your prompt\nImage to video: attach a Telegram photo with caption /image2video your motion prompt\nCheck progress and receive video: /video_status\nRetrieve an existing video: /video_get JOB_ID')
@@ -264,7 +406,7 @@ app.post('/telegram/webhook', async (c) => {
       }
       if (text === '/video_status') {
         const jobs = await db.prepare(
-          'SELECT job_id, status FROM wan_video_jobs WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1'
+          "SELECT job_id, status FROM wan_video_jobs WHERE chat_id = ? AND status NOT LIKE 'motion-%' ORDER BY created_at DESC LIMIT 1"
         ).bind(key).all<{ job_id: string; status: string }>()
         const latest = jobs.results[0]
         if (!latest) { await send('No video job has been submitted yet.'); return }
