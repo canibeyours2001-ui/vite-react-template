@@ -161,7 +161,7 @@ def check_gpu_image_cpu() -> dict:
     max_containers=1,
     scaledown_window=15,
 )
-def generate_short_preview() -> dict:
+def generate_short_preview(steps: int = 20) -> dict:
     import subprocess
     import time
     import os
@@ -170,6 +170,9 @@ def generate_short_preview() -> dict:
 
     import torch
     from flash_attn import flash_attn_func
+
+    if steps not in (4, 10, 20):
+        raise ValueError("Choose one of 4, 10, or 20 sampling steps.")
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable on this Modal GPU container")
@@ -211,7 +214,7 @@ def generate_short_preview() -> dict:
         "--src_root_path", str(PREPARED),
         "--refert_num", "1",
         "--frame_num", "17",             # 4n+1, one short segment.
-        "--sample_steps", "4",           # low-quality diagnostic, not final output
+        "--sample_steps", str(steps),    # 20 is official Wan Animate baseline
         "--sample_guide_scale", "1",
         # On a single A100 80GB, avoid the ~11 GB T5-XXL CPU bottleneck.
         # Wan's recommended A14B single-GPU recipe uses the dtype
@@ -285,7 +288,7 @@ def generate_short_preview() -> dict:
         "bytes": video_path.stat().st_size,
         "elapsed_seconds": round(time.monotonic() - started, 1),
         "gpu": torch.cuda.get_device_name(0),
-        "sampling_steps": 4,
+        "sampling_steps": steps,
         "frame_num": 17,
         "t5_on_gpu": True,
         "convert_model_dtype": True,
@@ -297,7 +300,10 @@ def generate_short_preview() -> dict:
 
 
 @app.local_entrypoint()
-def main(execute: bool = False):
+def main(execute: bool = False, steps: int = 20):
+    if steps not in (4, 10, 20):
+        raise ValueError("Choose --steps 4, --steps 10, or --steps 20.")
+
     print("Checking the GPU image, sibling module imports and persisted inputs")
     print("using CPU only; no GPU is allocated for this preflight.")
     check_gpu_image_cpu.remote()
@@ -305,10 +311,11 @@ def main(execute: bool = False):
     if not execute:
         print("CPU preflight passed. No GPU has been requested.")
         print("To authorize a PAID, bounded A100 GPU test, explicitly run:")
-        print("  modal run gpu_smoke.py --execute")
+        print("  modal run gpu_smoke.py --execute --steps 20")
         return
 
     print("Explicit --execute received; starting one A100-80GB GPU test.")
+    print("Sampling steps:", steps)
     print("Maximum GPU function runtime: 720 seconds (12 minutes).")
-    result = generate_short_preview.remote()
+    result = generate_short_preview.remote(steps)
     print("RESULT:", result)
