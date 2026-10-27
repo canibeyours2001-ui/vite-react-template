@@ -328,3 +328,21 @@ modal run gpu_smoke.py --execute
 Do not repeat `modal run preprocess_smoke.py`: its successful output is already stored in `wan22-animate-test-results/upstream-demo/preprocessed`. If CPU preflight fails, share its first traceback; **do not** start another GPU test. The fix and preflight are committed in GitHub but have not yet been run on your Modal account. The earlier failed GPU import may already have incurred limited GPU startup charges.
 
 Reference: https://modal.com/docs/sdk/py/latest/Image#add_local_python_source
+
+
+### Fixed first GPU run: missing `einops` after A100 allocation
+
+The October 27 2026 first A100 attempt confirmed CUDA 12.4, 79.3 GiB VRAM, FlashAttention, model volume and preprocessing inputs, but failed during `import wan`: `ModuleNotFoundError: No module named 'einops'`. The upstream `wan/modules/vae2_1.py` imports `einops.rearrange`, but upstream `requirements.txt` does not explicitly list `einops`.
+
+The GPU image now installs pinned `einops==0.8.1`. More importantly, the existing **CPU-only preflight** now runs the exact upstream `python -u generate.py --help` from `/opt/Wan2.2`, which imports `wan` and initializes its argument parser without allocating a GPU or loading the huge model. The CLI import test must succeed before another A100 invocation; failures print the first actionable traceback.
+
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+modal run gpu_smoke.py
+```
+
+Only after receiving `'official_generate_cli_cpu_import': True` and `'gpu_started': False` should another **optional paid** A100 inference be attempted with `modal run gpu_smoke.py --execute`. This source change is committed but **the new Modal CPU preflight is not yet executed**. Saved model weights and demo inputs do not need to be downloaded again.
+
+Sources: https://github.com/Wan-Video/Wan2.2/blob/main/wan/modules/vae2_1.py and https://github.com/Wan-Video/Wan2.2/blob/main/requirements.txt
