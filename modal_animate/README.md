@@ -379,3 +379,35 @@ modal run gpu_smoke.py
 Do **not** run `modal run gpu_smoke.py --execute` while the CPU preflight reports an import error. The previous A100 failure was unrelated to the 51.19 GB model weights, which remain mounted read-only. This code update has been committed but has not yet been executed on the user's Modal account.
 
 Evidence: https://github.com/Wan-Video/Wan2.2/blob/main/wan/modules/s2v/audio_encoder.py and https://github.com/Wan-Video/Wan2.2/blob/main/requirements_s2v.txt
+
+
+### Timed-out first full A100 model inference; bounded next diagnostic
+
+The first fully loaded A100 attempt reached `[INFO] Generating video ...` at 21:46:41 (+07) and was stopped at 22:02:13 with `subprocess.TimeoutExpired(... after 1100 seconds)`. All four DiT shards, T5, CLIP and VAE loaded. No completed MP4 was reported. **This is a generation-time timeout, not a missing model or dependency.** The native `WanAnimate.generate` logger should report `real frames: ... target frames: ...` after reading its input videos and **performing T5 encoding**, so the missing line suggests the old `--t5_cpu` may have caused a major CPU-side bottleneck; it is not proof of the bottleneck.
+
+For the **next optional paid attempt**, `gpu_smoke.py` now follows Wan's published single-GPU 14B memory recipe more closely:
+
+- **Remove** `--t5_cpu`, allowing text-encoder execution on the 80 GB A100 rather than only CPU.
+- **Add** `--convert_model_dtype`, leave `--offload_model True` enabled to control VRAM use.
+- Keep `--frame_num 17`, `--sample_steps 4` (diagnostic quality), `--refert_num 1`.
+- Print a periodic `HEARTBEAT` with GPU utilization and VRAM use every 60 seconds. These measurements help distinguish actual CUDA compute from long CPU/offload phases but cannot by themselves prove forward progress.
+- Stop the underlying subprocess after **660 seconds** (11 minutes); Modal hard timeout after **720 seconds** (12 minutes) to bound potential charges. The subprocess group is terminated on errors to prevent orphan work.
+- Keep all weights read-only; video files are written only to `wan22-animate-test-results`.
+
+The official model's CPU-vs-GPU memory and time tradeoffs remain workload-dependent. **The revised settings have not been tested** on this Modal account and can still OOM or time out; no successful Animate MP4 exists yet.
+
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+# First: CPU-only import and input check; no A100 allocated
+modal run gpu_smoke.py
+# Optional new paid A100 diagnostic after CPU preflight passes
+modal run gpu_smoke.py --execute
+```
+
+At an illustrative A100 GPU list rate of about $2.50/hour, 12 minutes of GPU alone would cost about $0.50, with additional CPU/memory charges; actual costs may differ. The `--execute` invocation is optional and should be chosen only if the user wishes to spend credits. No Cloudflare Telegram bot or previous Wan 5B app deployment is modified.
+
+Official Wan references:
+- https://github.com/Wan-Video/Wan2.2/blob/main/wan/animate.py
+- https://github.com/Wan-Video/Wan2.2
