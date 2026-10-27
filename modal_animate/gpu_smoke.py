@@ -31,6 +31,9 @@ FLASH_ATTN_WHEEL = (
 
 gpu_image = (
     preprocess_image
+    # Required by official wan/modules/vae2_1.py (not listed explicitly
+    # in Wan2.2's requirements.txt). Missing it caused the first GPU failure.
+    .pip_install("einops==0.8.1")
     .pip_install(FLASH_ATTN_WHEEL, extra_options="--no-deps")
     # Modal 1.x no longer automatically mounts imported sibling modules.
     # gpu_smoke.py imports preprocess_image from preprocess_smoke.py;
@@ -63,6 +66,28 @@ def check_gpu_image_cpu() -> dict:
     module = importlib.import_module("preprocess_smoke")
     from flash_attn import flash_attn_func
 
+    # This is the exact import/CLI entrypoint used by the paid GPU function.
+    # Run argparse --help on CPU: Wan and its core modules must import
+    # successfully, but no weights are loaded and no CUDA device is needed.
+    import subprocess
+    inspect = subprocess.run(
+        ["python", "-u", "generate.py", "--help"],
+        cwd="/opt/Wan2.2",
+        text=True,
+        capture_output=True,
+        timeout=120,
+    )
+    if inspect.returncode:
+        print("Official Wan generate.py --help failed:", flush=True)
+        print(inspect.stdout[-6000:], flush=True)
+        print(inspect.stderr[-8000:], flush=True)
+        raise RuntimeError(
+            "Official Wan generate.py cannot import on CPU; do NOT run paid GPU."
+        )
+    if "--task" not in inspect.stdout or "--src_root_path" not in inspect.stdout:
+        raise RuntimeError("Unexpected Wan generate.py CLI; do NOT run paid GPU.")
+    print("Official Wan generate.py --help: OK (CPU import check)", flush=True)
+
     if not hasattr(module, "preprocess_image"):
         raise RuntimeError("Imported preprocessing module lacks its image definition")
     needed = [
@@ -84,6 +109,7 @@ def check_gpu_image_cpu() -> dict:
         "torch_version": str(torch.__version__),  # cast TorchVersion to built-in str for Modal client deserialization
         "preprocessed_example_available": True,
         "model_files_available": True,
+        "official_generate_cli_cpu_import": True,
         "gpu_started": False,
     }
     print("GPU IMAGE CPU PREFLIGHT:", summary, flush=True)
