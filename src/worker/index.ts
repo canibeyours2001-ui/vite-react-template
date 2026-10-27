@@ -15,6 +15,8 @@ type Bindings = {
   TELEGRAM_CHAT_ID: string
   AI_ACCESS_KEY: string
   TELEGRAM_WEBHOOK_SECRET: string
+  MODAL_WAN_API_BASE?: string
+  MODAL_WAN_API_KEY?: string
   AI: AIClient
   MEMORY_DB: {
     prepare: (query: string) => {
@@ -188,6 +190,80 @@ app.post('/telegram/webhook', async (c) => {
       }
       if (text === '/start') {
         await send('Hello! I can remember our recent conversation. Send /forget to clear my memory.')
+        return
+      }
+      // Video commands use a separate job table and do not enter AI chat memory.
+      if (text === '/video' || text === '/video_help') {
+        await send('Video generation: /video your prompt\\nCheck progress: /video_status\\nExample: /video A cinematic sunset over a lake')
+        return
+      }
+      if (text === '/video_status') {
+        const jobs = await db.prepare(
+          'SELECT job_id, status FROM wan_video_jobs WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1'
+        ).bind(key).all<{ job_id: string; status: string }>()
+        const latest = jobs.results[0]
+        if (!latest) { await send('No video job has been submitted yet.'); return }
+        if (!c.env.MODAL_WAN_API_BASE || !latest.job_id) {
+          await send('Latest video job status: ' + latest.status)
+          return
+        }
+        try {
+          const base = c.env.MODAL_WAN_API_BASE.replace(/\\/$/, '')
+          const headers: Record<string, string> = {}
+          if (c.env.MODAL_WAN_API_KEY) headers.Authorization = 'Bearer ' + c.env.MODAL_WAN_API_KEY
+          const response = await fetch(base + '/v1/generations/' + encodeURIComponent(latest.job_id), { headers, signal: AbortSignal.timeout(12000) })
+          if (!response.ok) throw new Error('status ' + response.status)
+          const data: unknown = await response.json()
+          const status = typeof data === 'object' && data !== null && 'status' in data ? String(data.status) : 'unknown'
+          await db.prepare('UPDATE wan_video_jobs SET status = ?, updated_at = unixepoch() WHERE chat_id = ? AND job_id = ?').bind(status,key,latest.job_id).run()
+          await send('Video status: ' + status + '\\nJob ID: ' + latest.job_id + '\\n' + JSON.stringify(data).slice(0,2000))
+        } catch {
+          await send('Could not retrieve Modal job status. Check your endpoint availability and API format.')
+        }
+        return
+      }
+      if (text.startsWith('/video ')) {
+        const prompt = text.slice(7).trim()
+        if (!prompt || prompt.length > 1500) { await send('Please provide a video prompt of 1–1500 characters.'); return }
+        const baseValue = c.env.MODAL_WAN_API_BASE
+        if (!baseValue) {
+          await send('Modal WAN endpoint is not configured yet. Video generation is disabled; ordinary AI chat still works.')
+          return
+        }
+        let base: URL
+        try {
+          base = new URL(baseValue)
+          if (base.protocol !== 'https:' || !base.hostname.endsWith('.modal.run') || base.username || base.password || base.search || base.hash || base.pathname !== '/') {
+            throw new Error('Invalid endpoint')
+          }
+        } catch {
+          await send('Modal endpoint configuration is invalid. Use the HTTPS .modal.run service base URL.')
+          return
+        }
+        const inserted = await db.prepare(
+          "INSERT OR IGNORE INTO wan_video_jobs (chat_id,telegram_message_id,status) VALUES (?,?,'submitting')"
+        ).bind(key,msg.message_id).run()
+        if (inserted.meta.changes === 0) return
+        try {
+          const headers: Record<string,string> = {'content-type':'application/json'}
+          if (c.env.MODAL_WAN_API_KEY) headers.Authorization = 'Bearer ' + c.env.MODAL_WAN_API_KEY
+          const response = await fetch(base.toString().replace(/\\/$/, '') + '/v1/generations', {
+            method:'POST',headers,body:JSON.stringify({prompt}),signal:AbortSignal.timeout(20000)
+          })
+          if (!response.ok) throw new Error('Modal HTTP ' + response.status)
+          const data: unknown = await response.json()
+          const obj = typeof data === 'object' && data !== null ? data as Record<string,unknown> : {}
+          const jobId = typeof obj.id === 'string' ? obj.id : typeof obj.job_id === 'string' ? obj.job_id : ''
+          const status = typeof obj.status === 'string' ? obj.status : 'submitted'
+          if (!jobId) throw new Error('Missing job identifier')
+          await db.prepare('UPDATE wan_video_jobs SET job_id = ?, status = ?, updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?')
+            .bind(jobId,status,key,msg.message_id).run()
+          await send('Wan 2.2 video submitted.\\nJob ID: ' + jobId + '\\nUse /video_status to check progress.')
+        } catch (error) {
+          await db.prepare("UPDATE wan_video_jobs SET status = 'failed', updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?").bind(key,msg.message_id).run()
+          console.error('Modal job request failed',error instanceof Error ? error.message : 'unknown')
+          await send('The video job could not be submitted. No successful job was confirmed.')
+        }
         return
       }
       // Delete old messages for this chat after 7 days.
