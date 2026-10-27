@@ -109,10 +109,10 @@ def preprocess_upstream_demo() -> dict:
     output = work / "processed"
     output.mkdir(exist_ok=True)
 
-    # A short demonstration input is cheaper than the full video.
+    # Use 12 frames so the 17-frame generator will make exactly one clip.
     run_checked([
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-        "-i", str(source_video), "-t", "1.5",
+        "-i", str(source_video), "-t", "1.0",
         "-vf", "fps=12,scale=640:-2",
         "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(short_video)
     ])
