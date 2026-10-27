@@ -200,7 +200,7 @@ app.post('/telegram/webhook', async (c) => {
       if (inserted.meta.changes === 0) return
 
       const records = await db.prepare(
-        "SELECT role, content FROM messages WHERE chat_id = ? AND (message_id < ? OR (message_id = ? AND role = 'user')) ORDER BY message_id DESC, role DESC LIMIT 20"
+        "SELECT role, content FROM messages WHERE chat_id = ? AND (message_id < ? OR (message_id = ? AND role = 'user')) ORDER BY message_id DESC, role ASC LIMIT 20"
       ).bind(key, msg.message_id, msg.message_id).all<{ role: 'user' | 'assistant'; content: string }>()
       const history = records.results.reverse().map(row => ({
         role: row.role,
@@ -225,7 +225,7 @@ app.post('/telegram/webhook', async (c) => {
       ).bind(key, msg.message_id, reply).run()
       // Keep at most 20 recent messages per chat.
       await db.prepare(
-        'DELETE FROM messages WHERE chat_id = ? AND rowid NOT IN (SELECT rowid FROM messages WHERE chat_id = ? ORDER BY message_id DESC, role DESC LIMIT 20)'
+        'DELETE FROM messages WHERE chat_id = ? AND rowid NOT IN (SELECT rowid FROM messages WHERE chat_id = ? ORDER BY message_id DESC, role ASC LIMIT 20)'
       ).bind(key, key).run()
     } catch (error) {
       console.error('Telegram memory processing failed', error instanceof Error ? error.message : 'unknown')
