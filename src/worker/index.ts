@@ -177,4 +177,39 @@ app.post('/telegram/webhook', async (c) => {
   return c.json({ ok: true })
 })
 
-export default app
+
+async function registerTelegramWebhook(env: Bindings): Promise<void> {
+  const token = env.TELEGRAM_BOT_TOKEN
+  const secret = env.TELEGRAM_WEBHOOK_SECRET
+  if (!token || !secret) return
+  const base = `https://api.telegram.org/bot${token}`
+  const statusResp = await fetch(`${base}/getWebhookInfo`)
+  const status = await statusResp.json() as { ok: boolean; result?: { url?: string } }
+  if (!status.ok) return
+  const target = 'https://vite-react-template.canibeyours2001.workers.dev/telegram/webhook'
+  // Never replace another bot integration's webhook.
+  if (status.result?.url && status.result.url !== target) {
+    console.log('Existing Telegram webhook was preserved.')
+    return
+  }
+  if (status.result?.url === target) return
+  const response = await fetch(`${base}/setWebhook`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      url: target,
+      secret_token: secret,
+      allowed_updates: ['message'],
+      drop_pending_updates: false
+    })
+  })
+  const data = await response.json() as { ok?: boolean; description?: string }
+  console.log('Telegram webhook setup result', data.ok ? 'success' : (data.description || 'failed'))
+}
+
+export default {
+  fetch: app.fetch,
+  async scheduled(_event: unknown, env: Bindings): Promise<void> {
+    await registerTelegramWebhook(env)
+  }
+}
