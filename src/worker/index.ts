@@ -251,27 +251,6 @@ app.post('/telegram/webhook', async (c) => {
         if (!c.env.MODAL_MOTION_API_KEY) throw new Error('Animate-14B secret is missing')
         return { base: url.origin, headers: { Authorization: 'Bearer ' + c.env.MODAL_MOTION_API_KEY } }
       }
-      const readTelegramFile = async (fileId: string, maximum: number): Promise<ArrayBuffer> => {
-        const infoResponse = await fetch(
-          'https://api.telegram.org/bot' + token + '/getFile?file_id=' + encodeURIComponent(fileId),
-          { signal: AbortSignal.timeout(12000) }
-        )
-        if (!infoResponse.ok) throw new Error('Telegram media lookup failed')
-        const info = await infoResponse.json() as {
-          ok: boolean; result?: { file_path?: string; file_size?: number }
-        }
-        const filePath = info.result?.file_path || ''
-        if (!info.ok || !filePath || filePath.startsWith('/') || filePath.includes('..') ||
-            (info.result?.file_size || 0) > maximum) {
-          throw new Error('Telegram file missing or exceeds upload size limit')
-        }
-        const media = await fetch('https://api.telegram.org/file/bot' + token + '/' + filePath,
-          { signal: AbortSignal.timeout(30000) })
-        if (!media.ok) throw new Error('Telegram media download failed')
-        const data = await media.arrayBuffer()
-        if (!data.byteLength || data.byteLength > maximum) throw new Error('Uploaded media is empty or too large')
-        return data
-      }
       if (text === '/motion_help' || (text === '/motion' && !msg.video && !msg.document)) {
         await send('Wan2.2 Animate-14B motion transfer:\n1. Send me a reference PHOTO of the person.\n2. Reply directly to that photo with a short DRIVING VIDEO and caption /motion.\n3. Check /motion_status.\nMaximum 5 MB photo and 20 MB video, 1–10 sec input, first 3 sec rendered at 30 FPS. Paid GPU generation starts only if enabled by the owner.')
         return
@@ -334,40 +313,25 @@ app.post('/telegram/webhook', async (c) => {
           await send('Reply to a reference PHOTO with your driving VIDEO captioned /motion. Send /motion for the instructions.')
           return
         }
-        const inserted = await db.prepare(
-          "INSERT OR IGNORE INTO wan_video_jobs (chat_id, telegram_message_id, status) VALUES (?, ?, 'motion-submitting')"
-        ).bind(key, msg.message_id).run()
-        if (inserted.meta.changes === 0) return
-        try {
-          const api = motionApi()
-          if ((reference.file_size || 0) > 5 * 1024 * 1024 ||
-              (source.file_size || 0) > 20 * 1024 * 1024)
-            throw new Error('Image or video exceeds maximum allowed size')
-          const imageBytes = await readTelegramFile(reference.file_id, 5 * 1024 * 1024)
-          const videoBytes = await readTelegramFile(source.file_id, 20 * 1024 * 1024)
-          const form = new FormData()
-          form.set('image', new Blob([imageBytes], { type: 'image/jpeg' }), 'reference.jpg')
-          form.set('driving_video', new Blob([videoBytes], { type: 'video/mp4' }), 'driving.mp4')
-          const submit = await fetch(api.base + '/v1/motion/jobs',
-            { method: 'POST', headers: api.headers, body: form, signal: AbortSignal.timeout(30000) })
-          if (!submit.ok) throw new Error('Animate API rejected job: HTTP ' + submit.status)
-          const outcome = await submit.json() as { id?: string; status?: string }
-          if (!outcome.id || !motionIdPattern.test(outcome.id))
-            throw new Error('Animate API returned invalid job identifier')
-          await db.prepare(
-            "UPDATE wan_video_jobs SET job_id = ?, status = 'motion-running', updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?"
-          ).bind(outcome.id, key, msg.message_id).run()
-          await send('Wan Animate motion submitted.\nJob ID: ' + outcome.id +
-            '\nUse /motion_status to check and receive the video. Modal A100 charges may apply.')
-          return
-        } catch (error) {
-          await db.prepare(
-            "UPDATE wan_video_jobs SET status = 'motion-failed', updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?"
-          ).bind(key, msg.message_id).run()
-          console.error('Motion submit failed:', error instanceof Error ? error.message : 'unknown')
-          await send('Motion submission failed or is disabled. Check service configuration. No successful GPU job was confirmed.')
+        // Queue metadata only. Telegram webhook waitUntil is limited to 30 seconds.
+        // Downloading 20 MB of media and cold-starting Modal must happen in the
+        // existing scheduled handler, which has a longer execution window.
+        // This is a single atomic INSERT: no abandoned "submitting" row.
+        if ((reference.file_size || 0) > 5 * 1024 * 1024 ||
+            (source.file_size || 0) > 20 * 1024 * 1024) {
+          await send('Photo must be <=5 MB and driving video <=20 MB.')
           return
         }
+        const queued = JSON.stringify({ image: reference.file_id, video: source.file_id })
+        if (queued.length > 600) {
+          await send('Telegram media ID was unexpectedly long; motion job not queued.')
+          return
+        }
+        const inserted = await db.prepare(
+          "INSERT OR IGNORE INTO wan_video_jobs (chat_id, telegram_message_id, job_id, status) VALUES (?, ?, ?, 'motion-queued')"
+        ).bind(key, msg.message_id, queued).run()
+        if (inserted.meta.changes === 0) return
+        await send('Wan Animate motion queued. The bot processes motion uploads in its scheduled task. Send /motion_status to check progress. Paid A100 GPU generation is currently disabled.')
       }
       // Video commands use a separate job table and do not enter AI chat memory.
       if (text === '/video' || text === '/video_help') {
@@ -646,6 +610,120 @@ app.post('/telegram/webhook', async (c) => {
 })
 
 
+
+/**
+ * Processes at most ONE paid-motion submission per existing cron invocation.
+ * Queued payload stores only Telegram file IDs, never media bytes or secrets.
+ * This is deliberately fail-closed: unknown network timeouts never auto-retry,
+ * because retrying a possibly accepted render could charge twice.
+ */
+async function processQueuedMotion(env: Bindings): Promise<void> {
+  const db = env.MEMORY_DB
+  const token = env.TELEGRAM_BOT_TOKEN
+  if (!db || !token) return
+  const candidate = await db.prepare(
+    "SELECT chat_id, telegram_message_id, job_id FROM wan_video_jobs WHERE status = ? ORDER BY created_at ASC LIMIT 1"
+  ).bind('motion-queued').all<{chat_id: string; telegram_message_id: number; job_id: string}>()
+  const job = candidate.results[0]
+  if (!job) return
+  const claimed = await db.prepare(
+    "UPDATE wan_video_jobs SET status = 'motion-submitting', updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ? AND status = 'motion-queued'"
+  ).bind(job.chat_id, job.telegram_message_id).run()
+  if (claimed.meta.changes !== 1) return
+  const sendUpdate = async (text: string) => {
+    try {
+      const response = await fetch('https://api.telegram.org/bot' + token + '/sendMessage', {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({
+          chat_id: job.chat_id,
+          text: text.slice(0, 3900),
+          reply_parameters: { message_id: job.telegram_message_id },
+        }),
+        signal: AbortSignal.timeout(15000),
+      })
+      if (!response.ok) console.error('Motion update Telegram HTTP', response.status)
+    } catch (e) {
+      console.error('Motion update notification failed', e instanceof Error ? e.name : 'unknown')
+    }
+  }
+  try {
+    const ids = JSON.parse(job.job_id) as {image?: unknown; video?: unknown}
+    if (typeof ids.image !== 'string' || typeof ids.video !== 'string' ||
+        !ids.image || !ids.video || ids.image.length > 256 || ids.video.length > 256)
+      throw new Error('Invalid queued Telegram media IDs')
+
+    const baseValue = env.MODAL_MOTION_API_BASE
+    if (!baseValue || !env.MODAL_MOTION_API_KEY)
+      throw new Error('Motion service URL or key not configured')
+    const base = new URL(baseValue)
+    if (base.protocol !== 'https:' || !base.hostname.endsWith('.modal.run') ||
+        base.username || base.password || base.search || base.hash || base.pathname !== '/')
+      throw new Error('Invalid motion service URL')
+
+    const readFile = async (id: string, max: number): Promise<ArrayBuffer> => {
+      const infoResponse = await fetch(
+        'https://api.telegram.org/bot' + token + '/getFile?file_id=' + encodeURIComponent(id),
+        {signal: AbortSignal.timeout(15000)}
+      )
+      if (!infoResponse.ok) throw new Error('Telegram getFile HTTP ' + infoResponse.status)
+      const info = await infoResponse.json() as {
+        ok: boolean; result?: {file_path?: string; file_size?: number}
+      }
+      const path = info.result?.file_path || ''
+      if (!info.ok || !path || path.startsWith('/') || path.includes('..') ||
+          (info.result?.file_size || 0) > max)
+        throw new Error('Telegram media is unavailable or exceeds limit')
+      const file = await fetch('https://api.telegram.org/file/bot' + token + '/' + path,
+        {signal: AbortSignal.timeout(45000)})
+      if (!file.ok) throw new Error('Telegram file HTTP ' + file.status)
+      if (Number(file.headers.get('content-length') || 0) > max) {
+        await file.body?.cancel()
+        throw new Error('Telegram media too large')
+      }
+      const bytes = await file.arrayBuffer()
+      if (!bytes.byteLength || bytes.byteLength > max)
+        throw new Error('Telegram media empty or too large')
+      return bytes
+    }
+
+    const image = await readFile(ids.image, 5 * 1024 * 1024)
+    const video = await readFile(ids.video, 20 * 1024 * 1024)
+    const multipart = new FormData()
+    multipart.set('image', new Blob([image], {type: 'image/jpeg'}), 'telegram-reference.jpg')
+    multipart.set('driving_video', new Blob([video], {type: 'video/mp4'}), 'telegram-driving.mp4')
+    const response = await fetch(base.origin + '/v1/motion/jobs', {
+      method: 'POST',
+      headers: {Authorization: 'Bearer ' + env.MODAL_MOTION_API_KEY},
+      body: multipart,
+      signal: AbortSignal.timeout(45000),
+    })
+    if (!response.ok) {
+      if (response.status === 503) throw new Error('Motion GPU generation is disabled; no job was launched')
+      if (response.status === 401) throw new Error('Motion API authentication failed; check matching secrets')
+      throw new Error('Modal rejected motion: HTTP ' + response.status)
+    }
+    const result = await response.json() as {id?: string; status?: string}
+    if (!result.id || !/^fc-[A-Za-z0-9_-]{8,96}$/.test(result.id))
+      throw new Error('Modal returned an invalid motion job ID')
+    await db.prepare(
+      "UPDATE wan_video_jobs SET status='motion-running', job_id=?, updated_at=unixepoch() WHERE chat_id=? AND telegram_message_id=?"
+    ).bind(result.id,job.chat_id,job.telegram_message_id).run()
+    await sendUpdate('Wan Animate 14B motion submitted. Job ID: ' + result.id +
+      '\\nUse /motion_status to get your video.')
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'Unknown submission error'
+    // Do not retain expired Telegram file IDs or retry potentially chargeable calls.
+    await db.prepare(
+      "UPDATE wan_video_jobs SET status='motion-failed', job_id='', updated_at=unixepoch() WHERE chat_id=? AND telegram_message_id=? AND status='motion-submitting'"
+    ).bind(job.chat_id,job.telegram_message_id).run()
+    console.error('Motion cron submit failed:', reason.replace(/(?:bot[0-9]+:)[a-zA-Z0-9_-]+/g, '[redacted]'))
+    await sendUpdate(reason.startsWith('Motion GPU generation is disabled')
+      ? 'Motion integration is installed, but paid GPU rendering is currently OFF. No job started.'
+      : 'Motion upload failed. No successful job was confirmed. Do not retry automatically; check /motion_status.')
+  }
+}
+
 async function registerTelegramWebhook(env: Bindings): Promise<void> {
   const token = env.TELEGRAM_BOT_TOKEN
   const secret = env.TELEGRAM_WEBHOOK_SECRET
@@ -678,6 +756,11 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
 export default {
   fetch: app.fetch,
   async scheduled(_event: unknown, env: Bindings): Promise<void> {
-    await registerTelegramWebhook(env)
+    try {
+      await registerTelegramWebhook(env)
+    } catch (error) {
+      console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
+    }
+    await processQueuedMotion(env)
   }
 }
