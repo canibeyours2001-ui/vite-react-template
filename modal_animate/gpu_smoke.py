@@ -148,7 +148,7 @@ def check_gpu_image_cpu() -> dict:
         "/models": weights.with_mount_options(read_only=True),
         "/results": results,
     },
-    timeout=1200,
+    timeout=720,  # 12-minute HARD GPU container limit for the diagnostic
     min_containers=0,
     max_containers=1,
     scaledown_window=15,
@@ -156,6 +156,8 @@ def check_gpu_image_cpu() -> dict:
 def generate_short_preview() -> dict:
     import subprocess
     import time
+    import os
+    import signal
     from uuid import uuid4
 
     import torch
@@ -203,21 +205,68 @@ def generate_short_preview() -> dict:
         "--frame_num", "17",             # 4n+1, one short segment.
         "--sample_steps", "4",           # low-quality diagnostic, not final output
         "--sample_guide_scale", "1",
-        "--t5_cpu",                      # conserve 80 GB GPU memory
+        # On a single A100 80GB, avoid the ~11 GB T5-XXL CPU bottleneck.
+        # Wan's recommended A14B single-GPU recipe uses the dtype
+        # conversion + offloading combination without --t5_cpu.
         "--offload_model", "True",
+        "--convert_model_dtype",
         "--base_seed", "42",
         "--save_file", str(video_path),
     ]
     print("Official Wan command:", " ".join(command), flush=True)
     started = time.monotonic()
-    # The Modal function's hard timeout of 1200 seconds prevents runaway
-    # inference charges. This process receives slightly less time for saving.
-    subprocess.run(
+    # Inherit stdout/stderr so Wan's tqdm/INFO logs stream into Modal.
+    # Also print GPU utilization once per minute so long encoding/denoising
+    # periods are distinguishable from a stalled container.
+    # Start in its own process group so children are cleaned up on failure.
+    process = subprocess.Popen(
         command,
         cwd="/opt/Wan2.2",
-        check=True,
-        timeout=1100,
+        start_new_session=True,
     )
+    deadline = time.monotonic() + 660  # 11-min subprocess; 12-min hard Modal cap
+    try:
+        while process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, 660)
+            try:
+                process.wait(timeout=min(60, remaining))
+            except subprocess.TimeoutExpired:
+                pass
+            if process.poll() is None:
+                print(
+                    "HEARTBEAT: elapsed_sec=",
+                    round(time.monotonic() - started),
+                    "| GPU utilization and VRAM below:",
+                    flush=True,
+                )
+                subprocess.run(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=utilization.gpu,memory.used,memory.total",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    check=False,
+                    timeout=15,
+                )
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command)
+    finally:
+        if process.poll() is None:
+            print("Stopping timed-out Wan generation process group.", flush=True)
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=5)
     if not video_path.is_file() or video_path.stat().st_size < 1000:
         raise RuntimeError("Wan generate.py exited without a valid saved MP4")
     results.commit()
@@ -230,6 +279,8 @@ def generate_short_preview() -> dict:
         "gpu": torch.cuda.get_device_name(0),
         "sampling_steps": 4,
         "frame_num": 17,
+        "t5_on_gpu": True,
+        "convert_model_dtype": True,
         "mode": "animation_only",
         "production_endpoint_changed": False,
     }
@@ -250,6 +301,6 @@ def main(execute: bool = False):
         return
 
     print("Explicit --execute received; starting one A100-80GB GPU test.")
-    print("Maximum GPU function runtime: 1200 seconds (20 minutes).")
+    print("Maximum GPU function runtime: 720 seconds (12 minutes).")
     result = generate_short_preview.remote()
     print("RESULT:", result)
