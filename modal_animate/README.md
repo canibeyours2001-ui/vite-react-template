@@ -259,3 +259,48 @@ If a *new* image build still fails, inspect `modal image logs <IMAGE_ID>` and ca
 Evidence:
 - https://raw.githubusercontent.com/huggingface/transformers/v4.51.3/setup.py
 - https://huggingface.co/Wan-AI/Wan2.2-Animate-14B/tree/main/xlm-roberta-large
+
+
+## Stage 7: Persistent demo preprocessing and opt-in first GPU video
+
+**Official preprocessing smoke test passed** with repaired ViTPose ONNX. The updated CPU script now persists a shorter **1.0-second, 12 fps** excerpt from Wan's published example to a separate `wan22-animate-test-results` Volume at `/upstream-demo/preprocessed`. This ensures the first paid A100 test need not repeat CPU pose extraction.
+
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+modal run preprocess_smoke.py
+modal volume ls wan22-animate-test-results /upstream-demo/preprocessed
+```
+
+Confirm `outputs_persisted: true` and that `src_ref.png`, `src_pose.mp4`, `src_face.mp4` are present. Your 51.19 GB model Volume is mounted read-only; the new results Volume is separate from your earlier `wan22-results` TI2V Volume. **These commands do not allocate a GPU.**
+
+A new `gpu_smoke.py` (not tested yet) follows the upstream `python generate.py --task animate-14B` single-GPU command, using the *already downloaded* native weights, 17 generated frames, four denoising steps, CPU T5 offloading, and 80 GB A100 VRAM. It installs the **official precompiled** FlashAttention 2 wheel for CUDA 12 / PyTorch 2.5 / Python 3.11 from upstream release v2.8.3.post2, and runs with 48 GiB CPU RAM. **This is only a diagnostic preview**; do not infer final image quality from four steps.
+
+**No GPU is launched by pulling GitHub or running the default command below.** The GPU function is dispatched only when the user deliberately includes `--execute`.
+
+```bash
+# Safe: build/check entrypoint, no GPU request:
+modal run gpu_smoke.py
+
+# OPTIONAL PAID GPU DIAGNOSTIC, only if comfortable with the cost:
+modal run gpu_smoke.py --execute
+```
+
+The paid function has an enforced `timeout=1200` (20 minutes), `max_containers=1`, `min_containers=0`, and a 15-second scale-down window. It attempts **one** clip, then commits `preview-<id>.mp4` under `/upstream-demo/generated/` to the independent results volume. No Cloudflare Worker, pre-existing TI2V app, or deployed preflight API is modified.
+
+As of Oct 27 2026 Modal lists A100 80 GB GPU at **$0.000694/sec** (about **$2.50/hr**). A full 20 min GPU reservation costs about **$0.83 for GPU alone**, plus CPU and RAM charges; warm-up overhead may be billed and allocation availability is not guaranteed. Total model compatibility, resource use, and output quality remain unverified.
+
+After successful paid generation:
+
+```bash
+modal volume ls wan22-animate-test-results /upstream-demo/generated
+# Download from the Modal Volume after checking the exact MP4 name:
+# modal volume get wan22-animate-test-results /upstream-demo/generated/<actual-file>.mp4 ./preview.mp4
+```
+
+Sources:
+- https://github.com/Wan-Video/Wan2.2#run-wan-animate
+- https://github.com/Dao-AILab/flash-attention/releases/tag/v2.8.3.post2
+- https://modal.com/pricing
+- https://modal.com/docs/cli/latest/volume
