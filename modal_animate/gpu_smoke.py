@@ -136,12 +136,12 @@ def check_gpu_image_cpu(long: bool = False) -> dict:
         manifest_path = prepared / "manifest.json"
         if not manifest_path.is_file():
             raise RuntimeError(
-                "No 5-second inputs. First run: modal run preprocess_long.py"
+                "No 3-second inputs. First run: modal run preprocess_long.py"
             )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("fps") != 30 or manifest.get("frames") != 150:
+        if manifest.get("fps") != 30 or manifest.get("frames") != 90:
             raise RuntimeError(
-                "Long preprocessing must be exactly 150 frames at 30 FPS"
+                "Long preprocessing must be exactly 90 frames at 30 FPS"
             )
 
     for filename in needed:
@@ -224,8 +224,8 @@ def generate_short_preview(steps: int = 20, long: bool = False) -> dict:
         if not manifest_path.is_file():
             raise RuntimeError("Run modal run preprocess_long.py first")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("fps") != 30 or manifest.get("frames") != 150:
-            raise RuntimeError("Long assets are not 5 seconds at 30 FPS")
+        if manifest.get("fps") != 30 or manifest.get("frames") != 90:
+            raise RuntimeError("Long assets are not 3 seconds at 30 FPS")
 
     for name in ("src_ref.png", "src_pose.mp4", "src_face.mp4"):
         p = prepared / name
@@ -320,9 +320,9 @@ def generate_short_preview(steps: int = 20, long: bool = False) -> dict:
         "gpu": torch.cuda.get_device_name(0),
         "sampling_steps": steps,
         "frame_num": frame_num,
-        "input_frames": 150 if long else 12,
-        "expected_duration_seconds": 5.0 if long else 0.4,
-        "input_set": "long_5_seconds" if long else "short_preview",
+        "input_frames": 90 if long else 12,
+        "expected_duration_seconds": 3.0 if long else 0.4,
+        "input_set": "long_3_seconds" if long else "short_preview",
         "t5_on_gpu": True,
         "convert_model_dtype": True,
         "mode": "animation_only",
@@ -339,7 +339,7 @@ def main(execute: bool = False, steps: int = 20, long: bool = False):
 
     print("Checking the GPU image, sibling module imports and persisted inputs")
     print("using CPU only; no GPU is allocated for this preflight.")
-    print("Selected input:", "5 seconds at 30 FPS" if long else "short diagnostic")
+    print("Selected input:", "3 seconds at 30 FPS" if long else "short diagnostic")
     check_gpu_image_cpu.remote(long)
 
     if not execute:
@@ -350,7 +350,7 @@ def main(execute: bool = False, steps: int = 20, long: bool = False):
 
     print("Explicit --execute received; starting one A100-80GB GPU test.")
     print("Sampling steps:", steps)
-    print("Expected output duration:", "5 seconds" if long else "0.4 seconds")
+    print("Expected output duration:", "3 seconds" if long else "0.4 seconds")
     print("Maximum GPU function runtime: 720 seconds (12 minutes).")
     result = generate_short_preview.remote(steps, long)
     print("RESULT:", result)
