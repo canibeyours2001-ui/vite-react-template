@@ -48,12 +48,24 @@ preprocess_image = (
         "scipy",
         "pillow",
     )
-    # SAM2's optional CUDA post-processing extension requires nvcc/CUDA_HOME.
-    # This preprocessor smoke-test image is CPU-only, so use SAM2's official
-    # SAM2_BUILD_CUDA=0 build switch rather than adding a CUDA toolkit.
-    .pip_install(
-        "git+https://github.com/facebookresearch/sam2.git@0e78a118995e66bb27d78518c4bd9a3e95b4e266",
-        env={"SAM2_BUILD_CUDA": "0"},
+    # Wan pins an OLD SAM2 commit whose setup.py calls get_extensions()
+    # unconditionally and does NOT support newer SAM2_BUILD_CUDA=0.
+    # Keep the exact official pinned commit; omit ONLY its optional
+    # CUDA connected-components extension in this CPU-only build copy.
+    .run_commands(
+        "git init /opt/sam2",
+        "git -C /opt/sam2 remote add origin https://github.com/facebookresearch/sam2.git",
+        "git -C /opt/sam2 fetch --depth 1 origin 0e78a118995e66bb27d78518c4bd9a3e95b4e266",
+        "git -C /opt/sam2 checkout --detach FETCH_HEAD",
+        (
+            "python -c \"from pathlib import Path; "
+            "p=Path('/opt/sam2/setup.py'); s=p.read_text(); "
+            "needle='ext_modules=get_extensions(),'; "
+            "assert s.count(needle)==1, 'Unexpected official SAM2 setup.py'; "
+            "p.write_text(s.replace(needle, 'ext_modules=[],  # no CUDA extension in CPU smoke test', 1))\""
+        ),
+        "python -m pip install --no-build-isolation -e /opt/sam2",
+        "python -c 'import sam2.modeling.sam.transformer; import sam2.build_sam; print(\"Pinned SAM2 imports OK\")'",
     )
     .run_commands("git clone --depth 1 https://github.com/Wan-Video/Wan2.2.git /opt/Wan2.2")
 )
