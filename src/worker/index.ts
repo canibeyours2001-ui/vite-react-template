@@ -126,7 +126,6 @@ app.post('/api/ai', async (c) => {
   }
 })
 
-export default app
 
 type TelegramUpdate = {
   message?: {
