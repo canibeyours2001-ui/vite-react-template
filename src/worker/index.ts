@@ -137,10 +137,19 @@ app.post('/api/ai', async (c) => {
 })
 
 
+type TelegramPhoto = {
+  file_id: string
+  file_size?: number
+  width?: number
+  height?: number
+}
+
 type TelegramUpdate = {
   message?: {
     chat: { id: number }
     text?: string
+    caption?: string
+    photo?: TelegramPhoto[]
     message_id: number
   }
 }
@@ -155,12 +164,12 @@ app.post('/telegram/webhook', async (c) => {
   catch { return c.text('Bad request', 400) }
 
   const msg = update.message
-  if (!msg || String(msg.chat.id) !== c.env.TELEGRAM_CHAT_ID || !msg.text) {
+  if (!msg || String(msg.chat.id) !== c.env.TELEGRAM_CHAT_ID || (!msg.text && !msg.caption && !msg.photo?.length)) {
     return c.json({ ok: true })
   }
   const chatId = msg.chat.id
   const token = c.env.TELEGRAM_BOT_TOKEN
-  const text = msg.text.trim().slice(0, 2000)
+  const text = (msg.text ?? msg.caption ?? '').trim().slice(0, 2000)
   if (!token || !c.env.AI) return c.json({ ok: false }, 503)
 
   const processMessage = async () => {
@@ -219,7 +228,7 @@ app.post('/telegram/webhook', async (c) => {
       }
       // Video commands use a separate job table and do not enter AI chat memory.
       if (text === '/video' || text === '/video_help') {
-        await send('Video generation: /video your prompt\nCheck progress and receive video: /video_status\nRetrieve existing video: /video_get JOB_ID\nExample: /video A cinematic sunset over a lake')
+        await send('Text to video: /video your prompt\nImage to video: attach a Telegram photo with caption /image2video your motion prompt\nCheck progress and receive video: /video_status\nRetrieve an existing video: /video_get JOB_ID')
         return
       }
       if (text.startsWith('/video_get ')) {
@@ -287,9 +296,22 @@ app.post('/telegram/webhook', async (c) => {
         }
         return
       }
-      if (text.startsWith('/video ')) {
-        const prompt = text.slice(7).trim()
+      if (text === '/image2video' || text === '/image2video_help') {
+        await send('Attach a photo and set its caption to: /image2video A slow cinematic push-in, gentle wind moving the hair')
+        return
+      }
+      if (msg.photo?.length && !text.startsWith('/image2video ') && !text.startsWith('/video ')) {
+        await send('Photo received. To animate it, send the photo again with caption: /image2video your motion prompt')
+        return
+      }
+      if (text.startsWith('/video ') || text.startsWith('/image2video ')) {
+        const isImageCommand = text.startsWith('/image2video ')
+        const prompt = text.slice(isImageCommand ? '/image2video '.length : '/video '.length).trim()
         if (!prompt || prompt.length > 1500) { await send('Please provide a video prompt of 1–1500 characters.'); return }
+        if (isImageCommand && !msg.photo?.length) {
+          await send('Image-to-video needs a photo. Attach a photo with the caption: /image2video ' + prompt)
+          return
+        }
         const baseValue = c.env.MODAL_WAN_API_BASE
         if (!baseValue) {
           await send('Modal WAN endpoint is not configured yet. Video generation is disabled; ordinary AI chat still works.')
@@ -316,6 +338,37 @@ app.post('/telegram/webhook', async (c) => {
           form.set('width', '1280')
           form.set('height', '704')
           form.set('seed', '-1')
+          if (msg.photo?.length) {
+            // Telegram compresses photos to JPEG. Select a suitable variant.
+            const maximumImageBytes = 4 * 1024 * 1024
+            const candidates = [...msg.photo].filter(p => !p.file_size || p.file_size <= maximumImageBytes)
+            const photo = candidates.sort((a, b) => (a.file_size || 0) - (b.file_size || 0)).at(-1)
+            if (!photo) throw new Error('Photo exceeds the 4 MB image-upload limit')
+            const infoResponse = await fetch(
+              'https://api.telegram.org/bot' + token + '/getFile?file_id=' + encodeURIComponent(photo.file_id),
+              { signal: AbortSignal.timeout(10000) }
+            )
+            if (!infoResponse.ok) throw new Error('Telegram image lookup failed')
+            const info = await infoResponse.json() as {
+              ok: boolean
+              result?: { file_path?: string; file_size?: number }
+            }
+            const filePath = info.result?.file_path
+            if (!info.ok || !filePath || filePath.includes('..') || filePath.startsWith('/')) {
+              throw new Error('Telegram image location unavailable')
+            }
+            if ((info.result?.file_size || 0) > maximumImageBytes) throw new Error('Photo exceeds the 4 MB image-upload limit')
+            const photoResponse = await fetch(
+              'https://api.telegram.org/file/bot' + token + '/' + filePath,
+              { signal: AbortSignal.timeout(15000) }
+            )
+            if (!photoResponse.ok) throw new Error('Telegram photo download failed')
+            const imageBytes = await photoResponse.arrayBuffer()
+            if (!imageBytes.byteLength || imageBytes.byteLength > maximumImageBytes) {
+              throw new Error('Photo is empty or exceeds the 4 MB image-upload limit')
+            }
+            form.set('image', new Blob([imageBytes], { type: 'image/jpeg' }), 'telegram-photo.jpg')
+          }
           const headers: Record<string,string> = {}
           if (c.env.MODAL_WAN_API_KEY) headers.Authorization = 'Bearer ' + c.env.MODAL_WAN_API_KEY
           // fetch() sets the multipart boundary automatically. Do not set Content-Type.
@@ -361,7 +414,7 @@ app.post('/telegram/webhook', async (c) => {
           if (!jobId) throw new Error('Missing job identifier')
           await db.prepare('UPDATE wan_video_jobs SET job_id = ?, status = ?, updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?')
             .bind(jobId,status,key,msg.message_id).run()
-          await send('Wan 2.2 video submitted.\nJob ID: ' + jobId + '\nUse /video_status to check progress.')
+          await send((msg.photo?.length ? 'Wan 2.2 image-to-video submitted.' : 'Wan 2.2 text-to-video submitted.') + '\nJob ID: ' + jobId + '\nUse /video_status to check progress.')
         } catch (error) {
           await db.prepare("UPDATE wan_video_jobs SET status = 'failed', updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?").bind(key,msg.message_id).run()
           console.error('Modal job request failed',error instanceof Error ? error.message : 'unknown')
