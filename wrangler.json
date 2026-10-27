@@ -16,5 +16,12 @@
   "assets": {
     "directory": "./dist/client",
     "not_found_handling": "single-page-application"
-  }
+  },
+  "d1_databases": [
+    {
+      "binding": "MEMORY_DB",
+      "database_name": "hono-telegram-memory",
+      "database_id": "6ce17b28-cdcb-4e89-a011-1748e736e43c"
+    }
+  ]
 }
