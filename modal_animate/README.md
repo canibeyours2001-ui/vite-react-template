@@ -481,3 +481,33 @@ modal volume ls wan22-animate-test-results /upstream-demo-long/generated
 ```
 
 For **5 seconds or more**, provide a motion-driving video at least that long; the included official example is too short and should not be looped. No production Cloudflare Worker or existing Wan TI2V application was modified.
+
+
+## Stage 9 — Telegram /motion integration (STAGED, not deployed)
+
+New files / changes on branch `setup/wan22-animate-14b`:
+- `motion_service.py`: isolated authenticated Modal app `wan22-animate-telegram`. A deployment creates an idle HTTP API; it cannot start a GPU unless `MOTION_GPU_ENABLED=1` is set in the dedicated `wan22-motion-flags` Modal Secret.
+- `src/worker/index.ts`: separate `/motion`, `/motion_help`, and `/motion_status` paths. It reuses the current Telegram bot webhook, chat authorization, and existing `wan_video_jobs` table, distinguishing motion jobs via a `motion-` status prefix. `/video`, `/image2video`, and `/video_status` remain independent. The live Cloudflare deployment is **not changed** by a commit to this setup branch.
+- User flow: send a reference **photo**, then **reply to that photo** with a driving video (1–10 sec) captioned `/motion`. Bot will download up to 5 MB photo + 20 MB video; Modal preprocesses a maximum of 3 sec at 640x360/30 FPS, samples 20 steps on A100 80 GB, and persists a result in `wan22-animate-test-results:/telegram-motion/generated`. Then `/motion_status` downloads the MP4 and sends it via Telegram. Requires first end-to-end verification before considering the flow production-ready.
+
+**Mandatory first setup**: create the flags secret with the safe OFF state, not ON. The existing `wan22-animate-auth` Modal Secret must contain `MOTION_API_KEY`. Never paste keys into the repository or public logs.
+
+```bash
+cd ~/wan22-animate-setup
+git pull --ff-only
+cd modal_animate
+
+# The new HTTP service requires this Modal secret even when disabled.
+modal secret create wan22-motion-flags MOTION_GPU_ENABLED=0
+
+# Register only the isolated new app; DOES NOT run GPU inference.
+modal deploy motion_service.py
+```
+
+Then check the actual `web_api` HTTPS URL printed by `modal deploy`. Use that exact endpoint for `/health`. It should return `gpu_generation_enabled:false`. The endpoint is protected on paid routes by the existing `wan22-animate-auth` secret.
+
+**Do not deploy the modified Cloudflare Worker yet**: first verify `npm ci && npm run build` and the new Modal endpoint. Before a live Worker rollout, configure new bindings `MODAL_MOTION_API_BASE` (exact deployed HTTPS service origin) and `MODAL_MOTION_API_KEY` (the matching `MOTION_API_KEY` as a Cloudflare Secret Text binding). Keep all existing bindings unchanged. Only after validation, deploy `vite-react-template` using its existing approved CI workflow. Do not redeploy unrelated Cloudflare projects.
+
+**Explicit paid enable** after observing the disabled status, and only when you accept up to 20 minutes maximum GPU runtime per request: update the dedicated Modal flags secret to `MOTION_GPU_ENABLED=1` and redeploy `motion_service.py`. The current A100 80 GB GPU rate may be around $2.50/hour plus separately charged CPU/RAM. A hard 20-minute Modal GPU function timeout is a safety ceiling, not the expected runtime or a guaranteed total price. `min_containers=0` and `max_containers=1` minimize idle GPU spending.
+
+This is an **untested new production path**, distinct from the already-proven official sample tests. No claim of deployed Telegram support or tested arbitrary uploads should be made until Modal and Cloudflare deployment tests both pass.
