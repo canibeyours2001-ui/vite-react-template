@@ -16,6 +16,8 @@ app = modal.App("wan22-animate-preprocess-smoke")
 
 # Mount only the already-downloaded checkpoint volume, as read-only.
 models = modal.Volume.from_name("wan22-animate-models", create_if_missing=False)
+# Isolated output location: does not alter the existing Wan TI2V results volume.
+results = modal.Volume.from_name("wan22-animate-test-results", create_if_missing=True)
 MODEL = Path("/models/Wan2.2-Animate-14B")
 
 # The upstream preprocessing module requires PyTorch, SAM2, ONNX Runtime,
@@ -78,7 +80,10 @@ def run_checked(args: list[str], cwd: str | None = None) -> None:
 
 @app.function(
     image=preprocess_image,
-    volumes={"/models": models.with_mount_options(read_only=True)},
+    volumes={
+        "/models": models.with_mount_options(read_only=True),
+        "/results": results,
+    },
     cpu=4,
     memory=16384,
     timeout=900,
@@ -131,14 +136,24 @@ def preprocess_upstream_demo() -> dict:
         if not path.is_file() or path.stat().st_size < 100:
             raise RuntimeError("Official preprocessing did not produce " + name)
         sizes[name] = path.stat().st_size
+    # Save the proven preprocessing assets for a separate, opt-in GPU test.
+    import shutil
+    saved = Path("/results/upstream-demo/preprocessed")
+    saved.mkdir(parents=True, exist_ok=True)
+    for name in expected:
+        shutil.copy2(output / name, saved / name)
+    results.commit()
+
     result = {
         "preprocessing_passed": True,
         "outputs": sizes,
         "official_example_inputs": True,
         "gpu_started": False,
         "model_generation_started": False,
-        "outputs_persisted": False,
-        "warning": "Demo outputs are temporary; pass this stage before adding user uploads.",
+        "outputs_persisted": True,
+        "saved_volume": "wan22-animate-test-results",
+        "saved_path": "/upstream-demo/preprocessed",
+        "warning": "Preprocessed demo assets saved, but GPU generation has NOT run.",
     }
     print(json.dumps(result, indent=2))
     return result
