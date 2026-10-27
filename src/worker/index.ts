@@ -157,7 +157,7 @@ app.post('/telegram/webhook', async (c) => {
     try {
       const answer = await c.env.AI.run('@cf/meta/llama-3.1-8b-instruct-fp8', {
         messages: [
-          { role: 'system', content: 'You are a helpful AI Telegram assistant. Answer clearly and briefly. Reply in Burmese when the message is Burmese.' },
+          { role: 'system', content: 'You are an English-only AI assistant on Telegram. Respond in English in every message, even if the user writes in Burmese or previously requested another language. Do not write Burmese script. Answer questions clearly, accurately, and concisely. Treat each message independently because conversation history is not available.' },
           { role: 'user', content: text }
         ],
         max_tokens: 400
