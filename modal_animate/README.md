@@ -120,3 +120,21 @@ Sources:
 - https://huggingface.co/Wan-AI/Wan2.2-Animate-14B/tree/main
 - https://github.com/Wan-Video/Wan2.2
 - https://modal.com/docs/guide/volumes
+
+
+## Stage 4: Verify core model asset readiness (no GPU)
+
+After `modal run download_weights.py` reports **Succeeded** for all 10 files, verify the model index, diffusion checkpoint files, VAE, CLIP/T5 encoders and the mandatory YOLO/VitPose preprocessing checkpoints before deploying a GPU runner:
+
+```bash
+cd "$HOME/wan22-animate-setup"
+git pull --ff-only
+cd modal_animate
+modal run check_readiness.py
+```
+
+The expected report has `readiness_check_passed: true`, `core_files_present: 10`, and `diffusion_shards_indexed: 4`. This is a **read-only metadata check**; it does not prove that the checkpoint is loadable, the ONNX pose runtime is installed, or video generation will work.
+
+The official pipeline still requires `wan/modules/animate/preprocess/preprocess_data.py` to produce `src_pose.mp4`, `src_face.mp4`, and `src_ref.png` from the reference image and driving video before executing `generate.py --task animate-14B`. Basic animation does not require the optional FLUX image editor or SAM2 masking model; do not download FLUX or attempt replacement mode as part of the initial test. See the upstream `requirements.txt`, `requirements_animate.txt`, and preprocessing UserGuider.
+
+GPU is not configured in this readiness-check module, and it does not change the deployed `wan22-animate-14b` HTTP preflight API or the existing TI2V bot.
