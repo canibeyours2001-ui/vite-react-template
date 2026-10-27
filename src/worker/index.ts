@@ -208,7 +208,7 @@ app.post('/telegram/webhook', async (c) => {
           return
         }
         try {
-          const base = c.env.MODAL_WAN_API_BASE.replace(/\\/$/, '')
+          const base = c.env.MODAL_WAN_API_BASE.replace(/\/$/, '')
           const headers: Record<string, string> = {}
           if (c.env.MODAL_WAN_API_KEY) headers.Authorization = 'Bearer ' + c.env.MODAL_WAN_API_KEY
           const response = await fetch(base + '/v1/generations/' + encodeURIComponent(latest.job_id), { headers, signal: AbortSignal.timeout(12000) })
@@ -247,7 +247,7 @@ app.post('/telegram/webhook', async (c) => {
         try {
           const headers: Record<string,string> = {'content-type':'application/json'}
           if (c.env.MODAL_WAN_API_KEY) headers.Authorization = 'Bearer ' + c.env.MODAL_WAN_API_KEY
-          const response = await fetch(base.toString().replace(/\\/$/, '') + '/v1/generations', {
+          const response = await fetch(base.toString().replace(/\/$/, '') + '/v1/generations', {
             method:'POST',headers,body:JSON.stringify({prompt}),signal:AbortSignal.timeout(20000)
           })
           if (!response.ok) throw new Error('Modal HTTP ' + response.status)
