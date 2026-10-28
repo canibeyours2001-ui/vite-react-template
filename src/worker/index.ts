@@ -717,6 +717,24 @@ async function processQueuedMotion(env: Bindings): Promise<void> {
     if (!response.ok) {
       if (response.status === 503) throw new Error('Motion GPU generation is disabled; no job was launched')
       if (response.status === 401) throw new Error('Motion API authentication failed; check matching secrets')
+      if (response.status === 400 || response.status === 422) {
+        // FastAPI returns a safe validation "detail". Never echo arbitrary
+        // server responses, media bytes, Telegram tokens, or request headers.
+        let detail = ''
+        try {
+          const body = await response.json() as { detail?: unknown }
+          if (typeof body.detail === 'string') detail = body.detail
+        } catch { /* retain generic validation explanation */ }
+        const knownReasons = new Set([
+          'Invalid reference image',
+          'Invalid driving video',
+          'Driving video must be 1–10 seconds long',
+          'Reference image must be at most 5 MB',
+          'Driving video must be at most 20 MB',
+        ])
+        throw new Error('Modal validation rejected: ' +
+          (knownReasons.has(detail) ? detail : 'invalid or unsupported image/video upload'))
+      }
       throw new Error('Modal rejected motion: HTTP ' + response.status)
     }
     stage = 'modal-response'
@@ -745,6 +763,9 @@ async function processQueuedMotion(env: Bindings): Promise<void> {
       reason.replace(/(?:bot[0-9]+:)[a-zA-Z0-9_-]+/g, '[redacted]'))
     await sendUpdate(reason.startsWith('Motion GPU generation is disabled')
       ? 'The Motion API is online, but paid A100 GPU rendering is OFF. No job started.'
+      : reason.startsWith('Modal validation rejected: ')
+        ? 'Motion input rejected: ' + reason.slice('Modal validation rejected: '.length) +
+          '. No A100 job started. Please correct the media and try again.'
       : potentiallySubmitted
         ? 'Motion submission timed out after contacting Modal. Job status is uncertain; check Modal function calls before retrying to avoid duplicate charges.'
         : 'Motion upload failed at ' + stage + '. No Modal job was submitted. Send /motion_status to see the status.')
