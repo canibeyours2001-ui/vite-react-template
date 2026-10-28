@@ -511,3 +511,35 @@ Then check the actual `web_api` HTTPS URL printed by `modal deploy`. Use that ex
 **Explicit paid enable** after observing the disabled status, and only when you accept up to 20 minutes maximum GPU runtime per request: update the dedicated Modal flags secret to `MOTION_GPU_ENABLED=1` and redeploy `motion_service.py`. The current A100 80 GB GPU rate may be around $2.50/hour plus separately charged CPU/RAM. A hard 20-minute Modal GPU function timeout is a safety ceiling, not the expected runtime or a guaranteed total price. `min_containers=0` and `max_containers=1` minimize idle GPU spending.
 
 This is an **untested new production path**, distinct from the already-proven official sample tests. No claim of deployed Telegram support or tested arbitrary uploads should be made until Modal and Cloudflare deployment tests both pass.
+
+
+## Stage 10 — Optional 480p HQ /motion_hq and original-audio remux (Oct 28)
+
+The original Animate-14B pipeline generates **silent frames**; the original worker also used `ffmpeg -an` for pose/face preprocessing. The new Modal service preserves the **original driving video's audio when a real audio stream is present**, after video generation, using FFmpeg to copy the generated video and AAC-encode the first 3 seconds of source audio. This is muxing, **not AI-generated speech/audio**. If the source is silent, the output stays silent. It does not regenerate previous videos.
+
+There are two Telegram caption commands:
+- `/motion`: original **360p processing-area** target (640×360 pixel area), 20 steps, 77-frame segments, source audio mux when present. Original quality and runtime characteristics preserved.
+- `/motion_hq`: optional **480p processing-area** target (854×480 pixel area), 20 steps, 49-frame segments to reduce VRAM pressure, source audio mux when present. This has a larger spatial workload, may be slower and cost more, and remains **UNTESTED** as of this commit. 480p describes the spatial area; portrait videos will be approximately 480×854 after aspect-preserving preprocessing.
+
+Official Wan animation demo uses `--resolution_area 1280 720 --retarget_flag --use_flux`. Those flags require additional components and have not been enabled in this production branch. The HQ preset is a conservative test, **not a claim to match the official full quality**.
+
+Deploy the updated Python service on the existing branch after confirming the previously deployed `MOTION_GPU_ENABLED` secret setting:
+
+```bash
+cd ~/wan22-animate-setup
+git pull --ff-only
+cd modal_animate
+python3 -m py_compile motion_service.py
+modal deploy motion_service.py
+curl -fsS https://canibeyours2001-ui--wan22-animate-telegram-web-api.us-east.modal.run/health
+```
+
+**Do not call the paid render twice.** This deployment is CPU/API startup only; A100 is allocated when Telegram sends a new `/motion` or `/motion_hq` request. Test the existing `/motion` first if uncertain about HQ memory/time costs; do not assume 480p can fit within the same runtime budget. Existing TI2V-5B, working base Hono handler, and model weights are not modified by these Modal changes.
+
+For an already-downloaded silent generated MP4 and the corresponding user-owned driving video containing audio, FFmpeg on a local Mac/VPS can mux the soundtrack **without rerunning Wan**:
+
+```bash
+ffmpeg -i generated.mp4 -i driving.mp4 -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 128k -t 3 -shortest -movflags +faststart with_audio.mp4
+```
+
+It fails if the driving video lacks an audio track, which cannot be synthesized by the Animate model. For input images, a centered, sharp, front-facing full-body image with the person occupying most of the frame generally preserves more character detail than a full-scene shot with a tiny subject.
