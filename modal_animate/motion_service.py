@@ -12,6 +12,9 @@ from pathlib import Path
 from preprocess_smoke import preprocess_image
 from gpu_smoke import gpu_image
 
+# Modal 1.x mounts only the function module automatically. Imported sibling
+# files must be included explicitly in each remote container image.
+
 app = modal.App("wan22-animate-telegram")
 weights = modal.Volume.from_name("wan22-animate-models", create_if_missing=False)
 results = modal.Volume.from_name("wan22-animate-test-results", create_if_missing=False)
@@ -21,16 +24,28 @@ AUTH = modal.Secret.from_name("wan22-animate-auth")
 # Separate *disabled by default* authorization for billable generation.
 FLAGS = modal.Secret.from_name("wan22-motion-flags")
 
-api_image = modal.Image.debian_slim(python_version="3.11").apt_install("ffmpeg").pip_install(
-    "fastapi>=0.115,<1", "python-multipart>=0.0.12,<1", "pillow>=11,<13"
+api_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("ffmpeg")
+    .pip_install(
+        "fastapi>=0.115,<1", "python-multipart>=0.0.12,<1",
+        "pillow>=11,<13",
+    )
+    # motion_service.py imports gpu_smoke -> preprocess_smoke at module
+    # import time; without these mounts, API containers crash on startup.
+    .add_local_python_source("preprocess_smoke", "gpu_smoke")
 )
+
+# Both function containers must have the sibling imports on PYTHONPATH.
+# This adds only source files; it does not start a GPU or download weights.
+render_image = gpu_image.add_local_python_source("gpu_smoke")
 
 MODEL = Path("/models/Wan2.2-Animate-14B")
 OUTPUT_ROOT = Path("/results/telegram-motion/generated")
 
 
 @app.function(
-    image=gpu_image,
+    image=render_image,
     volumes={"/models": weights.with_mount_options(read_only=True), "/results": results},
     gpu="A100-80GB",
     cpu=4,
