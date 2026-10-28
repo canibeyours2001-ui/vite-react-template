@@ -237,6 +237,10 @@ def web_api():
             return call.get(timeout=0)
         except TimeoutError:
             return None
+        except subprocess.CalledProcessError:
+            # Remote generate.py finished unsuccessfully. Do not leave Telegram
+            # /motion_status stuck on "running" or expose the private command.
+            return {"status": "failed"}
         except Exception as exc:
             # Never expose private Modal traceback / request bytes to callers.
             print("Motion job status retrieval failed:", type(exc).__name__, flush=True)
@@ -281,14 +285,17 @@ def web_api():
                 raise HTTPException(400, "Invalid driving video") from None
         if not (1 <= duration <= 10):
             raise HTTPException(400, "Driving video must be 1–10 seconds long")
-        call = render_motion.spawn(im_bytes, vi_bytes, 20)
+        call = await render_motion.spawn.aio(im_bytes, vi_bytes, 20)
         return {"id": call.object_id, "status": "running", "estimated_output_seconds": min(3, duration)}
 
     @api.get("/v1/motion/jobs/{call_id}")
     def status(call_id: str, authorization: str | None = Header(default=None)):
         check_auth(authorization)
         response = poll(call_id)
-        return {"id": call_id, "status": "running" if response is None else "succeeded"}
+        return {
+            "id": call_id,
+            "status": "running" if response is None else response.get("status", "succeeded"),
+        }
 
     @api.get("/v1/motion/jobs/{call_id}/video")
     def video(call_id: str, authorization: str | None = Header(default=None)):
@@ -296,6 +303,8 @@ def web_api():
         outcome = poll(call_id)
         if outcome is None:
             raise HTTPException(409, "Motion video not ready")
+        if outcome.get("status") == "failed":
+            raise HTTPException(409, "Motion generation failed")
         relative = outcome.get("video_path", "")
         if not re.fullmatch(r"/telegram-motion/generated/motion-[a-f0-9]{32}\.mp4", relative):
             raise HTTPException(502, "Invalid render output location")
