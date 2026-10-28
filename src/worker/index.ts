@@ -331,7 +331,8 @@ app.post('/telegram/webhook', async (c) => {
           "INSERT OR IGNORE INTO wan_video_jobs (chat_id, telegram_message_id, job_id, status) VALUES (?, ?, ?, 'motion-queued')"
         ).bind(key, msg.message_id, queued).run()
         if (inserted.meta.changes === 0) return
-        await send('Wan Animate motion queued. The bot processes motion uploads in its scheduled task. Send /motion_status to check progress. Paid A100 GPU generation is currently disabled.')
+        await send('Wan Animate motion queued. Send /motion_status to check progress. A100 billing applies only if GPU generation has been enabled.')
+        return
       }
       // Video commands use a separate job table and do not enter AI chat memory.
       if (text === '/video' || text === '/video_help') {
@@ -647,6 +648,7 @@ async function processQueuedMotion(env: Bindings): Promise<void> {
       console.error('Motion update notification failed', e instanceof Error ? e.name : 'unknown')
     }
   }
+  let stage = 'validate-input'
   try {
     const ids = JSON.parse(job.job_id) as {image?: unknown; video?: unknown}
     if (typeof ids.image !== 'string' || typeof ids.video !== 'string' ||
@@ -661,10 +663,21 @@ async function processQueuedMotion(env: Bindings): Promise<void> {
         base.username || base.password || base.search || base.hash || base.pathname !== '/')
       throw new Error('Invalid motion service URL')
 
-    const readFile = async (id: string, max: number): Promise<ArrayBuffer> => {
+    // Fail fast without transferring personal media when paid GPU is disabled.
+    stage = 'modal-health'
+    const healthResponse = await fetch(base.origin + '/health', {
+      signal: AbortSignal.timeout(90000),
+    })
+    if (!healthResponse.ok) throw new Error('Modal health HTTP ' + healthResponse.status)
+    const health = await healthResponse.json() as {ok?: boolean; gpu_generation_enabled?: boolean}
+    if (!health.ok || health.gpu_generation_enabled !== true)
+      throw new Error('Motion GPU generation is disabled; no job was launched')
+
+    const readFile = async (id: string, max: number, kind: 'photo' | 'video'): Promise<ArrayBuffer> => {
+      stage = 'telegram-' + kind + '-lookup'
       const infoResponse = await fetch(
         'https://api.telegram.org/bot' + token + '/getFile?file_id=' + encodeURIComponent(id),
-        {signal: AbortSignal.timeout(15000)}
+        {signal: AbortSignal.timeout(30000)}
       )
       if (!infoResponse.ok) throw new Error('Telegram getFile HTTP ' + infoResponse.status)
       const info = await infoResponse.json() as {
@@ -674,38 +687,43 @@ async function processQueuedMotion(env: Bindings): Promise<void> {
       if (!info.ok || !path || path.startsWith('/') || path.includes('..') ||
           (info.result?.file_size || 0) > max)
         throw new Error('Telegram media is unavailable or exceeds limit')
+      stage = 'telegram-' + kind + '-download'
       const file = await fetch('https://api.telegram.org/file/bot' + token + '/' + path,
-        {signal: AbortSignal.timeout(45000)})
+        {signal: AbortSignal.timeout(150000)})
       if (!file.ok) throw new Error('Telegram file HTTP ' + file.status)
       if (Number(file.headers.get('content-length') || 0) > max) {
         await file.body?.cancel()
         throw new Error('Telegram media too large')
       }
+      stage = 'telegram-' + kind + '-read-bytes'
       const bytes = await file.arrayBuffer()
       if (!bytes.byteLength || bytes.byteLength > max)
         throw new Error('Telegram media empty or too large')
       return bytes
     }
 
-    const image = await readFile(ids.image, 5 * 1024 * 1024)
-    const video = await readFile(ids.video, 20 * 1024 * 1024)
+    const image = await readFile(ids.image, 5 * 1024 * 1024, 'photo')
+    const video = await readFile(ids.video, 20 * 1024 * 1024, 'video')
     const multipart = new FormData()
     multipart.set('image', new Blob([image], {type: 'image/jpeg'}), 'telegram-reference.jpg')
     multipart.set('driving_video', new Blob([video], {type: 'video/mp4'}), 'telegram-driving.mp4')
+    stage = 'modal-submit'
     const response = await fetch(base.origin + '/v1/motion/jobs', {
       method: 'POST',
       headers: {Authorization: 'Bearer ' + env.MODAL_MOTION_API_KEY},
       body: multipart,
-      signal: AbortSignal.timeout(45000),
+      signal: AbortSignal.timeout(120000),
     })
     if (!response.ok) {
       if (response.status === 503) throw new Error('Motion GPU generation is disabled; no job was launched')
       if (response.status === 401) throw new Error('Motion API authentication failed; check matching secrets')
       throw new Error('Modal rejected motion: HTTP ' + response.status)
     }
+    stage = 'modal-response'
     const result = await response.json() as {id?: string; status?: string}
     if (!result.id || !/^fc-[A-Za-z0-9_-]{8,96}$/.test(result.id))
       throw new Error('Modal returned an invalid motion job ID')
+    stage = 'database-save'
     await db.prepare(
       "UPDATE wan_video_jobs SET status='motion-running', job_id=?, updated_at=unixepoch() WHERE chat_id=? AND telegram_message_id=?"
     ).bind(result.id,job.chat_id,job.telegram_message_id).run()
@@ -713,14 +731,23 @@ async function processQueuedMotion(env: Bindings): Promise<void> {
       '\\nUse /motion_status to get your video.')
   } catch (error) {
     const reason = error instanceof Error ? error.message : 'Unknown submission error'
-    // Do not retain expired Telegram file IDs or retry potentially chargeable calls.
+    // A transport timeout after POST may hide a successful submission.
+    // Never automatically retry potentially chargeable calls.
+    const potentiallySubmitted = (stage === 'modal-submit' || stage === 'modal-response' || stage === 'database-save')
+      && !reason.startsWith('Modal rejected motion:')
+      && !reason.startsWith('Motion API authentication failed')
+      && !reason.startsWith('Motion GPU generation is disabled')
     await db.prepare(
-      "UPDATE wan_video_jobs SET status='motion-failed', job_id='', updated_at=unixepoch() WHERE chat_id=? AND telegram_message_id=? AND status='motion-submitting'"
-    ).bind(job.chat_id,job.telegram_message_id).run()
-    console.error('Motion cron submit failed:', reason.replace(/(?:bot[0-9]+:)[a-zA-Z0-9_-]+/g, '[redacted]'))
+      "UPDATE wan_video_jobs SET status=?, job_id='', updated_at=unixepoch() WHERE chat_id=? AND telegram_message_id=? AND status='motion-submitting'"
+    ).bind(potentiallySubmitted ? 'motion-uncertain' : 'motion-failed', job.chat_id, job.telegram_message_id).run()
+    // Stage only; never log Telegram IDs, tokens, or user-uploaded content.
+    console.error('Motion cron submit failed at ' + stage + ':',
+      reason.replace(/(?:bot[0-9]+:)[a-zA-Z0-9_-]+/g, '[redacted]'))
     await sendUpdate(reason.startsWith('Motion GPU generation is disabled')
-      ? 'Motion integration is installed, but paid GPU rendering is currently OFF. No job started.'
-      : 'Motion upload failed. No successful job was confirmed. Do not retry automatically; check /motion_status.')
+      ? 'The Motion API is online, but paid A100 GPU rendering is OFF. No job started.'
+      : potentiallySubmitted
+        ? 'Motion submission timed out after contacting Modal. Job status is uncertain; check Modal function calls before retrying to avoid duplicate charges.'
+        : 'Motion upload failed at ' + stage + '. No Modal job was submitted. Send /motion_status to see the status.')
   }
 }
 
