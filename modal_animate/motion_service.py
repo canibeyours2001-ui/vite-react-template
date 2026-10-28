@@ -22,7 +22,7 @@ results = modal.Volume.from_name("wan22-animate-test-results", create_if_missing
 # Existing generated Motion API secret: MOTION_API_KEY
 AUTH = modal.Secret.from_name("wan22-animate-auth")
 # Separate *disabled by default* authorization for billable generation.
-FLAGS = modal.Secret.from_name("wan22-motion-flags")
+FLAGS = modal.Secret.from_name("wan22-motion-flags", required_keys=["MOTION_GPU_ENABLED"])
 
 api_image = (
     modal.Image.debian_slim(python_version="3.11")
