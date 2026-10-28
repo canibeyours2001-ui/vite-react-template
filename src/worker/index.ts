@@ -251,8 +251,8 @@ app.post('/telegram/webhook', async (c) => {
         if (!c.env.MODAL_MOTION_API_KEY) throw new Error('Animate-14B secret is missing')
         return { base: url.origin, headers: { Authorization: 'Bearer ' + c.env.MODAL_MOTION_API_KEY } }
       }
-      if (text === '/motion_help' || (text === '/motion' && !msg.video && !msg.document)) {
-        await send('Wan2.2 Animate-14B motion transfer:\n1. Send me a reference PHOTO of the person.\n2. Reply directly to that photo with a short DRIVING VIDEO and caption /motion.\n3. Check /motion_status.\nMaximum 5 MB photo and 20 MB video, 1–10 sec input, first 3 sec rendered at 30 FPS. Paid GPU generation starts only if enabled by the owner.')
+      if (text === '/motion_help' || ((text === '/motion' || text === '/motion_hq') && !msg.video && !msg.document)) {
+        await send('Wan2.2 Animate-14B motion transfer:\n1. Send me a reference PHOTO of the person.\n2. Reply directly to that photo with a short DRIVING VIDEO and caption /motion.\n3. Check /motion_status.\nUse /motion_hq instead of /motion for opt-in 480p quality (unverified, higher GPU cost). The default /motion remains 360p. The bot preserves source audio if available. Maximum 5 MB photo and 20 MB video, 1–10 sec input, first 3 sec rendered at 30 FPS.')
         return
       }
       if (text === '/motion_status') {
@@ -302,7 +302,7 @@ app.post('/telegram/webhook', async (c) => {
           return
         }
       }
-      const wantsMotion = text === '/motion' || text.startsWith('/motion@')
+      const wantsMotion = text === '/motion' || text.startsWith('/motion@') || text === '/motion_hq' || text.startsWith('/motion_hq@')
       if (wantsMotion && (!!msg.video || !!msg.document)) {
         const source = msg.video ||
           (msg.document && /^video\//.test(msg.document.mime_type || '') ? msg.document : undefined)
@@ -322,7 +322,8 @@ app.post('/telegram/webhook', async (c) => {
           await send('Photo must be <=5 MB and driving video <=20 MB.')
           return
         }
-        const queued = JSON.stringify({ image: reference.file_id, video: source.file_id })
+        const quality = text.startsWith('/motion_hq') ? 'hq' : 'standard'
+        const queued = JSON.stringify({ image: reference.file_id, video: source.file_id, quality })
         if (queued.length > 600) {
           await send('Telegram media ID was unexpectedly long; motion job not queued.')
           return
@@ -331,7 +332,8 @@ app.post('/telegram/webhook', async (c) => {
           "INSERT OR IGNORE INTO wan_video_jobs (chat_id, telegram_message_id, job_id, status) VALUES (?, ?, ?, 'motion-queued')"
         ).bind(key, msg.message_id, queued).run()
         if (inserted.meta.changes === 0) return
-        await send('Wan Animate motion queued. Send /motion_status to check progress. A100 billing applies only if GPU generation has been enabled.')
+        await send('Wan Animate ' + (quality === 'hq' ? '(480p HQ)' : '(360p standard)') +
+          ' motion queued. Send /motion_status to check progress. A100 billing applies if GPU generation is enabled.')
         return
       }
       // Video commands use a separate job table and do not enter AI chat memory.
@@ -650,7 +652,7 @@ async function processQueuedMotion(env: Bindings): Promise<void> {
   }
   let stage = 'validate-input'
   try {
-    const ids = JSON.parse(job.job_id) as {image?: unknown; video?: unknown}
+    const ids = JSON.parse(job.job_id) as {image?: unknown; video?: unknown; quality?: unknown}
     if (typeof ids.image !== 'string' || typeof ids.video !== 'string' ||
         !ids.image || !ids.video || ids.image.length > 256 || ids.video.length > 256)
       throw new Error('Invalid queued Telegram media IDs')
@@ -707,6 +709,8 @@ async function processQueuedMotion(env: Bindings): Promise<void> {
     const multipart = new FormData()
     multipart.set('image', new Blob([image], {type: 'image/jpeg'}), 'telegram-reference.jpg')
     multipart.set('driving_video', new Blob([video], {type: 'video/mp4'}), 'telegram-driving.mp4')
+    const quality = ids.quality === 'hq' ? 'hq' : 'standard'
+    multipart.set('quality', quality)
     stage = 'modal-submit'
     const response = await fetch(base.origin + '/v1/motion/jobs', {
       method: 'POST',
@@ -745,7 +749,8 @@ async function processQueuedMotion(env: Bindings): Promise<void> {
     await db.prepare(
       "UPDATE wan_video_jobs SET status='motion-running', job_id=?, updated_at=unixepoch() WHERE chat_id=? AND telegram_message_id=?"
     ).bind(result.id,job.chat_id,job.telegram_message_id).run()
-    await sendUpdate('Wan Animate 14B motion submitted. Job ID: ' + result.id +
+    await sendUpdate('Wan Animate 14B ' + (quality === 'hq' ? '480p HQ' : '360p') +
+      ' motion submitted. Job ID: ' + result.id +
       '\\nUse /motion_status to get your video.')
   } catch (error) {
     const reason = error instanceof Error ? error.message : 'Unknown submission error'
