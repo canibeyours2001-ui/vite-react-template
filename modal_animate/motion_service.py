@@ -79,14 +79,20 @@ def render_motion(image_bytes: bytes, video_bytes: bytes, steps: int = 20) -> di
 
     with tempfile.TemporaryDirectory(prefix="wan-motion-") as temp:
         tempdir = Path(temp)
-        reference = tempdir / "reference.png"
+        # Upstream copies this file to src_ref.png without re-encoding.
+        # OpenCV chooses its decoder from the content signature, so JPEG
+        # bytes remain readable even at Wan's fixed src_ref.png path.
+        # This bypasses the observed libpng/zlib decode failure.
+        reference = tempdir / "reference.jpg"
         raw_video = tempdir / "raw_video.mp4"
         reference_out = tempdir / "processed"
         reference_out.mkdir()
         with Image.open(__import__("io").BytesIO(image_bytes)) as im:
             if im.format not in ("JPEG", "PNG", "WEBP") or max(im.size) > 4096:
                 raise ValueError("Invalid image format or excessive dimensions")
-            im.convert("RGB").save(reference)
+            im.convert("RGB").save(
+                reference, format="JPEG", quality=97, subsampling=0,
+            )
         raw_video.write_bytes(video_bytes)
         probe = subprocess.check_output(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -121,6 +127,26 @@ def render_motion(image_bytes: bytes, video_bytes: bytes, steps: int = 20) -> di
             file = reference_out / name
             if not file.is_file() or file.stat().st_size < 100:
                 raise RuntimeError("Preprocessing output is missing: " + name)
+        # Check the exact reference passed to Wan BEFORE loading the 14B
+        # checkpoints. Decode in a separate Python process just like Wan.
+        src_ref = reference_out / "src_ref.png"
+        with src_ref.open("rb") as fp:
+            if fp.read(3) != b"\xff\xd8\xff":
+                raise RuntimeError("Reference output is not normalized JPEG data")
+        probe_code = (
+            "import cv2,sys; "
+            "im=cv2.imread(sys.argv[1], cv2.IMREAD_COLOR); "
+            "assert im is not None and im.ndim == 3 and im.shape[2] == 3, "
+            "'OpenCV cannot read src_ref.png'; "
+            "print('REFERENCE_DECODER_OK:', im.shape, flush=True)"
+        )
+        decoder = subprocess.run(
+            ["python", "-c", probe_code, str(src_ref)],
+            capture_output=True, text=True, timeout=25,
+        )
+        if decoder.returncode != 0:
+            raise RuntimeError("Reference output failed independent OpenCV decode")
+        print(decoder.stdout.strip(), flush=True)
         name = "motion-" + uuid4().hex
         dest = OUTPUT_ROOT / (name + ".mp4")
         OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
