@@ -55,7 +55,7 @@ OUTPUT_ROOT = Path("/results/telegram-motion/generated")
     min_containers=0,
     scaledown_window=15,
 )
-def render_motion(image_bytes: bytes, video_bytes: bytes, steps: int = 20) -> dict:
+def render_motion(image_bytes: bytes, video_bytes: bytes, steps: int = 20, quality: str = "standard") -> dict:
     """Preprocess user inputs and generate <=3 seconds in an isolated paid job."""
     import json
     import os
@@ -68,6 +68,14 @@ def render_motion(image_bytes: bytes, video_bytes: bytes, steps: int = 20) -> di
 
     if steps != 20:
         raise ValueError("Only official 20-step sampling is supported for Telegram.")
+    if quality not in ("standard", "hq"):
+        raise ValueError("Quality must be standard or hq")
+    # HQ is opt-in to avoid unexpectedly higher A100 charges.
+    # A shorter 49-frame HQ window reduces peak VRAM pressure on 80 GB A100.
+    area = (854, 480) if quality == "hq" else (640, 360)
+    segment_frames = 49 if quality == "hq" else 77
+    print("Motion settings:", quality, "target area:", area,
+          "segment frames:", segment_frames, flush=True)
     if not image_bytes or len(image_bytes) > 5 * 1024 * 1024:
         raise ValueError("Image must be at most 5 MB.")
     if not video_bytes or len(video_bytes) > 20 * 1024 * 1024:
@@ -112,7 +120,7 @@ def render_motion(image_bytes: bytes, video_bytes: bytes, steps: int = 20) -> di
         run([
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(raw_video), "-t", str(duration),
-            "-vf", "fps=30,scale=640:-2", "-an", "-c:v", "libx264",
+            "-vf", f"fps=30,scale={area[0]}:-2", "-an", "-c:v", "libx264",
             "-pix_fmt", "yuv420p", str(processed_video),
         ], timeout=120)
         run([
@@ -121,7 +129,7 @@ def render_motion(image_bytes: bytes, video_bytes: bytes, steps: int = 20) -> di
             "--video_path", str(processed_video),
             "--refer_path", str(reference),
             "--save_path", str(reference_out),
-            "--resolution_area", "640", "360", "--fps", "30",
+            "--resolution_area", str(area[0]), str(area[1]), "--fps", "30",
         ], cwd="/opt/Wan2.2", timeout=500)
         for name in ("src_ref.png", "src_pose.mp4", "src_face.mp4"):
             file = reference_out / name
@@ -154,7 +162,7 @@ def render_motion(image_bytes: bytes, video_bytes: bytes, steps: int = 20) -> di
             "python", "-u", "generate.py", "--task", "animate-14B",
             "--ckpt_dir", str(MODEL),
             "--src_root_path", str(reference_out),
-            "--frame_num", "77",
+            "--frame_num", str(segment_frames),
             "--refert_num", "1",
             "--sample_steps", str(steps),
             "--sample_guide_scale", "1",
@@ -179,6 +187,37 @@ def render_motion(image_bytes: bytes, video_bytes: bytes, steps: int = 20) -> di
                     except ProcessLookupError: pass
         if not dest.is_file() or dest.stat().st_size < 1000:
             raise RuntimeError("Wan failed to produce valid MP4")
+
+        # Wan-Animate produces silent video. Reuse the FIRST 3 seconds of the
+        # driving video's own audio if it has an audio stream; this is a cheap
+        # FFmpeg remux, not an additional generative model or GPU render.
+        # If the driving video has no audio, leave the result silent.
+        audio_included = False
+        audio_probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=index", "-of", "csv=p=0",
+             str(raw_video)],
+            capture_output=True, text=True, timeout=20,
+        )
+        if audio_probe.returncode == 0 and audio_probe.stdout.strip():
+            with_audio = OUTPUT_ROOT / (name + "-mux.mp4")
+            try:
+                run([
+                    "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                    "-y", "-i", str(dest), "-i", str(raw_video),
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                    "-t", str(duration), "-shortest",
+                    "-movflags", "+faststart", str(with_audio)
+                ], timeout=90)
+                if not with_audio.is_file() or with_audio.stat().st_size < 1000:
+                    raise RuntimeError("Audio remux did not create a valid MP4")
+                os.replace(with_audio, dest)
+                audio_included = True
+            except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
+                print("Original audio remux failed; preserving silent video:",
+                      type(exc).__name__, flush=True)
+                with_audio.unlink(missing_ok=True)
         if dest.stat().st_size > 45 * 1024 * 1024:
             dest.unlink()
             raise RuntimeError("MP4 exceeds Telegram file delivery limit")
@@ -187,6 +226,8 @@ def render_motion(image_bytes: bytes, video_bytes: bytes, steps: int = 20) -> di
         return {
             "status": "succeeded", "video_path": str(dest).removeprefix("/results"),
             "seconds": round(duration, 2),
+            "quality": quality, "processing_area": list(area),
+            "audio_included": audio_included,
             "bytes": dest.stat().st_size, "elapsed_gpu_seconds": round(time.monotonic()-started, 1),
         }
 
@@ -208,7 +249,7 @@ def web_api():
     import subprocess
     import tempfile
     from pathlib import Path
-    from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+    from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
     from fastapi.responses import FileResponse
     from PIL import Image, UnidentifiedImageError
 
@@ -254,11 +295,14 @@ def web_api():
     @api.post("/v1/motion/jobs")
     async def submit(
         image: UploadFile = File(...), driving_video: UploadFile = File(...),
+        quality: str = Form("standard"),
         authorization: str | None = Header(default=None),
     ):
         check_auth(authorization)
         if not enabled():
             raise HTTPException(503, "Motion GPU submissions disabled by administrator")
+        if quality not in ("standard", "hq"):
+            raise HTTPException(400, "Invalid quality preset")
         im_bytes = await image.read(MAX_IMAGE + 1)
         vi_bytes = await driving_video.read(MAX_VIDEO + 1)
         if not im_bytes or len(im_bytes) > MAX_IMAGE:
@@ -285,8 +329,9 @@ def web_api():
                 raise HTTPException(400, "Invalid driving video") from None
         if not (1 <= duration <= 10):
             raise HTTPException(400, "Driving video must be 1–10 seconds long")
-        call = await render_motion.spawn.aio(im_bytes, vi_bytes, 20)
-        return {"id": call.object_id, "status": "running", "estimated_output_seconds": min(3, duration)}
+        call = await render_motion.spawn.aio(im_bytes, vi_bytes, 20, quality)
+        return {"id": call.object_id, "status": "running",
+                "quality": quality, "estimated_output_seconds": min(3, duration)}
 
     @api.get("/v1/motion/jobs/{call_id}")
     def status(call_id: str, authorization: str | None = Header(default=None)):
