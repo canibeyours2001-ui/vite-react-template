@@ -41,18 +41,26 @@ async function tell(env:VoxEnv,chat:string,message:string){
 async function kaggle(env:VoxEnv,action:string,body:Record<string,unknown>,timeoutMs=25000){
  if(!env.KAGGLE_API_TOKEN)throw Error('Kaggle API token is not configured')
  if(!['list','push','status','output'].includes(action))throw Error('Unknown Kaggle action')
- const r=await fetch(BASE+action,{
-  method:'POST',headers:{
-   'Authorization':'Bearer '+env.KAGGLE_API_TOKEN,
-   'Content-Type':'application/json',
-   'Accept':'application/json',
+ const query=new URLSearchParams()
+ for(const key of ['user','pageSize','userName','kernelSlug','versionLabel']){
+  const value=body[key]
+  if(typeof value==='string'||typeof value==='number')query.set(key,String(value))
+ }
+ const isPush=action==='push'
+ const url=BASE+action+(isPush?'':'?'+query.toString())
+ const response=await fetch(url,{
+  method:isPush?'POST':'GET',
+  headers:{
+   Authorization:'Bearer '+env.KAGGLE_API_TOKEN,
+   Accept:'application/json',
+   ...(isPush?{'Content-Type':'application/json'}:{})
   },
-  body:JSON.stringify(body),
-  signal:AbortSignal.timeout(timeoutMs)
+  ...(isPush?{body:JSON.stringify(body)}:{}),
+  signal:AbortSignal.timeout(timeoutMs),
  })
- const data=await r.json().catch(()=>({})) as Record<string,unknown>
- if(!r.ok || (typeof data.code==='number'&&data.code>=400)){
-  throw Error('Kaggle '+action+' HTTP '+r.status)
+ const data=await response.json().catch(()=>({})) as Record<string,unknown>
+ if(!response.ok || (typeof data.code==='number'&&data.code>=400) || (isPush&&Boolean(data.error))){
+  throw Error('Kaggle '+action+' HTTP '+response.status)
  }
  return data
 }
