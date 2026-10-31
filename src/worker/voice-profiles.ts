@@ -129,7 +129,7 @@ export async function handleVoiceMessage(env:VoiceEnv,msg:VoiceMessage,chat:stri
       await say(env,chat,'Saved voice profiles:\n'+Array.from({length:5},(_,i)=>{
         const v=data.find(x=>x.slot===i+1)
         return (i+1)+'. '+(v?v.name:'Empty')
-      }).join('\n')+'\n\nSave: reply to a recording with /savevoice 1 Narrator. No transcript required.'
+      }).join('\n')+'\n\nSave: reply to a recording with /savevoice 1 Narrator. No transcript required.')
       return true
     }
     if(cmd==='/savevoice'){
