@@ -3,7 +3,7 @@ on:
   pull_request:
   push:
     branches:
-      - fix/mvsep-tts-length-unrestricted
+      - feature/pyvt-kaggle-telegram
 permissions:
   contents: write
 jobs:
@@ -22,7 +22,7 @@ jobs:
       - run: npx tsc --noEmit -p tsconfig.worker.json
       - run: npm run build
       - name: Preserve compiled Worker for safe direct Cloudflare deployment
-        if: github.event_name == 'push' && github.ref == 'refs/heads/fix/mvsep-tts-length-unrestricted'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/pyvt-kaggle-telegram'
         run: |
           mkdir -p deploy
           cp dist/vite_react_template/index.js deploy/worker-bundle.mjs
