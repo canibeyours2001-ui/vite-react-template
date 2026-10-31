@@ -44,7 +44,10 @@ export async function handleVoxTelegram(
      'No VoxCPM2 jobs found. Use /vox YOUR TEXT.')
    return true
   }
-  if(!env.VOX_WORKER_KEY || env.VOX_WORKER_KEY.length<32){\n    await send('Kaggle VoxCPM2 worker is not connected yet. The existing MVSEP audio generation remains available.');return true\n  }\n  const speech=text.replace(/^\/vox(?:@[A-Za-z0-9_]+)?(?:\s+|$)/i,'').trim()
+  if(!env.VOX_WORKER_KEY || env.VOX_WORKER_KEY.length<32){
+    await send('Kaggle VoxCPM2 worker is not connected yet. The existing MVSEP audio generation remains available.');return true
+  }
+  const speech=text.replace(/^\/vox(?:@[A-Za-z0-9_]+)?(?:\s+|$)/i,'').trim()
   if(!speech||speech.length>800){
    await send('Use /vox followed by 1–800 characters of speech text. Example: /vox မင်္ဂလာပါ။')
    return true
