@@ -6,7 +6,7 @@ from pathlib import Path
 import soundfile as sf
 from voxcpm import VoxCPM
 
-TASK=json.loads(__import__("os").environ.get("VOX_TASK_JSON","{}"))
+TASK=json.loads(__VOX_TASK_JSON__)
 text=TASK.get("text","").strip()
 if not text or len(text)>800:
     raise ValueError("Invalid queued text")
