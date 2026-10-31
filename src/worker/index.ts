@@ -619,7 +619,7 @@ app.post('/telegram/webhook', async (c) => {
         return
       }
       // /help and /commands are explicit, low-latency guidance; /ask bypasses voice wizard.
-      if (text === '/help' || text === '/commands' || text === '/help@' + 'placeholder') {
+      if (/^\/(?:help|commands)(?:@\w+)?$/i.test(text)) {
         await send(
           'Available bot commands:\n' +
           '/clone — choose one of five saved voices or upload custom\n' +
