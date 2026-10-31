@@ -2955,9 +2955,34 @@ async function pollAudioJobs(env2) {
     }
   }
 }
+async function checkMvsepAccount(env2) {
+  if (!env2.MEMORY_DB || !env2.MVSEP_API_TOKEN) return;
+  const db = env2.MEMORY_DB;
+  await db.prepare(
+    "CREATE TABLE IF NOT EXISTS mvsep_connection_health (id INTEGER PRIMARY KEY CHECK(id=1), checked_at INTEGER NOT NULL, ok INTEGER NOT NULL, http_status INTEGER NOT NULL)"
+  ).bind().run();
+  const rows = await db.prepare(
+    "SELECT checked_at FROM mvsep_connection_health WHERE id=1"
+  ).bind().all();
+  if (rows.results[0] && rows.results[0].checked_at > Math.floor(Date.now() / 1e3) - 21600) return;
+  try {
+    const response = await fetch(
+      BASE + "/app/user?api_token=" + encodeURIComponent(env2.MVSEP_API_TOKEN),
+      { signal: AbortSignal.timeout(15e3), headers: { "cache-control": "no-store" } }
+    );
+    const payload = await response.json();
+    await db.prepare(
+      "INSERT INTO mvsep_connection_health(id,checked_at,ok,http_status) VALUES (1,unixepoch(),?,?) ON CONFLICT(id) DO UPDATE SET checked_at=unixepoch(),ok=excluded.ok,http_status=excluded.http_status"
+    ).bind(response.ok && payload.success === true ? 1 : 0, response.status).run();
+  } catch {
+    await db.prepare(
+      "INSERT INTO mvsep_connection_health(id,checked_at,ok,http_status) VALUES (1,unixepoch(),0,0) ON CONFLICT(id) DO UPDATE SET checked_at=unixepoch(),ok=0,http_status=0"
+    ).bind().run();
+  }
+}
 const LIMIT = 6 * 1024 * 1024;
 const LANGUAGES = /* @__PURE__ */ new Set(["Auto", "English", "Chinese", "Japanese", "Korean", "German", "French", "Russian", "Portuguese", "Spanish", "Italian"]);
-const help = "Voice cloning:\n/savevoice 1 Narrator | exact reference transcript (as a reply to a voice recording)\n/voices — show your 5 saved slots\n/clone — choose a saved voice or upload custom\n/clonelang English — set speech language\n/cancel — stop\nOnly use your own voice or voices you have permission to clone.";
+const help = "Voice cloning:\n/savevoice 1 Narrator | exact reference transcript (as a reply to a voice recording)\n/voices — show your 5 saved slots\n/clone — choose a saved voice or upload custom\n/tts_status — live status of latest generation\n/clonelang English — set speech language\n/cancel — stop\nOnly use your own voice or voices you have permission to clone.";
 function usableFile(file) {
   if (!file?.file_id || (file.file_size || 0) > LIMIT) return false;
   const ext = (file.file_name || "").toLowerCase();
@@ -3024,7 +3049,7 @@ async function handleVoiceMessage(env2, msg, chat, content) {
   const [commandRaw] = content.trim().split(/\s+/, 1);
   const cmd = (commandRaw || "").split("@")[0].toLowerCase();
   if (["/ask", "/help", "/commands"].includes(cmd)) return false;
-  const recognized = ["/savevoice", "/voices", "/clone", "/clone_help", "/cancel", "/clonelang"].includes(cmd);
+  const recognized = ["/savevoice", "/voices", "/clone", "/clone_help", "/tts_status", "/cancel", "/clonelang"].includes(cmd);
   let current = null;
   if (!recognized && !inboundFile(msg) && !content.trim()) return false;
   try {
@@ -3038,6 +3063,27 @@ async function handleVoiceMessage(env2, msg, chat, content) {
     if (cmd === "/cancel") {
       await clearSession(env2.MEMORY_DB, chat);
       await say(env2, chat, "Voice cloning cancelled.");
+      return true;
+    }
+    if (cmd === "/tts_status") {
+      const rows = await env2.MEMORY_DB.prepare(
+        "SELECT j.id,j.status,t.hash FROM qwen_clone_jobs j LEFT JOIN mvsep_tts_tracking t ON t.job_id=j.id WHERE j.chat_id=? ORDER BY j.id DESC LIMIT 1"
+      ).bind(chat).all();
+      const last = rows.results[0];
+      if (!last) {
+        await say(env2, chat, "No Qwen3-TTS jobs found. Use /clone to begin.");
+        return true;
+      }
+      if (last.hash && ["waiting", "processing", "distributing", "merging"].includes(last.status)) {
+        try {
+          const state = await mvsepGet(last.hash);
+          await say(env2, chat, voiceState(state) + "\nJob: " + last.id);
+        } catch {
+          await say(env2, chat, "Qwen3-TTS job #" + last.id + " last known status: " + last.status);
+        }
+      } else {
+        await say(env2, chat, "Qwen3-TTS job #" + last.id + ": " + last.status);
+      }
       return true;
     }
     if (cmd === "/voices") {
@@ -3913,7 +3959,7 @@ app.post("/telegram/webhook", async (c) => {
       }
       if (/^\/(?:help|commands)(?:@\w+)?$/i.test(text)) {
         await send2(
-          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/voices — list your five slots\n/savevoice 1 Name | exact transcript — reply to audio\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 40 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
+          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/tts_status — check latest Qwen3-TTS generation\n/voices — list your five slots\n/savevoice 1 Name | exact transcript — reply to audio\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
         );
         return;
       }
@@ -3943,8 +3989,9 @@ app.post("/telegram/webhook", async (c) => {
               "/voices — list stored voice slots.",
               "/savevoice N Label | exact reference transcript — reply to 3–15 second reference audio to save N from 1 to 5.",
               "/clonelang English — choose supported language (English, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian or Auto).",
+              "/tts_status — live status of the latest MVSEP Qwen voice generation.",
               "/cancel — exit the voice wizard.",
-              "/separate 40 — reply to an audio file for MVSEP source separation; /sep_status shows progress; /sep_help gives details.",
+              "/separate 26 — reply to an audio file for MVSEP source separation; /sep_status shows progress; /sep_help gives details.",
               "/video PROMPT — WAN text-to-video; /image2video — image-to-video; /video_status and /video_get JOB_ID retrieve results.",
               "/motion — reference-image and driving-video animation instructions; /motion_hq for high-quality experimental option; /motion_status for job state.",
               "Bot state JSON is current context (not a command). Voice cloning uses MVSEP model 120 through the MVSEP API key. No separate GPU provider is required. Check mvsep_qwen_enabled.",
@@ -4139,6 +4186,7 @@ async function registerTelegramWebhook(env2) {
         { command: "help", description: "Show all available commands" },
         { command: "ask", description: "Ask the AI for commands and guidance" },
         { command: "clone", description: "Pick a saved or custom voice" },
+        { command: "tts_status", description: "Check Qwen3-TTS generation status" },
         { command: "voices", description: "View your five saved voices" },
         { command: "savevoice", description: "Save reference voice to slot 1 to 5" },
         { command: "clonelang", description: "Set voice generation language" },
@@ -4170,7 +4218,7 @@ const index = {
     } catch (error) {
       console.error("Telegram webhook registration check failed:", error instanceof Error ? error.name : "unknown");
     }
-    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2)]);
+    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2)]);
     for (const r of results) {
       if (r.status === "rejected") console.error("Scheduled processing failed", String(r.reason).slice(0, 160));
     }
