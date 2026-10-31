@@ -4,6 +4,7 @@ import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAss
 import { isAllowedTelegramUser, handleAccessCommand, isAccessCommand } from './telegram-access'
 import {handleVoxTelegram,checkKaggleConnection,pollVoxKaggle,probeKaggleReadMethods} from './vox-kaggle-direct'
 import {handleVoxCallback} from './vox-voice-profiles'
+import {pyvtCommand,pyvtSignedFile,pollPyvt} from './pyvt-kaggle'
 
 type AIClient = {
   run: (
@@ -193,6 +194,8 @@ type TelegramUpdate = {
   }
 }
 
+// GET is the signed file download for private Kaggle jobs; POST is the existing Telegram webhook.
+app.get('/telegram/webhook',c=>pyvtSignedFile(c.env,c.req.raw))
 app.post('/telegram/webhook', async (c) => {
   const configured = c.env.TELEGRAM_WEBHOOK_SECRET
   if (!configured || c.req.header('X-Telegram-Bot-Api-Secret-Token') !== configured) {
@@ -277,6 +280,7 @@ app.post('/telegram/webhook', async (c) => {
     try {
       if (isAccessCommand(text) && await handleAccessCommand(c.env,sender,text,send)) return
       if (!allowed) return
+      if (await pyvtCommand(c.env,msg,key,text,send)) return
       if (await handleVoxTelegram(c.env,key,msg.message_id,text,send,msg)) return
       if (await handleVoiceMessage(c.env,msg,key,text)) return
       if (await handleAudioTelegram(c.env, msg, key, text, send)) return
@@ -637,6 +641,8 @@ app.post('/telegram/webhook', async (c) => {
           '/vox TEXT — Kaggle VoxCPM2 Burmese speech (up to 8,000 characters)\n' +
           '/vox — attach or reply to a UTF-8 .txt script for long narration\n' +
           '/vox_status — Kaggle VoxCPM2 job status\n' +
+          '/dub_help — pyVideoTrans video dubbing with Edge or VoxCPM2\n' +
+          '/dub_status — last Kaggle video dubbing status\n' +
           '/voxvoices — show five saved VoxCPM2 voices\n' +
           '/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n' +
           '/voxrename 1 Name — rename saved VoxCPM2 voice\n' +
@@ -680,6 +686,7 @@ app.post('/telegram/webhook', async (c) => {
               'You are the helpful AI guide for this Telegram bot. Reply in English and use the last 20 stored chat messages to understand the conversation. Give exact Telegram commands and clear, short examples.',
               'Available commands (do not invent commands):',
               '/help or /commands — show the command menu.',
+              '/dub_help — pyVideoTrans video translation and dubbing planned for private Kaggle jobs. Choose Microsoft Edge TTS or VoxCPM2; currently disabled until environment testing succeeds.',
               '/vox TEXT — request VoxCPM2 Burmese speech (up to 8,000 characters); after output click Save this voice, then a slot. /voxvoice 1 TEXT reuses stored reference; /voxvoices lists five slots; /voxrename 1 Name renames. Reply to a UTF-8 .txt file with /vox or /voxvoice 1, or attach a .txt file as caption. /vox_status gives status; no OCI needed.',
               '/whoami — show your Telegram numeric user ID.',
               '/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.',
@@ -928,6 +935,8 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'clone',description:'Pick a saved or custom voice'},
         {command:'vox',description:'Kaggle VoxCPM2 Burmese speech'},
         {command:'vox_status',description:'Check VoxCPM2 job status'},
+        {command:'dub_help',description:'pyVideoTrans video dubbing help'},
+        {command:'dub_status',description:'Check pyVideoTrans dubbing status'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
         {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
@@ -964,7 +973,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }
