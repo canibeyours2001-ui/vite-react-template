@@ -14,8 +14,6 @@ type D1 = {
 export type AudioEnv = {
   MVSEP_API_TOKEN?: string
   MVSEP_PROXY_KEY?: string
-  QWEN_TTS_API_BASE?: string
-  QWEN_TTS_API_KEY?: string
   TELEGRAM_BOT_TOKEN?: string
   MEMORY_DB?: D1
 }
@@ -156,8 +154,7 @@ export async function handleAudioTelegram(
   if (!['/separate','/sep_status','/sep_help','/clone_help','/clone'].includes(command)) return false
   try {
     if (command === '/clone_help' || command === '/clone') {
-      await send('Qwen3-TTS 1.7B Base voice cloning requires a separate GPU endpoint. ' +
-        'The Modal backend is not yet configured. Use only voices you own or have permission to clone.')
+      await send('Qwen3-TTS voice cloning is available via MVSEP. Use /clone to select a saved or custom voice. Only clone voices you own or have permission to use.')
       return true
     }
     if (command === '/sep_help') {
@@ -244,41 +241,3 @@ export async function pollAudioJobs(env: AudioEnv): Promise<void> {
   }
 }
 
-// Separate Qwen HTTP adapter. Requires QWEN_TTS_API_BASE and QWEN_TTS_API_KEY
-// from a self-hosted model backend; this never invokes an unconfigured GPU.
-export async function qwenCloneProxy(env: AudioEnv, request: Request): Promise<Response> {
-  if (!env.QWEN_TTS_API_BASE || !env.QWEN_TTS_API_KEY) {
-    return Response.json({ok:false,error:'Qwen GPU endpoint not configured'}, {status:503})
-  }
-  const u = new URL(env.QWEN_TTS_API_BASE)
-  if (u.protocol !== 'https:' || !u.hostname.endsWith('.modal.run') ||
-      u.username || u.password || u.search || u.hash || (u.pathname !== '/' && u.pathname !== '')) {
-    return Response.json({ok:false,error:'Invalid Qwen GPU endpoint'}, {status:503})
-  }
-  if (!(request.headers.get('content-type') || '').includes('multipart/form-data')) {
-    return Response.json({ok:false,error:'multipart/form-data required'}, {status:415})
-  }
-  const form = await request.formData()
-  const file = form.get('ref_audio')
-  const refText = form.get('ref_text')
-  const speech = form.get('text')
-  if (!(file instanceof File) || file.size < 1 || file.size > 6*1024*1024 ||
-      typeof refText !== 'string' || refText.length > 1000 ||
-      typeof speech !== 'string' || !speech.trim() || speech.length > 1000) {
-    return Response.json({ok:false,error:'Supply ref_audio, ref_text, text (max 1000 chars)'},{status:400})
-  }
-  const payload = new FormData()
-  payload.set('ref_audio',file,file.name)
-  payload.set('ref_text',refText)
-  payload.set('text',speech)
-  payload.set('language',String(form.get('language') || 'English'))
-  const r = await fetch(u.origin + '/v1/clone',{
-    method:'POST',headers:{'Authorization':'Bearer '+env.QWEN_TTS_API_KEY},
-    body:payload,signal:AbortSignal.timeout(120000),
-  })
-  if (!r.ok) return Response.json({ok:false,error:'Qwen backend returned HTTP '+r.status},{status:502})
-  return new Response(r.body,{
-    status:200,headers:{'content-type':r.headers.get('content-type') || 'audio/wav',
-      'cache-control':'no-store'}
-  })
-}
