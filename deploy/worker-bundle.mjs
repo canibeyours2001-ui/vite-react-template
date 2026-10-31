@@ -3070,7 +3070,7 @@ function usableFile(file) {
   const ext = (file.file_name || "").toLowerCase();
   return !file.mime_type || file.mime_type.startsWith("audio/") || /\.(wav|mp3|flac|ogg|oga|m4a)$/i.test(ext);
 }
-async function tg$1(env2, method, data) {
+async function tg$2(env2, method, data) {
   const resp = await fetch("https://api.telegram.org/bot" + env2.TELEGRAM_BOT_TOKEN + "/" + method, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -3082,7 +3082,7 @@ async function tg$1(env2, method, data) {
   return json.result || {};
 }
 async function say(env2, chat, text, keyboard) {
-  await tg$1(env2, "sendMessage", {
+  await tg$2(env2, "sendMessage", {
     chat_id: chat,
     text: text.slice(0, 3900),
     ...keyboard ? { reply_markup: keyboard } : {}
@@ -3304,7 +3304,7 @@ async function handleVoiceCallback(env2, cb) {
     if (await isAllowedTelegramUser(env2, chat, String(cb.from.id), cb.message?.chat.type))
       await say(env2, chat, "That selection expired or failed. Use /clone to start again.").catch(() => void 0);
   } finally {
-    await tg$1(env2, "answerCallbackQuery", { callback_query_id: cb.id }).catch(() => void 0);
+    await tg$2(env2, "answerCallbackQuery", { callback_query_id: cb.id }).catch(() => void 0);
   }
 }
 async function download(env2, id) {
@@ -3392,7 +3392,7 @@ async function mvsepCreate(env2, job, blob) {
 async function statusMessage(env2, chat, id, text) {
   if (id > 0) {
     try {
-      await tg$1(env2, "editMessageText", {
+      await tg$2(env2, "editMessageText", {
         chat_id: chat,
         message_id: id,
         text: text.slice(0, 3900),
@@ -3432,7 +3432,7 @@ async function processQwenVoiceJobs(env2) {
         try {
           if (files.length) {
             const url = files[0];
-            const sent = await tg$1(env2, "sendAudio", {
+            const sent = await tg$2(env2, "sendAudio", {
               chat_id: active.chat_id,
               audio: url,
               caption: "Qwen3-TTS generated audio #" + active.id
@@ -3467,7 +3467,7 @@ async function processQwenVoiceJobs(env2) {
   if (claimed.meta.changes !== 1) return;
   let id = 0;
   try {
-    const result = await tg$1(env2, "sendMessage", { chat_id: job.chat_id, text: "Qwen3-TTS #" + job.id + ": uploading reference to MVSEP..." });
+    const result = await tg$2(env2, "sendMessage", { chat_id: job.chat_id, text: "Qwen3-TTS #" + job.id + ": uploading reference to MVSEP..." });
     id = Number(result.message_id || 0);
     const blob = await download(env2, job.telegram_file_id);
     const hash = await mvsepCreate(env2, job, blob);
@@ -3532,6 +3532,108 @@ async function voiceAssistantContext(env2, chat) {
   } catch (e) {
     console.error("Qwen assistant context error:", e instanceof Error ? e.name : "unknown");
     return '{"status":"voice database context unavailable"}';
+  }
+}
+async function setupVoxVoices(db) {
+  await db.prepare("CREATE TABLE IF NOT EXISTS vox_voice_samples (job_id INTEGER PRIMARY KEY,chat_id TEXT NOT NULL,audio_b64 TEXT NOT NULL,created_at INTEGER NOT NULL DEFAULT (unixepoch()))").bind().run();
+  await db.prepare("CREATE TABLE IF NOT EXISTS vox_saved_voices (chat_id TEXT NOT NULL,slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 5),name TEXT NOT NULL,audio_b64 TEXT NOT NULL,source_job INTEGER NOT NULL,updated_at INTEGER NOT NULL DEFAULT (unixepoch()),PRIMARY KEY(chat_id,slot))").bind().run();
+  await db.prepare("CREATE TABLE IF NOT EXISTS vox_job_voice_slot (job_id INTEGER PRIMARY KEY,chat_id TEXT NOT NULL,slot INTEGER NOT NULL)").bind().run();
+}
+function toB64(bytes) {
+  let str = "";
+  for (let i = 0; i < bytes.length; i += 8192) str += String.fromCharCode(...bytes.subarray(i, i + 8192));
+  return btoa(str);
+}
+async function storeVoxReference(env2, jobId, chat, url) {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(25e3) });
+    if (!res.ok || Number(res.headers.get("content-length") || 0) > 18e4) return false;
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.length < 1500 || bytes.length > 18e4) return false;
+    if (!(bytes[0] === 73 && bytes[1] === 68 && bytes[2] === 51 || bytes[0] === 255 && (bytes[1] & 224) === 224)) return false;
+    await setupVoxVoices(env2.MEMORY_DB);
+    await env2.MEMORY_DB.prepare(
+      "DELETE FROM vox_voice_samples WHERE created_at < unixepoch()-604800"
+    ).bind().run();
+    await env2.MEMORY_DB.prepare(
+      "INSERT OR REPLACE INTO vox_voice_samples(job_id,chat_id,audio_b64) VALUES(?,?,?)"
+    ).bind(jobId, chat, toB64(bytes)).run();
+    return true;
+  } catch (e) {
+    console.error("Vox preview store failed", e instanceof Error ? e.name : "unknown");
+    return false;
+  }
+}
+async function voiceForJob(db, jobId, chat) {
+  await setupVoxVoices(db);
+  const found = await db.prepare(
+    "SELECT v.audio_b64 FROM vox_saved_voices v JOIN vox_job_voice_slot j ON v.chat_id=j.chat_id AND v.slot=j.slot WHERE j.job_id=? AND j.chat_id=? LIMIT 1"
+  ).bind(jobId, chat).all();
+  return found.results[0]?.audio_b64 || null;
+}
+async function voxVoiceMenu(env2, chat, send2) {
+  await setupVoxVoices(env2.MEMORY_DB);
+  const rows = await env2.MEMORY_DB.prepare(
+    "SELECT slot,name FROM vox_saved_voices WHERE chat_id=? ORDER BY slot"
+  ).bind(chat).all();
+  await send2("Your VoxCPM2 voice library:\n" + Array.from({ length: 5 }, (_, i) => {
+    const found = rows.results.find((x) => x.slot === i + 1);
+    return i + 1 + ". " + (found ? found.name : "Empty");
+  }).join("\n") + "\n\nGenerate: /voxvoice 1 YOUR TEXT\nRename: /voxrename 1 Narrator\nSave a new voice with the button on a generated audio message.");
+}
+async function tg$1(env2, method, payload) {
+  const r = await fetch("https://api.telegram.org/bot" + env2.TELEGRAM_BOT_TOKEN + "/" + method, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15e3)
+  });
+  const j = await r.json();
+  if (!r.ok || !j.ok) throw Error("Telegram " + method + " failed");
+  return j.result || {};
+}
+async function handleVoxCallback(env2, cb) {
+  const chat = String(cb.message?.chat.id ?? "");
+  try {
+    if (!chat || String(cb.from.id) !== chat || !cb.data?.startsWith("vx:")) return;
+    await setupVoxVoices(env2.MEMORY_DB);
+    const parts = cb.data.split(":");
+    const job = Number(parts[2]);
+    if (!Number.isSafeInteger(job) || job < 1) throw Error("Invalid audio job");
+    const record = await env2.MEMORY_DB.prepare(
+      "SELECT job_id FROM vox_voice_samples WHERE job_id=? AND chat_id=?"
+    ).bind(job, chat).all();
+    if (!record.results.length) throw Error("Saved voice sample unavailable");
+    if (parts[1] === "save") {
+      const rows = await env2.MEMORY_DB.prepare(
+        "SELECT slot,name FROM vox_saved_voices WHERE chat_id=?"
+      ).bind(chat).all();
+      const options = Array.from({ length: 5 }, (_, i) => {
+        const slot = i + 1, existing = rows.results.find((x) => x.slot === slot);
+        return [{
+          text: String(slot) + ". " + (existing ? existing.name + " (replace)" : "Empty"),
+          callback_data: "vx:slot:" + job + ":" + slot
+        }];
+      });
+      await tg$1(env2, "sendMessage", {
+        chat_id: chat,
+        text: "Choose a VoxCPM2 voice slot to save this generated voice:",
+        reply_markup: { inline_keyboard: options }
+      });
+    } else if (parts[1] === "slot") {
+      const slot = Number(parts[3]);
+      if (!Number.isInteger(slot) || slot < 1 || slot > 5) throw Error("Invalid slot");
+      const result = await env2.MEMORY_DB.prepare(
+        "INSERT INTO vox_saved_voices(chat_id,slot,name,audio_b64,source_job) SELECT ?,?, ?,audio_b64,job_id FROM vox_voice_samples WHERE job_id=? AND chat_id=? ON CONFLICT(chat_id,slot) DO UPDATE SET name=excluded.name,audio_b64=excluded.audio_b64,source_job=excluded.source_job,updated_at=unixepoch()"
+      ).bind(chat, slot, "Voice " + slot, job, chat).run();
+      if (!result.meta.changes) throw Error("Voice could not be stored");
+      await tg$1(env2, "sendMessage", { chat_id: chat, text: "Saved VoxCPM2 voice " + slot + " from job #" + job + ".\nReuse: /voxvoice " + slot + " မင်္ဂလာပါ။\nRename: /voxrename " + slot + " Documentary" });
+    }
+  } catch (e) {
+    console.error("Vox voice save failed", e instanceof Error ? e.message.slice(0, 110) : "unknown");
+    if (chat) await tg$1(env2, "sendMessage", { chat_id: chat, text: "Could not save this voice. The reference clip may no longer be available." }).catch(() => void 0);
+  } finally {
+    await tg$1(env2, "answerCallbackQuery", { callback_query_id: cb.id }).catch(() => void 0);
   }
 }
 const MAX_VOX_CHARS = 8e3;
@@ -3707,11 +3809,28 @@ async function readTextDocument(env2, file) {
 }
 async function handleVoxTelegram(env2, chat, messageId, text, send2, message) {
   const cmd = text.trim().split(/\s+/, 1)[0]?.split("@")[0].toLowerCase();
-  if (!["/vox", "/vox_status", "/vox_help"].includes(cmd)) return false;
+  if (!["/vox", "/voxvoice", "/voxvoices", "/voxrename", "/vox_status", "/vox_help"].includes(cmd)) return false;
   try {
     await init(env2.MEMORY_DB);
     if (cmd === "/vox_help") {
-      await send2("Kaggle VoxCPM2 TTS: /vox YOUR TEXT\nCheck status: /vox_status\nEach job runs in a private Kaggle notebook version (T4 GPU). Up to 8,000 characters. For long scripts, send a UTF-8 .txt file with caption /vox, or reply to a .txt file with /vox.");
+      await send2("VoxCPM2: /vox TEXT creates a new voice. /voxvoice 1 TEXT uses a saved voice. /voxvoices lists 5 slots. /voxrename 1 Narrator names a slot. Tap Save this voice after generation. For long scripts, use .txt with caption /vox or reply with /voxvoice 1. Max 8,000 characters.");
+      return true;
+    }
+    if (cmd === "/voxvoices") {
+      await voxVoiceMenu(env2, chat, send2);
+      return true;
+    }
+    if (cmd === "/voxrename") {
+      const p = text.trim().match(/^\/voxrename(?:@[A-Za-z0-9_]+)?\s+([1-5])\s+([^\n]{1,50})$/i);
+      if (!p) {
+        await send2("Usage: /voxrename 1 Narrator");
+        return true;
+      }
+      await setupVoxVoices(env2.MEMORY_DB);
+      const r2 = await env2.MEMORY_DB.prepare(
+        "UPDATE vox_saved_voices SET name=?,updated_at=unixepoch() WHERE chat_id=? AND slot=?"
+      ).bind(p[2].trim(), chat, Number(p[1])).run();
+      await send2(r2.meta.changes ? "Voice " + p[1] + " renamed to " + p[2].trim() : "That voice slot is empty.");
       return true;
     }
     if (cmd === "/vox_status") {
@@ -3720,7 +3839,26 @@ async function handleVoxTelegram(env2, chat, messageId, text, send2, message) {
       await send2(job ? "VoxCPM2 job #" + job.id + ": " + job.status + (job.error_message ? "\n" + job.error_message : "") : "No VoxCPM2 job yet. Use /vox YOUR TEXT.");
       return true;
     }
-    let phrase = text.replace(/^\/vox(?:@[A-Za-z0-9_]+)?(?:\s+|$)/i, "").trim();
+    let phrase = "", slot = 0;
+    if (cmd === "/voxvoice") {
+      const m = text.trim().match(/^\/voxvoice(?:@[A-Za-z0-9_]+)?\s+([1-5])(?:\s+([\s\S]*))?$/i);
+      if (!m) {
+        await send2("Use /voxvoice 1 YOUR TEXT, or reply to a .txt file with /voxvoice 1.");
+        return true;
+      }
+      slot = Number(m[1]);
+      phrase = (m[2] || "").trim();
+      await setupVoxVoices(env2.MEMORY_DB);
+      const found = await env2.MEMORY_DB.prepare(
+        "SELECT slot FROM vox_saved_voices WHERE chat_id=? AND slot=?"
+      ).bind(chat, slot).all();
+      if (!found.results.length) {
+        await send2("Voice slot " + slot + " is empty. See /voxvoices.");
+        return true;
+      }
+    } else {
+      phrase = text.replace(/^\/vox(?:@[A-Za-z0-9_]+)?(?:\s+|$)/i, "").trim();
+    }
     const doc = message?.document || message?.reply_to_message?.document;
     if (!phrase && doc) {
       try {
@@ -3750,7 +3888,11 @@ async function handleVoxTelegram(env2, chat, messageId, text, send2, message) {
       "INSERT OR IGNORE INTO vox_kaggle_jobs(chat_id,message_id,text) VALUES(?,?,?)"
     ).bind(chat, messageId, phrase).run();
     const r = await env2.MEMORY_DB.prepare("SELECT id FROM vox_kaggle_jobs WHERE chat_id=? AND message_id=?").bind(chat, messageId).all();
-    await send2("Kaggle VoxCPM2 job #" + r.results[0]?.id + " queued. GPU starts automatically when available. Use /vox_status.");
+    const jobId = r.results[0]?.id;
+    if (slot && jobId) await env2.MEMORY_DB.prepare(
+      "INSERT OR IGNORE INTO vox_job_voice_slot(job_id,chat_id,slot) VALUES(?,?,?)"
+    ).bind(jobId, chat, slot).run();
+    await send2("Kaggle VoxCPM2 job #" + jobId + " queued" + (slot ? " with saved voice " + slot : " with new voice") + ". Use /vox_status.");
     return true;
   } catch (e) {
     console.error("Vox command failed", e instanceof Error ? e.name : "unknown");
@@ -3758,12 +3900,12 @@ async function handleVoxTelegram(env2, chat, messageId, text, send2, message) {
     return true;
   }
 }
-const VOX_KERNEL_PYTHON = "import subprocess, json, time, re\nfrom pathlib import Path\nstart=time.monotonic()\nsubprocess.run(['python','-m','pip','install','-q','voxcpm>=2.0.3','soundfile','huggingface_hub'],check=True)\nprint('VOX_STAGE pip_seconds',round(time.monotonic()-start,1),flush=True)\nimport numpy as np\nimport soundfile as sf\nfrom huggingface_hub import snapshot_download\nfrom voxcpm import VoxCPM\nTASK=json.loads(__VOX_TASK_LITERAL__)\ntext=TASK['text'].strip()\n\ndef split_script(src,limit=240):\n    items=re.split(r'(?<=[။.!?！？。])\\s*|\\n+',src)\n    out=[]\n    buf=''\n    def emit():\n        nonlocal buf\n        if buf.strip():\n            out.append(buf.strip())\n        buf=''\n    for item in items:\n        piece=item.strip()\n        if not piece:\n            continue\n        if len(piece)>limit:\n            emit()\n            while len(piece)>limit:\n                idx=max(piece.rfind(' ',0,limit+1),piece.rfind('၊',0,limit+1),piece.rfind(',',0,limit+1))\n                if idx<limit//2:\n                    idx=limit\n                elif piece[idx:idx+1] in ('၊',','):\n                    idx+=1\n                out.append(piece[:idx].strip())\n                piece=piece[idx:].strip()\n            if piece:\n                buf=piece\n            continue\n        trial=(buf+' '+piece).strip() if buf else piece\n        if len(trial)>limit:\n            emit()\n            buf=piece\n        else:\n            buf=trial\n    emit()\n    return out\n\nchunks=split_script(text)\nif not chunks or len(chunks)>64 or any(len(x)>240 for x in chunks):\n    raise ValueError('Unsupported text length or chunk count')\nprint('VOX_STAGE chunk_count',len(chunks),flush=True)\nMODEL_DIR='/kaggle/temp/VoxCPM2'\nPath(MODEL_DIR).mkdir(parents=True,exist_ok=True)\nif not Path(MODEL_DIR,'model.safetensors').exists():\n    snapshot_download(repo_id='openbmb/VoxCPM2',local_dir=MODEL_DIR)\nprint('VOX_STAGE model_download_seconds',round(time.monotonic()-start,1),flush=True)\nmodel=VoxCPM.from_pretrained(MODEL_DIR,load_denoiser=False,optimize=False,device='cuda')\nprint('VOX_STAGE model_loaded_seconds',round(time.monotonic()-start,1),flush=True)\nsample_rate=int(model.tts_model.sample_rate)\npieces=[]\nfor index,part in enumerate(chunks):\n    wav=model.generate(text=part,cfg_value=2.0,inference_timesteps=10,normalize=False)\n    audio=np.asarray(wav,dtype=np.float32).reshape(-1)\n    if audio.size<100:\n        raise RuntimeError('Empty audio chunk '+str(index+1))\n    pieces.append(audio)\n    if index<len(chunks)-1:\n        pieces.append(np.zeros(int(sample_rate*0.18),dtype=np.float32))\n    print('VOX_CHUNK',index+1,'/',len(chunks),'elapsed_s',round(time.monotonic()-start,1),flush=True)\nmerged=np.concatenate(pieces)\ntmp=Path('/kaggle/temp/vox_merged.wav')\nsf.write(str(tmp),merged,sample_rate,subtype='PCM_16')\nout=Path('/kaggle/working/vox_generated.mp3')\nsubprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(tmp),'-codec:a','libmp3lame','-b:a','112k',str(out)],check=True,timeout=180)\nif not out.is_file() or out.stat().st_size<1024 or out.stat().st_size>20*1024*1024:\n    raise RuntimeError('MP3 output missing or too large for Telegram')\nprint('VOX_GENERATED_SUCCESS',round(time.monotonic()-start,1),'file_bytes',out.stat().st_size,flush=True)\n";
-function pythonFor(text) {
-  const safe = JSON.stringify(JSON.stringify({ text }));
+const VOX_KERNEL_PYTHON = "import subprocess, json, time, re, base64\nfrom pathlib import Path\nstart=time.monotonic()\nsubprocess.run(['python','-m','pip','install','-q','voxcpm>=2.0.3','soundfile','huggingface_hub'],check=True)\nprint('VOX_STAGE pip_seconds',round(time.monotonic()-start,1),flush=True)\nimport numpy as np\nimport soundfile as sf\nfrom huggingface_hub import snapshot_download\nfrom voxcpm import VoxCPM\nTASK=json.loads(__VOX_TASK_LITERAL__)\ntext=TASK['text'].strip()\n\ndef split_script(src,limit=240):\n    items=re.split(r'(?<=[။.!?！？。])\\s*|\\n+',src)\n    out=[]\n    buf=''\n    def emit():\n        nonlocal buf\n        if buf.strip():\n            out.append(buf.strip())\n        buf=''\n    for item in items:\n        piece=item.strip()\n        if not piece:\n            continue\n        if len(piece)>limit:\n            emit()\n            while len(piece)>limit:\n                idx=max(piece.rfind(' ',0,limit+1),piece.rfind('၊',0,limit+1),piece.rfind(',',0,limit+1))\n                if idx<limit//2:\n                    idx=limit\n                elif piece[idx:idx+1] in ('၊',','):\n                    idx+=1\n                out.append(piece[:idx].strip())\n                piece=piece[idx:].strip()\n            if piece:\n                buf=piece\n            continue\n        trial=(buf+' '+piece).strip() if buf else piece\n        if len(trial)>limit:\n            emit()\n            buf=piece\n        else:\n            buf=trial\n    emit()\n    return out\n\nchunks=split_script(text)\nif not chunks or len(chunks)>64 or any(len(x)>240 for x in chunks):\n    raise ValueError('Unsupported text length or chunk count')\nprint('VOX_STAGE chunk_count',len(chunks),flush=True)\nMODEL_DIR='/kaggle/temp/VoxCPM2'\nPath(MODEL_DIR).mkdir(parents=True,exist_ok=True)\nif not Path(MODEL_DIR,'model.safetensors').exists():\n    snapshot_download(repo_id='openbmb/VoxCPM2',local_dir=MODEL_DIR)\nprint('VOX_STAGE model_download_seconds',round(time.monotonic()-start,1),flush=True)\nref_path=None\nif TASK.get('voice_ref_b64'):\n    compressed=base64.b64decode(TASK['voice_ref_b64'],validate=True)\n    if len(compressed)<1500 or len(compressed)>180000:\n        raise ValueError('Invalid saved voice sample')\n    raw_ref=Path('/kaggle/temp/vox_reference.mp3')\n    raw_ref.write_bytes(compressed)\n    ref_path='/kaggle/temp/vox_reference.wav'\n    subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(raw_ref),'-ac','1','-ar','48000',ref_path],check=True,timeout=35)\nmodel=VoxCPM.from_pretrained(MODEL_DIR,load_denoiser=False,optimize=False,device='cuda')\nprint('VOX_STAGE model_loaded_seconds',round(time.monotonic()-start,1),flush=True)\nsample_rate=int(model.tts_model.sample_rate)\npieces=[]\nfor index,part in enumerate(chunks):\n    wav=model.generate(text=part,cfg_value=2.0,inference_timesteps=10,normalize=False,**({'reference_wav_path':ref_path} if ref_path else {}))\n    audio=np.asarray(wav,dtype=np.float32).reshape(-1)\n    if audio.size<100:\n        raise RuntimeError('Empty audio chunk '+str(index+1))\n    pieces.append(audio)\n    if index<len(chunks)-1:\n        pieces.append(np.zeros(int(sample_rate*0.18),dtype=np.float32))\n    print('VOX_CHUNK',index+1,'/',len(chunks),'elapsed_s',round(time.monotonic()-start,1),flush=True)\nmerged=np.concatenate(pieces)\ntmp=Path('/kaggle/temp/vox_merged.wav')\nsf.write(str(tmp),merged,sample_rate,subtype='PCM_16')\nout=Path('/kaggle/working/vox_generated.mp3')\nsubprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(tmp),'-codec:a','libmp3lame','-b:a','112k',str(out)],check=True,timeout=180)\npreview=Path('/kaggle/working/vox_voice_sample.mp3')\nsubprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(tmp),'-t','8','-codec:a','libmp3lame','-b:a','96k',str(preview)],check=True,timeout=60)\nif not preview.is_file() or preview.stat().st_size>180000:\n    raise RuntimeError('Voice preview missing or too large')\nif not out.is_file() or out.stat().st_size<1024 or out.stat().st_size>20*1024*1024:\n    raise RuntimeError('MP3 output missing or too large for Telegram')\nprint('VOX_GENERATED_SUCCESS',round(time.monotonic()-start,1),'file_bytes',out.stat().st_size,flush=True)\n";
+function pythonFor(text, voiceRefB64) {
+  const safe = JSON.stringify(JSON.stringify({ text, voice_ref_b64: voiceRefB64 || "" }));
   return VOX_KERNEL_PYTHON.replace("__VOX_TASK_LITERAL__", safe);
 }
-function matchOutput(data) {
+function matchOutput(data, target = "vox_generated.mp3") {
   const files = data.files || data.outputFiles || [];
   if (!Array.isArray(files)) return null;
   for (const v of files) {
@@ -3771,7 +3913,7 @@ function matchOutput(data) {
     const f = v;
     const name = String(f.fileName || f.file_name || "");
     const link = f.url;
-    if (!name.endsWith("vox_generated.mp3") || typeof link !== "string") continue;
+    if (!name.endsWith(target) || typeof link !== "string") continue;
     try {
       const u = new URL(link);
       if (u.protocol === "https:" && (u.hostname === "storage.googleapis.com" || u.hostname.endsWith(".googleapis.com") || u.hostname.endsWith(".kaggleusercontent.com") || u.hostname === "www.kaggle.com" || u.hostname === "api.kaggle.com")) return u.href;
@@ -3780,7 +3922,7 @@ function matchOutput(data) {
   }
   return null;
 }
-async function deliver(env2, job, url) {
+async function deliver(env2, job, url, previewUrl) {
   const r = await fetch(url, { signal: AbortSignal.timeout(6e4) });
   if (!r.ok || Number(r.headers.get("content-length") || 0) > 20 * 1024 * 1024)
     throw Error("Kaggle result download not available");
@@ -3789,10 +3931,12 @@ async function deliver(env2, job, url) {
   const header = new Uint8Array(await audio.slice(0, 12).arrayBuffer());
   const marker = String.fromCharCode(...header.slice(0, 3));
   if (marker !== "ID3" && !(header[0] === 255 && (header[1] & 224) === 224)) throw Error("Kaggle result not MP3");
+  const hasPreview = previewUrl ? await storeVoxReference(env2, job.id, job.chat_id, previewUrl) : false;
   const data = new FormData();
   data.set("chat_id", job.chat_id);
   data.set("caption", "Kaggle VoxCPM2 job #" + job.id);
   data.set("audio", audio, "vox-" + job.id + ".mp3");
+  if (hasPreview) data.set("reply_markup", JSON.stringify({ inline_keyboard: [[{ text: "⭐ Save this voice", callback_data: "vx:save:" + job.id }]] }));
   const out = await fetch("https://api.telegram.org/bot" + env2.TELEGRAM_BOT_TOKEN + "/sendAudio", {
     method: "POST",
     body: data,
@@ -3827,13 +3971,14 @@ async function pollVoxKaggle(env2) {
       if (raw.includes("COMPLETE") || raw.includes("SUCCESS")) {
         const outputs = await kaggle(env2, "output", { userName: OWNER, kernelSlug: SLUG, versionLabel: version2 });
         const url = matchOutput(outputs);
+        const previewUrl = matchOutput(outputs, "vox_voice_sample.mp3");
         if (!url) throw Error("Completed Kaggle run has no WAV download URL");
         const claim = await env2.MEMORY_DB.prepare(
           "UPDATE vox_kaggle_jobs SET status='delivering',updated_at=unixepoch() WHERE id=? AND status IN ('submitted','running')"
         ).bind(job.id).run();
         if (claim.meta.changes !== 1) return;
         try {
-          await deliver(env2, job, url);
+          await deliver(env2, job, url, previewUrl);
           await env2.MEMORY_DB.prepare("UPDATE vox_kaggle_jobs SET status='done',updated_at=unixepoch() WHERE id=?").bind(job.id).run();
         } catch (e) {
           console.error("Vox delivery uncertain", e instanceof Error ? e.message.slice(0, 120) : "unknown");
@@ -3858,10 +4003,11 @@ async function pollVoxKaggle(env2) {
   const next = candidate.results[0];
   if (!next) return;
   try {
+    const sampleB64 = await voiceForJob(env2.MEMORY_DB, next.id, next.chat_id);
     const result = await kaggle(env2, "push", {
       slug: KERNEL,
       newTitle: "VoxCPM2 Telegram Worker",
-      text: pythonFor(next.text),
+      text: pythonFor(next.text, sampleB64),
       language: "python",
       kernelType: "script",
       isPrivate: true,
@@ -4002,6 +4148,8 @@ app.post("/telegram/webhook", async (c) => {
     const sender2 = String(cb.from.id);
     if (cb.data?.startsWith("qw:") && await isAllowedTelegramUser(c.env, chat, sender2, cb.message?.chat.type)) {
       c.executionCtx.waitUntil(handleVoiceCallback(c.env, cb));
+    } else if (cb.data?.startsWith("vx:") && await isAllowedTelegramUser(c.env, chat, sender2, cb.message?.chat.type)) {
+      c.executionCtx.waitUntil(handleVoxCallback(c.env, cb));
     }
     return c.json({ ok: true });
   }
@@ -4395,7 +4543,7 @@ app.post("/telegram/webhook", async (c) => {
       }
       if (/^\/(?:help|commands)(?:@\w+)?$/i.test(text)) {
         await send2(
-          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/whoami — show your Telegram user ID\n/allowed — owner: list authorized users\n/allow USER_ID — owner: grant access\n/deny USER_ID — owner: revoke access\n/tts_status — check latest Qwen3-TTS generation\n/vox TEXT — Kaggle VoxCPM2 Burmese speech (up to 8,000 characters)\n/vox — attach or reply to a UTF-8 .txt script for long narration\n/vox_status — Kaggle VoxCPM2 job status\n/voices — list your five slots\n/savevoice 1 Narrator — reply to audio; no transcript required\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
+          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/whoami — show your Telegram user ID\n/allowed — owner: list authorized users\n/allow USER_ID — owner: grant access\n/deny USER_ID — owner: revoke access\n/tts_status — check latest Qwen3-TTS generation\n/vox TEXT — Kaggle VoxCPM2 Burmese speech (up to 8,000 characters)\n/vox — attach or reply to a UTF-8 .txt script for long narration\n/vox_status — Kaggle VoxCPM2 job status\n/voxvoices — show five saved VoxCPM2 voices\n/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n/voxrename 1 Name — rename saved VoxCPM2 voice\n/voices — list your five slots\n/savevoice 1 Narrator — reply to audio; no transcript required\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
         );
         return;
       }
@@ -4420,7 +4568,7 @@ app.post("/telegram/webhook", async (c) => {
               "You are the helpful AI guide for this Telegram bot. Reply in English and use the last 20 stored chat messages to understand the conversation. Give exact Telegram commands and clear, short examples.",
               "Available commands (do not invent commands):",
               "/help or /commands — show the command menu.",
-              "/vox TEXT — request VoxCPM2 Burmese speech (up to 8,000 characters). Reply to a UTF-8 .txt file with /vox, or attach a .txt file with caption /vox for long scripts. /vox_status gives status; no OCI needed.",
+              "/vox TEXT — request VoxCPM2 Burmese speech (up to 8,000 characters); after output click Save this voice, then a slot. /voxvoice 1 TEXT reuses stored reference; /voxvoices lists five slots; /voxrename 1 Name renames. Reply to a UTF-8 .txt file with /vox or /voxvoice 1, or attach a .txt file as caption. /vox_status gives status; no OCI needed.",
               "/whoami — show your Telegram numeric user ID.",
               "/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.",
               "/ask QUESTION — ask this AI for help; normal messages also reach the AI.",
@@ -4627,6 +4775,9 @@ async function registerTelegramWebhook(env2) {
         { command: "clone", description: "Pick a saved or custom voice" },
         { command: "vox", description: "Kaggle VoxCPM2 Burmese speech" },
         { command: "vox_status", description: "Check VoxCPM2 job status" },
+        { command: "voxvoices", description: "Show saved VoxCPM2 voices" },
+        { command: "voxvoice", description: "Generate using a saved VoxCPM2 voice" },
+        { command: "voxrename", description: "Rename VoxCPM2 saved voice" },
         { command: "tts_status", description: "Check Qwen3-TTS generation status" },
         { command: "voices", description: "View your five saved voices" },
         { command: "savevoice", description: "Save reference voice to slot 1 to 5" },
