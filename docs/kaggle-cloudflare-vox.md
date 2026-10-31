@@ -34,3 +34,15 @@ Production Cloudflare Worker: `vite-react-template`.
 Working Kaggle studio: https://www.kaggle.com/code/cyawzin/voxcpm2-full-working
 
 Official references: https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernels.md and https://openbmb.cn/docs/en/guides/voxcpm/voxcpm-2
+
+## Fast-completion fix (October 31, 2026)
+
+First live VoxCPM2 job took 12 minutes 14 seconds end to end. Script logs showed `VOX_GENERATED_SUCCESS` around 113 seconds into the Kaggle execution, but the Kaggle run continued for several minutes afterward.
+
+Root-cause hypothesis: the generator downloaded the multi-gigabyte VoxCPM2 checkpoint to `/kaggle/working/VoxCPM2`, which Kaggle automatically packages in each saved notebook version's output. These large weights do not need to be saved to deliver the WAV.
+
+Changed **only the separate Telegram batch worker's** model download directory from `/kaggle/working/VoxCPM2` to `/kaggle/temp/VoxCPM2`; `/kaggle/working/vox_generated.wav` remains the only intended persisted media output. Model weights are downloaded afresh into temporary space for each cold batch run. Model settings and audio generation are unchanged. Added timestamps `VOX_STAGE ..._seconds` for measured stage performance on the next run.
+
+Expected improvement is mainly in Kaggle **post-generation output finalization**, not a guaranteed speedup in model inference or queue time. For genuinely low-latency repeated TTS, Kaggle's per-request Save & Run All batch model is intrinsically cold-started; a persistent, warm GPU session or paid inference endpoint would be a different architecture.
+
+Do not modify the original `cyawzin/voxcpm2-full-working` studio.

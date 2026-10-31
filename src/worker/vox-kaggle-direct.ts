@@ -217,20 +217,27 @@ export async function handleVoxTelegram(env:VoxEnv,chat:string,messageId:number,
 function pythonFor(text:string):string{
  const safe=JSON.stringify(JSON.stringify({text}))
  return [
- 'import subprocess, json, os',
+ 'import subprocess, json, os, time',
+ 'start=time.monotonic()',
  "subprocess.run(['python','-m','pip','install','-q','voxcpm>=2.0.3','soundfile','huggingface_hub'],check=True)",
+ "print('VOX_STAGE pip_seconds',round(time.monotonic()-start,1),flush=True)",
  'from pathlib import Path',
  'import soundfile as sf',
  'from huggingface_hub import snapshot_download',
  'from voxcpm import VoxCPM',
  'TASK=json.loads('+safe+')',
- "MODEL_DIR='/kaggle/working/VoxCPM2'",
+ "# Keep large model weights out of /kaggle/working, which Kaggle packages as output.",
+ "MODEL_DIR='/kaggle/temp/VoxCPM2'",
+ "Path(MODEL_DIR).mkdir(parents=True,exist_ok=True)",
  "if not Path(MODEL_DIR,'model.safetensors').exists():",
  "    snapshot_download(repo_id='openbmb/VoxCPM2',local_dir=MODEL_DIR)",
+ "print('VOX_STAGE model_download_seconds',round(time.monotonic()-start,1),flush=True)",
  "model=VoxCPM.from_pretrained(MODEL_DIR,load_denoiser=False,optimize=False,device='cuda')",
+ "print('VOX_STAGE model_loaded_seconds',round(time.monotonic()-start,1),flush=True)",
  "wav=model.generate(text=TASK['text'],cfg_value=2.0,inference_timesteps=10,normalize=False)",
+ "print('VOX_STAGE generated_seconds',round(time.monotonic()-start,1),flush=True)",
  "sf.write('/kaggle/working/vox_generated.wav',wav,model.tts_model.sample_rate,subtype='PCM_16')",
- "print('VOX_GENERATED_SUCCESS')",
+ "print('VOX_GENERATED_SUCCESS',round(time.monotonic()-start,1),flush=True)",
  ].join('\n')
 }
 function matchOutput(data:Record<string,unknown>):string|null{
