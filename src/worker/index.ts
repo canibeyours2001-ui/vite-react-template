@@ -217,7 +217,7 @@ app.post('/telegram/webhook', async (c) => {
   const chatId = msg.chat.id
   const sender = String(msg.from?.id ?? msg.chat.id)
   const token = c.env.TELEGRAM_BOT_TOKEN
-  const text = (msg.text ?? msg.caption ?? '').trim().slice(0, 2000)
+  const text = (msg.text ?? msg.caption ?? '').trim().slice(0, 4096)
   if (!token || !c.env.AI) return c.json({ok:false},503)
   // Only private chats. Unapproved users can request their own ID via /whoami.
   const allowed = await isAllowedTelegramUser(c.env,String(chatId),sender,msg.chat.type)
@@ -273,7 +273,7 @@ app.post('/telegram/webhook', async (c) => {
     try {
       if (isAccessCommand(text) && await handleAccessCommand(c.env,sender,text,send)) return
       if (!allowed) return
-      if (await handleVoxTelegram(c.env,key,msg.message_id,text,send)) return
+      if (await handleVoxTelegram(c.env,key,msg.message_id,text,send,msg)) return
       if (await handleVoiceMessage(c.env,msg,key,text)) return
       if (await handleAudioTelegram(c.env, msg, key, text, send)) return
       if (text.toLowerCase() === '/forget' || text.toLowerCase() === '/reset') {
@@ -628,7 +628,8 @@ app.post('/telegram/webhook', async (c) => {
           '/allow USER_ID — owner: grant access\n' +
           '/deny USER_ID — owner: revoke access\n' +
           '/tts_status — check latest Qwen3-TTS generation\n' +
-          '/vox TEXT — Kaggle VoxCPM2 Burmese speech\n' +
+          '/vox TEXT — Kaggle VoxCPM2 Burmese speech (up to 8,000 characters)\n' +
+          '/vox — attach or reply to a UTF-8 .txt script for long narration\n' +
           '/vox_status — Kaggle VoxCPM2 job status\n' +
           '/voices — list your five slots\n' +
           '/savevoice 1 Narrator — reply to audio; no transcript required\n' +
@@ -670,7 +671,7 @@ app.post('/telegram/webhook', async (c) => {
               'You are the helpful AI guide for this Telegram bot. Reply in English and use the last 20 stored chat messages to understand the conversation. Give exact Telegram commands and clear, short examples.',
               'Available commands (do not invent commands):',
               '/help or /commands — show the command menu.',
-              '/vox TEXT — request VoxCPM2 Burmese speech using a private Kaggle GPU batch job, with /vox_status for status; no OCI needed.',
+              '/vox TEXT — request VoxCPM2 Burmese speech (up to 8,000 characters). Reply to a UTF-8 .txt file with /vox, or attach a .txt file with caption /vox for long scripts. /vox_status gives status; no OCI needed.',
               '/whoami — show your Telegram numeric user ID.',
               '/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.',
               '/ask QUESTION — ask this AI for help; normal messages also reach the AI.',

@@ -3534,6 +3534,7 @@ async function voiceAssistantContext(env2, chat) {
     return '{"status":"voice database context unavailable"}';
   }
 }
+const MAX_VOX_CHARS = 8e3;
 const OWNER = "cyawzin";
 const SLUG = "voxcpm2-telegram-worker";
 const BASE = "https://api.kaggle.com/v1/kernels/";
@@ -3683,13 +3684,34 @@ async function verified(env2) {
   const r = await env2.MEMORY_DB.prepare("SELECT ok FROM vox_kaggle_health WHERE id=1").bind().all();
   return r.results[0]?.ok === 1;
 }
-async function handleVoxTelegram(env2, chat, messageId, text, send2) {
+async function readTextDocument(env2, file) {
+  const name = file.file_name || "";
+  if (!name.toLowerCase().endsWith(".txt")) throw Error("Only UTF-8 .txt files are supported");
+  if (!file.file_id || (file.file_size || 0) > 65536) throw Error("Text file exceeds 64 KB");
+  const token = env2.TELEGRAM_BOT_TOKEN;
+  const meta = await fetch("https://api.telegram.org/bot" + token + "/getFile?file_id=" + encodeURIComponent(file.file_id), {
+    signal: AbortSignal.timeout(12e3)
+  });
+  const info = await meta.json();
+  const path = info.result?.file_path || "";
+  if (!meta.ok || !info.ok || !path || path.startsWith("/") || path.includes("..") || (info.result?.file_size || 0) > 65536)
+    throw Error("Telegram text file unavailable");
+  const url = "https://api.telegram.org/file/bot" + token + "/" + path.split("/").map(encodeURIComponent).join("/");
+  const res = await fetch(url, { signal: AbortSignal.timeout(2e4) });
+  if (!res.ok || Number(res.headers.get("content-length") || 0) > 65536) throw Error("Text download failed");
+  const buf = await res.arrayBuffer();
+  if (buf.byteLength > 65536) throw Error("Text file too large");
+  const txt = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(buf).replace(/^\uFEFF/, "").trim();
+  if (txt.includes("\0")) throw Error("Invalid text document");
+  return txt;
+}
+async function handleVoxTelegram(env2, chat, messageId, text, send2, message) {
   const cmd = text.trim().split(/\s+/, 1)[0]?.split("@")[0].toLowerCase();
   if (!["/vox", "/vox_status", "/vox_help"].includes(cmd)) return false;
   try {
     await init(env2.MEMORY_DB);
     if (cmd === "/vox_help") {
-      await send2("Kaggle VoxCPM2 TTS: /vox YOUR TEXT\nCheck status: /vox_status\nEach job runs in a private Kaggle notebook version (T4 GPU). Maximum 450 characters.");
+      await send2("Kaggle VoxCPM2 TTS: /vox YOUR TEXT\nCheck status: /vox_status\nEach job runs in a private Kaggle notebook version (T4 GPU). Up to 8,000 characters. For long scripts, send a UTF-8 .txt file with caption /vox, or reply to a .txt file with /vox.");
       return true;
     }
     if (cmd === "/vox_status") {
@@ -3698,9 +3720,19 @@ async function handleVoxTelegram(env2, chat, messageId, text, send2) {
       await send2(job ? "VoxCPM2 job #" + job.id + ": " + job.status + (job.error_message ? "\n" + job.error_message : "") : "No VoxCPM2 job yet. Use /vox YOUR TEXT.");
       return true;
     }
-    const phrase = text.replace(/^\/vox(?:@[A-Za-z0-9_]+)?(?:\s+|$)/i, "").trim();
-    if (!phrase || phrase.length > 450) {
-      await send2("Usage: /vox YOUR TEXT (1–450 characters)\nExample: /vox မင်္ဂလာပါ။");
+    let phrase = text.replace(/^\/vox(?:@[A-Za-z0-9_]+)?(?:\s+|$)/i, "").trim();
+    const doc = message?.document || message?.reply_to_message?.document;
+    if (!phrase && doc) {
+      try {
+        phrase = await readTextDocument(env2, doc);
+      } catch (e) {
+        console.error("Vox text document invalid", e instanceof Error ? e.name : "unknown");
+        await send2("Please attach a UTF-8 .txt file (max 8,000 characters / 64 KB) with caption /vox, or reply to it using /vox.");
+        return true;
+      }
+    }
+    if (!phrase || phrase.length > MAX_VOX_CHARS) {
+      await send2("Usage: /vox YOUR TEXT (1–8,000 characters). For long scripts, send a UTF-8 .txt file with caption /vox or reply to that file with /vox. Your script exceeds the limit or is empty.");
       return true;
     }
     if (!await verified(env2)) {
@@ -3726,31 +3758,10 @@ async function handleVoxTelegram(env2, chat, messageId, text, send2) {
     return true;
   }
 }
+const VOX_KERNEL_PYTHON = "import subprocess, json, time, re\nfrom pathlib import Path\nstart=time.monotonic()\nsubprocess.run(['python','-m','pip','install','-q','voxcpm>=2.0.3','soundfile','huggingface_hub'],check=True)\nprint('VOX_STAGE pip_seconds',round(time.monotonic()-start,1),flush=True)\nimport numpy as np\nimport soundfile as sf\nfrom huggingface_hub import snapshot_download\nfrom voxcpm import VoxCPM\nTASK=json.loads(__VOX_TASK_LITERAL__)\ntext=TASK['text'].strip()\n\ndef split_script(src,limit=240):\n    items=re.split(r'(?<=[။.!?！？。])\\s*|\\n+',src)\n    out=[]\n    buf=''\n    def emit():\n        nonlocal buf\n        if buf.strip():\n            out.append(buf.strip())\n        buf=''\n    for item in items:\n        piece=item.strip()\n        if not piece:\n            continue\n        if len(piece)>limit:\n            emit()\n            while len(piece)>limit:\n                idx=max(piece.rfind(' ',0,limit+1),piece.rfind('၊',0,limit+1),piece.rfind(',',0,limit+1))\n                if idx<limit//2:\n                    idx=limit\n                elif piece[idx:idx+1] in ('၊',','):\n                    idx+=1\n                out.append(piece[:idx].strip())\n                piece=piece[idx:].strip()\n            if piece:\n                buf=piece\n            continue\n        trial=(buf+' '+piece).strip() if buf else piece\n        if len(trial)>limit:\n            emit()\n            buf=piece\n        else:\n            buf=trial\n    emit()\n    return out\n\nchunks=split_script(text)\nif not chunks or len(chunks)>64 or any(len(x)>240 for x in chunks):\n    raise ValueError('Unsupported text length or chunk count')\nprint('VOX_STAGE chunk_count',len(chunks),flush=True)\nMODEL_DIR='/kaggle/temp/VoxCPM2'\nPath(MODEL_DIR).mkdir(parents=True,exist_ok=True)\nif not Path(MODEL_DIR,'model.safetensors').exists():\n    snapshot_download(repo_id='openbmb/VoxCPM2',local_dir=MODEL_DIR)\nprint('VOX_STAGE model_download_seconds',round(time.monotonic()-start,1),flush=True)\nmodel=VoxCPM.from_pretrained(MODEL_DIR,load_denoiser=False,optimize=False,device='cuda')\nprint('VOX_STAGE model_loaded_seconds',round(time.monotonic()-start,1),flush=True)\nsample_rate=int(model.tts_model.sample_rate)\npieces=[]\nfor index,part in enumerate(chunks):\n    wav=model.generate(text=part,cfg_value=2.0,inference_timesteps=10,normalize=False)\n    audio=np.asarray(wav,dtype=np.float32).reshape(-1)\n    if audio.size<100:\n        raise RuntimeError('Empty audio chunk '+str(index+1))\n    pieces.append(audio)\n    if index<len(chunks)-1:\n        pieces.append(np.zeros(int(sample_rate*0.18),dtype=np.float32))\n    print('VOX_CHUNK',index+1,'/',len(chunks),'elapsed_s',round(time.monotonic()-start,1),flush=True)\nmerged=np.concatenate(pieces)\ntmp=Path('/kaggle/temp/vox_merged.wav')\nsf.write(str(tmp),merged,sample_rate,subtype='PCM_16')\nout=Path('/kaggle/working/vox_generated.mp3')\nsubprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(tmp),'-codec:a','libmp3lame','-b:a','112k',str(out)],check=True,timeout=180)\nif not out.is_file() or out.stat().st_size<1024 or out.stat().st_size>20*1024*1024:\n    raise RuntimeError('MP3 output missing or too large for Telegram')\nprint('VOX_GENERATED_SUCCESS',round(time.monotonic()-start,1),'file_bytes',out.stat().st_size,flush=True)\n";
 function pythonFor(text) {
   const safe = JSON.stringify(JSON.stringify({ text }));
-  return [
-    "import subprocess, json, os, time",
-    "start=time.monotonic()",
-    "subprocess.run(['python','-m','pip','install','-q','voxcpm>=2.0.3','soundfile','huggingface_hub'],check=True)",
-    "print('VOX_STAGE pip_seconds',round(time.monotonic()-start,1),flush=True)",
-    "from pathlib import Path",
-    "import soundfile as sf",
-    "from huggingface_hub import snapshot_download",
-    "from voxcpm import VoxCPM",
-    "TASK=json.loads(" + safe + ")",
-    "# Keep large model weights out of /kaggle/working, which Kaggle packages as output.",
-    "MODEL_DIR='/kaggle/temp/VoxCPM2'",
-    "Path(MODEL_DIR).mkdir(parents=True,exist_ok=True)",
-    "if not Path(MODEL_DIR,'model.safetensors').exists():",
-    "    snapshot_download(repo_id='openbmb/VoxCPM2',local_dir=MODEL_DIR)",
-    "print('VOX_STAGE model_download_seconds',round(time.monotonic()-start,1),flush=True)",
-    "model=VoxCPM.from_pretrained(MODEL_DIR,load_denoiser=False,optimize=False,device='cuda')",
-    "print('VOX_STAGE model_loaded_seconds',round(time.monotonic()-start,1),flush=True)",
-    "wav=model.generate(text=TASK['text'],cfg_value=2.0,inference_timesteps=10,normalize=False)",
-    "print('VOX_STAGE generated_seconds',round(time.monotonic()-start,1),flush=True)",
-    "sf.write('/kaggle/working/vox_generated.wav',wav,model.tts_model.sample_rate,subtype='PCM_16')",
-    "print('VOX_GENERATED_SUCCESS',round(time.monotonic()-start,1),flush=True)"
-  ].join("\n");
+  return VOX_KERNEL_PYTHON.replace("__VOX_TASK_LITERAL__", safe);
 }
 function matchOutput(data) {
   const files = data.files || data.outputFiles || [];
@@ -3760,7 +3771,7 @@ function matchOutput(data) {
     const f = v;
     const name = String(f.fileName || f.file_name || "");
     const link = f.url;
-    if (!name.endsWith("vox_generated.wav") || typeof link !== "string") continue;
+    if (!name.endsWith("vox_generated.mp3") || typeof link !== "string") continue;
     try {
       const u = new URL(link);
       if (u.protocol === "https:" && (u.hostname === "storage.googleapis.com" || u.hostname.endsWith(".googleapis.com") || u.hostname.endsWith(".kaggleusercontent.com") || u.hostname === "www.kaggle.com" || u.hostname === "api.kaggle.com")) return u.href;
@@ -3773,14 +3784,15 @@ async function deliver(env2, job, url) {
   const r = await fetch(url, { signal: AbortSignal.timeout(6e4) });
   if (!r.ok || Number(r.headers.get("content-length") || 0) > 20 * 1024 * 1024)
     throw Error("Kaggle result download not available");
-  const wav = await r.blob();
-  if (wav.size < 44 || wav.size > 20 * 1024 * 1024) throw Error("Kaggle audio too large or missing");
-  const header = String.fromCharCode(...new Uint8Array(await wav.slice(0, 12).arrayBuffer()));
-  if (!header.startsWith("RIFF") || header.slice(8, 12) !== "WAVE") throw Error("Kaggle result not WAV");
+  const audio = await r.blob();
+  if (audio.size < 1024 || audio.size > 20 * 1024 * 1024) throw Error("Kaggle audio too large or missing");
+  const header = new Uint8Array(await audio.slice(0, 12).arrayBuffer());
+  const marker = String.fromCharCode(...header.slice(0, 3));
+  if (marker !== "ID3" && !(header[0] === 255 && (header[1] & 224) === 224)) throw Error("Kaggle result not MP3");
   const data = new FormData();
   data.set("chat_id", job.chat_id);
   data.set("caption", "Kaggle VoxCPM2 job #" + job.id);
-  data.set("audio", wav, "vox-" + job.id + ".wav");
+  data.set("audio", audio, "vox-" + job.id + ".mp3");
   const out = await fetch("https://api.telegram.org/bot" + env2.TELEGRAM_BOT_TOKEN + "/sendAudio", {
     method: "POST",
     body: data,
@@ -3998,7 +4010,7 @@ app.post("/telegram/webhook", async (c) => {
   const chatId = msg.chat.id;
   const sender = String(msg.from?.id ?? msg.chat.id);
   const token = c.env.TELEGRAM_BOT_TOKEN;
-  const text = (msg.text ?? msg.caption ?? "").trim().slice(0, 2e3);
+  const text = (msg.text ?? msg.caption ?? "").trim().slice(0, 4096);
   if (!token || !c.env.AI) return c.json({ ok: false }, 503);
   const allowed = await isAllowedTelegramUser(c.env, String(chatId), sender, msg.chat.type);
   const privateChat = (!msg.chat.type || msg.chat.type === "private") && String(chatId) === sender;
@@ -4052,7 +4064,7 @@ app.post("/telegram/webhook", async (c) => {
     try {
       if (isAccessCommand(text) && await handleAccessCommand(c.env, sender, text, send2)) return;
       if (!allowed) return;
-      if (await handleVoxTelegram(c.env, key, msg.message_id, text, send2)) return;
+      if (await handleVoxTelegram(c.env, key, msg.message_id, text, send2, msg)) return;
       if (await handleVoiceMessage(c.env, msg, key, text)) return;
       if (await handleAudioTelegram(c.env, msg, key, text, send2)) return;
       if (text.toLowerCase() === "/forget" || text.toLowerCase() === "/reset") {
@@ -4383,7 +4395,7 @@ app.post("/telegram/webhook", async (c) => {
       }
       if (/^\/(?:help|commands)(?:@\w+)?$/i.test(text)) {
         await send2(
-          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/whoami — show your Telegram user ID\n/allowed — owner: list authorized users\n/allow USER_ID — owner: grant access\n/deny USER_ID — owner: revoke access\n/tts_status — check latest Qwen3-TTS generation\n/vox TEXT — Kaggle VoxCPM2 Burmese speech\n/vox_status — Kaggle VoxCPM2 job status\n/voices — list your five slots\n/savevoice 1 Narrator — reply to audio; no transcript required\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
+          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/whoami — show your Telegram user ID\n/allowed — owner: list authorized users\n/allow USER_ID — owner: grant access\n/deny USER_ID — owner: revoke access\n/tts_status — check latest Qwen3-TTS generation\n/vox TEXT — Kaggle VoxCPM2 Burmese speech (up to 8,000 characters)\n/vox — attach or reply to a UTF-8 .txt script for long narration\n/vox_status — Kaggle VoxCPM2 job status\n/voices — list your five slots\n/savevoice 1 Narrator — reply to audio; no transcript required\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
         );
         return;
       }
@@ -4408,7 +4420,7 @@ app.post("/telegram/webhook", async (c) => {
               "You are the helpful AI guide for this Telegram bot. Reply in English and use the last 20 stored chat messages to understand the conversation. Give exact Telegram commands and clear, short examples.",
               "Available commands (do not invent commands):",
               "/help or /commands — show the command menu.",
-              "/vox TEXT — request VoxCPM2 Burmese speech using a private Kaggle GPU batch job, with /vox_status for status; no OCI needed.",
+              "/vox TEXT — request VoxCPM2 Burmese speech (up to 8,000 characters). Reply to a UTF-8 .txt file with /vox, or attach a .txt file with caption /vox for long scripts. /vox_status gives status; no OCI needed.",
               "/whoami — show your Telegram numeric user ID.",
               "/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.",
               "/ask QUESTION — ask this AI for help; normal messages also reach the AI.",
