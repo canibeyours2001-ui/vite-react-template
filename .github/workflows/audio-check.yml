@@ -3,7 +3,7 @@ on:
   pull_request:
   push:
     branches:
-      - fix/optional-transcript
+      - feature/telegram-user-allowlist
 permissions:
   contents: write
 jobs:
@@ -21,7 +21,7 @@ jobs:
       - run: npx tsc --noEmit -p tsconfig.worker.json
       - run: npm run build
       - name: Preserve compiled Worker for safe direct Cloudflare deployment
-        if: github.event_name == 'push' && github.ref == 'refs/heads/fix/optional-transcript'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/telegram-user-allowlist'
         run: |
           mkdir -p deploy
           cp dist/vite_react_template/index.js deploy/worker-bundle.mjs
