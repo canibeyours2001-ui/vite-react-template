@@ -2,6 +2,8 @@
 This is a minimal job adapter using official VoxCPM2 inference options.
 """
 import json
+import subprocess
+subprocess.run(['python','-m','pip','install','-q','voxcpm>=2.0.3','soundfile'],check=True)
 from pathlib import Path
 import soundfile as sf
 from voxcpm import VoxCPM
