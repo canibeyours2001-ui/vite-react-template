@@ -898,6 +898,33 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
   })
   const data = await response.json() as { ok?: boolean; description?: string }
   console.log('Telegram webhook setup result', data.ok ? 'success' : (data.description || 'failed'))
+  if (data.ok) {
+    // Initialize Telegram's native slash-command menu when enabling voice buttons.
+    try {
+      const commands = [
+        {command:'help',description:'Show all available commands'},
+        {command:'ask',description:'Ask the AI for commands and guidance'},
+        {command:'clone',description:'Pick a saved or custom voice'},
+        {command:'voices',description:'View your five saved voices'},
+        {command:'savevoice',description:'Save reference voice to slot 1 to 5'},
+        {command:'clonelang',description:'Set voice generation language'},
+        {command:'cancel',description:'Cancel voice selection'},
+        {command:'separate',description:'Separate audio with MVSEP'},
+        {command:'sep_status',description:'Check MVSEP separation status'},
+        {command:'video',description:'Generate video with WAN 2.2'},
+        {command:'video_status',description:'Check WAN video status'},
+        {command:'motion',description:'Animate a character with WAN'},
+        {command:'motion_status',description:'Check WAN Animate status'},
+      ]
+      const resp = await fetch(base+'/setMyCommands',{
+        method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({commands}),
+        signal:AbortSignal.timeout(10000),
+      })
+      if (!resp.ok) console.error('Telegram command-menu update failed',resp.status)
+    } catch (error) {
+      console.error('Telegram command-menu update failed',error instanceof Error?error.name:'unknown')
+    }
+  }
 }
 
 export default {
