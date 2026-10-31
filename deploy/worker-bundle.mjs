@@ -3089,7 +3089,7 @@ async function say(env2, chat, text, keyboard) {
     ...keyboard ? { reply_markup: keyboard } : {}
   });
 }
-async function init$1(db) {
+async function init$2(db) {
   await db.prepare("CREATE TABLE IF NOT EXISTS qwen_voice_profiles (chat_id TEXT NOT NULL, slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 5), name TEXT NOT NULL, telegram_file_id TEXT NOT NULL, ref_text TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT (unixepoch()), PRIMARY KEY (chat_id,slot))").bind().run();
   await db.prepare("CREATE TABLE IF NOT EXISTS mvsep_tts_tracking (job_id INTEGER PRIMARY KEY, hash TEXT UNIQUE NOT NULL, status_message_id INTEGER, last_label TEXT NOT NULL DEFAULT '', checked_at INTEGER NOT NULL DEFAULT 0)").bind().run();
   await db.prepare("CREATE TABLE IF NOT EXISTS qwen_clone_sessions (chat_id TEXT PRIMARY KEY, state TEXT NOT NULL, slot INTEGER, custom_file_id TEXT, custom_ref_text TEXT, lang TEXT NOT NULL DEFAULT 'English', updated_at INTEGER NOT NULL DEFAULT (unixepoch()))").bind().run();
@@ -3138,7 +3138,7 @@ async function handleVoiceMessage(env2, msg, chat, content) {
   let current = null;
   if (!recognized && !inboundFile(msg) && !content.trim()) return false;
   try {
-    await init$1(env2.MEMORY_DB);
+    await init$2(env2.MEMORY_DB);
     current = await session(env2.MEMORY_DB, chat);
     if (!recognized && !current) return false;
     if (cmd === "/clone_help") {
@@ -3315,7 +3315,7 @@ async function handleVoiceCallback(env2, cb) {
   const chat = String(cb.message?.chat.id || "");
   try {
     if (!cb.data?.startsWith("qw:") || !await isAllowedTelegramUser(env2, chat, String(cb.from.id), cb.message?.chat.type)) return;
-    await init$1(env2.MEMORY_DB);
+    await init$2(env2.MEMORY_DB);
     const data = cb.data;
     const current = await session(env2.MEMORY_DB, chat);
     if (data === "qw:cancel") {
@@ -3462,7 +3462,7 @@ async function statusMessage(env2, chat, id, text) {
 }
 async function processQwenVoiceJobs(env2) {
   if (!apiConfigured(env2)) return;
-  await init$1(env2.MEMORY_DB);
+  await init$2(env2.MEMORY_DB);
   const rows = await env2.MEMORY_DB.prepare(
     "SELECT j.id,j.chat_id,t.hash,t.status_message_id,t.last_label FROM qwen_clone_jobs j JOIN mvsep_tts_tracking t ON t.job_id=j.id WHERE j.status IN ('waiting','processing','distributing','merging') AND t.checked_at < unixepoch()-35 ORDER BY t.checked_at ASC LIMIT 4"
   ).bind().all();
@@ -3552,7 +3552,7 @@ async function processQwenVoiceJobs(env2) {
 }
 async function voiceAssistantContext(env2, chat) {
   try {
-    await init$1(env2.MEMORY_DB);
+    await init$2(env2.MEMORY_DB);
     const [data, active, job] = await Promise.all([
       profiles(env2.MEMORY_DB, chat),
       session(env2.MEMORY_DB, chat),
@@ -3701,11 +3701,11 @@ async function handleVoxCallback(env2, cb) {
   }
 }
 const MAX_VOX_CHARS = 8e3;
-const OWNER = "cyawzin";
+const OWNER$1 = "cyawzin";
 const SLUG = "voxcpm2-telegram-worker";
 const BASE = "https://api.kaggle.com/v1/kernels/";
-const KERNEL = OWNER + "/" + SLUG;
-async function init(db) {
+const KERNEL = OWNER$1 + "/" + SLUG;
+async function init$1(db) {
   await db.prepare(
     "CREATE TABLE IF NOT EXISTS vox_kaggle_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT NOT NULL,message_id INTEGER NOT NULL,text TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',version_number INTEGER,error_message TEXT,created_at INTEGER NOT NULL DEFAULT (unixepoch()),updated_at INTEGER NOT NULL DEFAULT (unixepoch()),UNIQUE(chat_id,message_id))"
   ).bind().run();
@@ -3727,7 +3727,7 @@ async function tg(env2, method, fields) {
 async function tell(env2, chat, message) {
   return tg(env2, "sendMessage", { chat_id: chat, text: message.slice(0, 3900) });
 }
-async function kaggle(env2, action, body, timeoutMs = 25e3) {
+async function kaggle$1(env2, action, body, timeoutMs = 25e3) {
   if (!env2.KAGGLE_API_TOKEN) throw Error("Kaggle API token is not configured");
   if (!["list", "push", "status", "output"].includes(action)) throw Error("Unknown Kaggle action");
   const query = new URLSearchParams();
@@ -3755,7 +3755,7 @@ async function kaggle(env2, action, body, timeoutMs = 25e3) {
 }
 async function checkKaggleConnection(env2) {
   if (!env2.MEMORY_DB) return;
-  await init(env2.MEMORY_DB);
+  await init$1(env2.MEMORY_DB);
   await env2.MEMORY_DB.prepare(
     "CREATE TABLE IF NOT EXISTS vox_kaggle_probe (id INTEGER PRIMARY KEY CHECK(id=1),checked_at INTEGER NOT NULL,token_kind TEXT NOT NULL,primary_status INTEGER NOT NULL,secondary_status INTEGER NOT NULL)"
   ).bind().run();
@@ -3772,7 +3772,7 @@ async function checkKaggleConnection(env2) {
       "https://www.kaggle.com/api/v1/kernels/list"
     ].entries()) {
       try {
-        const response = await fetch(url + "?user=" + OWNER + "&pageSize=1", {
+        const response = await fetch(url + "?user=" + OWNER$1 + "&pageSize=1", {
           method: "GET",
           headers: { Authorization: "Bearer " + token, Accept: "application/json" },
           signal: AbortSignal.timeout(12e3)
@@ -3806,13 +3806,13 @@ async function probeKaggleReadMethods(env2) {
     "SELECT checked_at FROM vox_kaggle_rpc_probe WHERE id=1"
   ).bind().all();
   if (existing.results[0]) return;
-  const args = { userName: OWNER, kernelSlug: "voxcpm2-full-working" };
+  const args = { userName: OWNER$1, kernelSlug: "voxcpm2-full-working" };
   const shape = (body) => Object.keys(body || {}).filter(
     (x) => ["status", "failureMessage", "files", "nextPageToken", "log", "url", "code", "message", "error"].includes(x)
   ).join(",");
   const probe = async (action, method) => {
     const base = "https://api.kaggle.com/v1/kernels/" + action;
-    const query = "?userName=" + OWNER + "&kernelSlug=voxcpm2-full-working";
+    const query = "?userName=" + OWNER$1 + "&kernelSlug=voxcpm2-full-working";
     try {
       const r = await fetch(base + (method === "GET" ? query : ""), {
         method,
@@ -3846,7 +3846,7 @@ async function probeKaggleReadMethods(env2) {
 }
 async function verified(env2) {
   if (!env2.KAGGLE_API_TOKEN) return false;
-  await init(env2.MEMORY_DB);
+  await init$1(env2.MEMORY_DB);
   const r = await env2.MEMORY_DB.prepare("SELECT ok FROM vox_kaggle_health WHERE id=1").bind().all();
   return r.results[0]?.ok === 1;
 }
@@ -3875,7 +3875,7 @@ async function handleVoxTelegram(env2, chat, messageId, text, send2, message) {
   const cmd = text.trim().split(/\s+/, 1)[0]?.split("@")[0].toLowerCase();
   if (!["/vox", "/voxvoice", "/voxvoices", "/voxrename", "/vox_status", "/vox_help"].includes(cmd)) return false;
   try {
-    await init(env2.MEMORY_DB);
+    await init$1(env2.MEMORY_DB);
     if (cmd === "/vox_help") {
       await send2("VoxCPM2: /vox TEXT creates a new voice. /voxvoice 1 TEXT uses a saved voice. /voxvoices lists 5 slots. /voxrename 1 Narrator names a slot. Tap Save this voice after generation. For long scripts, use .txt with caption /vox or reply with /voxvoice 1. Max 8,000 characters.");
       return true;
@@ -4011,7 +4011,7 @@ async function deliver(env2, job, url, previewUrl) {
 }
 async function pollVoxKaggle(env2) {
   if (!env2.MEMORY_DB || !env2.KAGGLE_API_TOKEN) return;
-  await init(env2.MEMORY_DB);
+  await init$1(env2.MEMORY_DB);
   const enabled = await verified(env2);
   if (!enabled) return;
   const executing = await env2.MEMORY_DB.prepare(
@@ -4023,7 +4023,7 @@ async function pollVoxKaggle(env2) {
     if (!job.version_number) return;
     try {
       const version2 = "v" + job.version_number;
-      const state = await kaggle(env2, "status", { userName: OWNER, kernelSlug: SLUG, versionLabel: version2 });
+      const state = await kaggle$1(env2, "status", { userName: OWNER$1, kernelSlug: SLUG, versionLabel: version2 });
       const raw = String(state.status || state.state || "").toUpperCase();
       if (raw.includes("ERROR") || raw.includes("FAIL") || raw.includes("CANCEL")) {
         await env2.MEMORY_DB.prepare(
@@ -4033,7 +4033,7 @@ async function pollVoxKaggle(env2) {
         return;
       }
       if (raw.includes("COMPLETE") || raw.includes("SUCCESS")) {
-        const outputs = await kaggle(env2, "output", { userName: OWNER, kernelSlug: SLUG, versionLabel: version2 });
+        const outputs = await kaggle$1(env2, "output", { userName: OWNER$1, kernelSlug: SLUG, versionLabel: version2 });
         const url = matchOutput(outputs);
         const previewUrl = matchOutput(outputs, "vox_voice_sample.mp3");
         if (!url) throw Error("Completed Kaggle run has no WAV download URL");
@@ -4068,7 +4068,7 @@ async function pollVoxKaggle(env2) {
   if (!next) return;
   try {
     const sampleB64 = await voiceForJob(env2.MEMORY_DB, next.id, next.chat_id);
-    const result = await kaggle(env2, "push", {
+    const result = await kaggle$1(env2, "push", {
       slug: KERNEL,
       newTitle: "VoxCPM2 Telegram Worker",
       text: pythonFor(next.text, sampleB64),
@@ -4097,6 +4097,244 @@ async function pollVoxKaggle(env2) {
     ).bind(next.id).run();
     await tell(env2, next.chat_id, "VoxCPM2 job #" + next.id + " submission could not be confirmed. Check Kaggle notebook history; no automatic retry to avoid GPU duplication.").catch(() => void 0);
   }
+}
+const OWNER = "cyawzin";
+const KAGGLE = "https://api.kaggle.com/v1/kernels/";
+const MAX_INPUT = 20 * 1024 * 1024;
+const READY = false;
+const HELP = "Video translation + dubbing (private Kaggle jobs):\n/dub edge en my — dub English video into Burmese using Microsoft Edge TTS (Nilar).\n/dub vox en my — dub with VoxCPM2 on Kaggle T4 GPU.\n/dub_status — latest dubbing job status.\nAttach a video <=20MB with /dub ... as its caption, or reply to a video with the command.\nThis beta is not enabled until Kaggle runtime testing confirms the video pipeline.";
+const defaultVoices = {
+  my: "my-MM-NilarNeural",
+  en: "en-US-AriaNeural",
+  zh: "zh-CN-XiaoxiaoNeural",
+  th: "th-TH-PremwadeeNeural",
+  ja: "ja-JP-NanamiNeural"
+};
+async function init(db) {
+  await db.prepare(
+    "CREATE TABLE IF NOT EXISTS pyvt_kaggle_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT NOT NULL,message_id INTEGER NOT NULL,file_id TEXT NOT NULL,file_ext TEXT NOT NULL,file_size INTEGER NOT NULL,source_lang TEXT NOT NULL,target_lang TEXT NOT NULL,engine TEXT NOT NULL,voice TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',version_number INTEGER,error_message TEXT,created_at INTEGER NOT NULL DEFAULT (unixepoch()),updated_at INTEGER NOT NULL DEFAULT (unixepoch()),UNIQUE(chat_id,message_id))"
+  ).bind().run();
+}
+function selectMedia(msg) {
+  return msg.video || msg.document || msg.reply_to_message?.video || msg.reply_to_message?.document || null;
+}
+async function pyvtCommand(env2, msg, chat, text, send2) {
+  const command = text.trim().split(/\s+/, 1)[0]?.split("@")[0].toLowerCase();
+  if (!["/dub", "/dub_help", "/dub_status"].includes(command)) return false;
+  try {
+    await init(env2.MEMORY_DB);
+    if (command === "/dub_help") {
+      await send2(HELP);
+      return true;
+    }
+    if (command === "/dub_status") {
+      const r = await env2.MEMORY_DB.prepare(
+        "SELECT id,status,error_message FROM pyvt_kaggle_jobs WHERE chat_id=? ORDER BY id DESC LIMIT 1"
+      ).bind(chat).all();
+      const j = r.results[0];
+      await send2(j ? "Video dub job #" + j.id + ": " + j.status + (j.error_message ? "\n" + j.error_message : "") : "No dubbing job yet. Use /dub_help for the supported commands.");
+      return true;
+    }
+    if (!READY) {
+      await send2("Video dubbing on Kaggle is in compatibility testing. No GPU job submitted. " + HELP);
+      return true;
+    }
+    const parsed = text.trim().match(/^\/dub(?:@[a-zA-Z0-9_]+)?\s+(edge|vox)\s+([a-z]{2,3})\s+([a-z]{2,3})(?:\s+([a-zA-Z-]{4,80}))?$/i);
+    if (!parsed) {
+      await send2(HELP);
+      return true;
+    }
+    const engine = parsed[1].toLowerCase(), sourceLang = parsed[2].toLowerCase(), targetLang = parsed[3].toLowerCase();
+    const voice = parsed[4] || (engine === "edge" ? defaultVoices[targetLang] : "Narrator");
+    if (engine === "edge" && !voice) {
+      await send2("Choose an Edge voice for this language, e.g. /dub edge en my my-MM-NilarNeural");
+      return true;
+    }
+    if (sourceLang === targetLang) {
+      await send2("Source and target language are identical. Choose distinct codes or use /vox for speech only.");
+      return true;
+    }
+    const media = selectMedia(msg);
+    if (!media) {
+      await send2("Attach a short video and add /dub " + engine + " " + sourceLang + " " + targetLang + " as its caption, or reply to a video with the command.");
+      return true;
+    }
+    const extension = (media.file_name || "").toLowerCase().split(".").pop() || "mp4";
+    const ext = ["mp4", "mkv", "mov", "webm"].includes(extension) ? extension : "mp4";
+    if (!media.file_id || !media.file_size || media.file_size > MAX_INPUT) {
+      await send2("The standard Telegram Bot API can download video files up to 20 MB. Compress the video and try again.");
+      return true;
+    }
+    const existing = await env2.MEMORY_DB.prepare(
+      "SELECT COUNT(*) AS total FROM pyvt_kaggle_jobs WHERE chat_id=? AND status IN ('queued','submitting','submitted','running','delivering','submit-uncertain')"
+    ).bind(chat).all();
+    if ((existing.results[0]?.total || 0) >= 1) {
+      await send2("One video dubbing job is already active for your account. Check /dub_status.");
+      return true;
+    }
+    await env2.MEMORY_DB.prepare(
+      "INSERT OR IGNORE INTO pyvt_kaggle_jobs(chat_id,message_id,file_id,file_ext,file_size,source_lang,target_lang,engine,voice) VALUES(?,?,?,?,?,?,?,?,?)"
+    ).bind(chat, msg.message_id, media.file_id, ext, media.file_size, sourceLang, targetLang, engine, voice).run();
+    const result = await env2.MEMORY_DB.prepare(
+      "SELECT id FROM pyvt_kaggle_jobs WHERE chat_id=? AND message_id=?"
+    ).bind(chat, msg.message_id).all();
+    await send2("Video job #" + result.results[0]?.id + " queued: " + engine.toUpperCase() + " TTS, " + sourceLang + " → " + targetLang + ". Kaggle will process when GPU is available. /dub_status");
+  } catch (e) {
+    console.error("pyVideoTrans Telegram request failed", e instanceof Error ? e.name : "unknown");
+    await send2("The video dubbing queue is unavailable. No new Kaggle GPU job was confirmed.").catch(() => void 0);
+  }
+  return true;
+}
+function hex(bytes) {
+  return [...new Uint8Array(bytes)].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+async function signature(secret, id, expires) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  return hex(await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode("pyvt-file:" + id + ":" + expires)
+  ));
+}
+function safeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+async function pyvtSignedFile(env2, request) {
+  const url = new URL(request.url);
+  const id = Number(url.searchParams.get("pvfile")), expiry = Number(url.searchParams.get("expire"));
+  const supplied = url.searchParams.get("sig") || "";
+  if (!Number.isSafeInteger(id) || id < 1 || !Number.isSafeInteger(expiry) || expiry < Math.floor(Date.now() / 1e3) || expiry > Math.floor(Date.now() / 1e3) + 43200 || !/^[0-9a-f]{64}$/.test(supplied) || !env2.TELEGRAM_WEBHOOK_SECRET)
+    return new Response("Not found", { status: 404 });
+  const valid = await signature(env2.TELEGRAM_WEBHOOK_SECRET, id, expiry);
+  if (!safeEqual(valid, supplied)) return new Response("Not found", { status: 404 });
+  await init(env2.MEMORY_DB);
+  const entries = await env2.MEMORY_DB.prepare(
+    "SELECT file_id,file_ext,file_size FROM pyvt_kaggle_jobs WHERE id=? AND status IN ('submitting','submitted','running')"
+  ).bind(id).all();
+  const file = entries.results[0];
+  if (!file || file.file_size > MAX_INPUT) return new Response("Not found", { status: 404 });
+  const response = await fetch("https://api.telegram.org/bot" + env2.TELEGRAM_BOT_TOKEN + "/getFile?file_id=" + encodeURIComponent(file.file_id), { signal: AbortSignal.timeout(14e3) });
+  const result = await response.json();
+  const path = result.result?.file_path;
+  if (!response.ok || !result.ok || !path || path.startsWith("/") || path.includes("..") || (result.result?.file_size || 0) > MAX_INPUT)
+    return new Response("File not available", { status: 502 });
+  const media = await fetch("https://api.telegram.org/file/bot" + env2.TELEGRAM_BOT_TOKEN + "/" + path.split("/").map(encodeURIComponent).join("/"), { signal: AbortSignal.timeout(6e4) });
+  if (!media.ok || Number(media.headers.get("content-length") || 0) > MAX_INPUT) {
+    await media.body?.cancel();
+    return new Response("Media unavailable", { status: 502 });
+  }
+  return new Response(media.body, {
+    headers: {
+      "content-type": file.file_ext === "mkv" ? "video/x-matroska" : "video/mp4",
+      "cache-control": "private, no-store",
+      "x-content-type-options": "nosniff"
+    }
+  });
+}
+async function kaggle(env2, method, body) {
+  const isPush = method === "push", u = new URL(KAGGLE + method);
+  if (!isPush) for (const k of ["userName", "kernelSlug", "versionLabel"]) {
+    const v = body[k];
+    if (typeof v === "string") u.searchParams.set(k, v);
+  }
+  const response = await fetch(u, {
+    method: isPush ? "POST" : "GET",
+    headers: {
+      Authorization: "Bearer " + env2.KAGGLE_API_TOKEN,
+      Accept: "application/json",
+      ...isPush ? { "content-type": "application/json" } : {}
+    },
+    ...isPush ? { body: JSON.stringify(body) } : {},
+    signal: AbortSignal.timeout(isPush ? 55e3 : 25e3)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.error) throw Error("Kaggle " + method + " HTTP " + response.status);
+  return data;
+}
+async function pyvtPreflight(env2) {
+  if (!env2.KAGGLE_API_TOKEN || !env2.MEMORY_DB) return;
+  const db = env2.MEMORY_DB;
+  await db.prepare(
+    "CREATE TABLE IF NOT EXISTS pyvt_preflight (id INTEGER PRIMARY KEY CHECK(id=1),status TEXT NOT NULL,version INTEGER,detail TEXT NOT NULL DEFAULT '',updated_at INTEGER NOT NULL DEFAULT (unixepoch()))"
+  ).bind().run();
+  const result = await db.prepare("SELECT status,version FROM pyvt_preflight WHERE id=1").bind().all();
+  const job = result.results[0];
+  if (!job) return;
+  if (job.status === "requested") {
+    const claim = await db.prepare("UPDATE pyvt_preflight SET status='submitting',updated_at=unixepoch() WHERE id=1 AND status='requested'").bind().run();
+    if (!claim.meta.changes) return;
+    const python = [
+      "import subprocess,sys,pathlib",
+      "subprocess.run([sys.executable,'-m','pip','install','-q','uv'],check=True,timeout=250)",
+      "root=pathlib.Path('/kaggle/temp/pyvt-check')",
+      "subprocess.run(['git','clone','--quiet','--depth','1','--branch','main','https://github.com/canibeyours2001-ui/pyvideotrans.git',str(root)],check=True,timeout=150)",
+      "subprocess.run(['uv','python','install','3.10'],check=True,timeout=300)",
+      "subprocess.run(['uv','sync','--python','3.10','--no-dev','--project',str(root)],check=True,timeout=2100)",
+      "p=subprocess.run([str(root/'.venv/bin/python'),str(root/'cli.py'),'--list','providers'],cwd=str(root),capture_output=True,text=True,timeout=120)",
+      "print('PYVT_PREFLIGHT_EXIT',p.returncode,'STDERR',p.stderr[-350:].replace('\\n',' '),flush=True)",
+      "assert p.returncode==0, 'pyVideoTrans CLI startup failed'",
+      "assert 'VoxCPM2' in p.stdout, 'VoxCPM2 provider missing'",
+      "assert 'Edge-TTS' in p.stdout, 'Edge provider missing'",
+      "print('PYVT_PREFLIGHT_OK',flush=True)"
+    ].join("\n");
+    try {
+      const pushed = await kaggle(env2, "push", {
+        slug: "cyawzin/pyvideotrans-compatibility-check",
+        newTitle: "Private pyVideoTrans Python 3.10 environment check",
+        text: python,
+        language: "python",
+        kernelType: "script",
+        isPrivate: true,
+        enableGpu: false,
+        enableInternet: true,
+        sessionTimeoutSeconds: 3600,
+        datasetDataSources: [],
+        competitionDataSources: [],
+        kernelDataSources: [],
+        modelDataSources: []
+      });
+      const v = Number(pushed.versionNumber || pushed.version_number || 0);
+      if (!Number.isSafeInteger(v) || v < 1) throw Error("Kaggle returned no version");
+      await db.prepare("UPDATE pyvt_preflight SET status='submitted',version=?,updated_at=unixepoch() WHERE id=1").bind(v).run();
+    } catch (e) {
+      console.error("pyVideoTrans compatibility test submit uncertain", e instanceof Error ? e.name : "unknown");
+      await db.prepare("UPDATE pyvt_preflight SET status='submit-uncertain',detail='Kaggle submission not confirmed',updated_at=unixepoch() WHERE id=1").bind().run();
+    }
+    return;
+  }
+  if ((job.status === "submitted" || job.status === "running") && job.version) {
+    try {
+      const response = await kaggle(env2, "status", {
+        userName: OWNER,
+        kernelSlug: "pyvideotrans-compatibility-check",
+        versionLabel: "v" + job.version
+      });
+      const state = String(response.status || response.state || "").toUpperCase();
+      let status = "running", detail = "";
+      if (state.includes("COMPLETE") || state.includes("SUCCESS")) {
+        status = "done";
+        detail = "Kaggle CPU environment completed; inspect full script log for CLI assert";
+      } else if (state.includes("ERROR") || state.includes("FAIL") || state.includes("CANCEL")) {
+        status = "failed";
+        detail = String(response.failureMessage || state).slice(0, 240);
+      }
+      await db.prepare("UPDATE pyvt_preflight SET status=?,detail=?,updated_at=unixepoch() WHERE id=1 AND status IN ('submitted','running')").bind(status, detail).run();
+    } catch (e) {
+      console.error("pyVideoTrans preflight poll failed", e instanceof Error ? e.name : "unknown");
+    }
+  }
+}
+async function pollPyvt(env2) {
+  return;
 }
 const app = new Hono();
 app.get("/api/", (c) => {
@@ -4195,6 +4433,7 @@ app.get("/api/mvsep/status/:hash", async (c) => {
     return c.json({ ok: false, error: "Could not retrieve MVSEP status" }, 502);
   }
 });
+app.get("/telegram/webhook", (c) => pyvtSignedFile(c.env, c.req.raw));
 app.post("/telegram/webhook", async (c) => {
   const configured = c.env.TELEGRAM_WEBHOOK_SECRET;
   if (!configured || c.req.header("X-Telegram-Bot-Api-Secret-Token") !== configured) {
@@ -4276,6 +4515,7 @@ app.post("/telegram/webhook", async (c) => {
     try {
       if (isAccessCommand(text) && await handleAccessCommand(c.env, sender, text, send2)) return;
       if (!allowed) return;
+      if (await pyvtCommand(c.env, msg, key, text, send2)) return;
       if (await handleVoxTelegram(c.env, key, msg.message_id, text, send2, msg)) return;
       if (await handleVoiceMessage(c.env, msg, key, text)) return;
       if (await handleAudioTelegram(c.env, msg, key, text, send2)) return;
@@ -4607,7 +4847,7 @@ app.post("/telegram/webhook", async (c) => {
       }
       if (/^\/(?:help|commands)(?:@\w+)?$/i.test(text)) {
         await send2(
-          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/whoami — show your Telegram user ID\n/allowed — owner: list authorized users\n/allow USER_ID — owner: grant access\n/deny USER_ID — owner: revoke access\n/tts_status — check latest Qwen3-TTS generation\n/tts_long — compose long Qwen speech from plain text messages\n/tts_done — finish composing, then review and confirm\n/vox TEXT — Kaggle VoxCPM2 Burmese speech (up to 8,000 characters)\n/vox — attach or reply to a UTF-8 .txt script for long narration\n/vox_status — Kaggle VoxCPM2 job status\n/voxvoices — show five saved VoxCPM2 voices\n/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n/voxrename 1 Name — rename saved VoxCPM2 voice\n/voices — list your five slots\n/savevoice 1 Narrator — reply to audio; no transcript required\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
+          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/whoami — show your Telegram user ID\n/allowed — owner: list authorized users\n/allow USER_ID — owner: grant access\n/deny USER_ID — owner: revoke access\n/tts_status — check latest Qwen3-TTS generation\n/tts_long — compose long Qwen speech from plain text messages\n/tts_done — finish composing, then review and confirm\n/vox TEXT — Kaggle VoxCPM2 Burmese speech (up to 8,000 characters)\n/vox — attach or reply to a UTF-8 .txt script for long narration\n/vox_status — Kaggle VoxCPM2 job status\n/dub_help — pyVideoTrans video dubbing with Edge or VoxCPM2\n/dub_status — last Kaggle video dubbing status\n/voxvoices — show five saved VoxCPM2 voices\n/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n/voxrename 1 Name — rename saved VoxCPM2 voice\n/voices — list your five slots\n/savevoice 1 Narrator — reply to audio; no transcript required\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
         );
         return;
       }
@@ -4632,6 +4872,7 @@ app.post("/telegram/webhook", async (c) => {
               "You are the helpful AI guide for this Telegram bot. Reply in English and use the last 20 stored chat messages to understand the conversation. Give exact Telegram commands and clear, short examples.",
               "Available commands (do not invent commands):",
               "/help or /commands — show the command menu.",
+              "/dub_help — pyVideoTrans video translation and dubbing planned for private Kaggle jobs. Choose Microsoft Edge TTS or VoxCPM2; currently disabled until environment testing succeeds.",
               "/vox TEXT — request VoxCPM2 Burmese speech (up to 8,000 characters); after output click Save this voice, then a slot. /voxvoice 1 TEXT reuses stored reference; /voxvoices lists five slots; /voxrename 1 Name renames. Reply to a UTF-8 .txt file with /vox or /voxvoice 1, or attach a .txt file as caption. /vox_status gives status; no OCI needed.",
               "/whoami — show your Telegram numeric user ID.",
               "/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.",
@@ -4839,6 +5080,8 @@ async function registerTelegramWebhook(env2) {
         { command: "clone", description: "Pick a saved or custom voice" },
         { command: "vox", description: "Kaggle VoxCPM2 Burmese speech" },
         { command: "vox_status", description: "Check VoxCPM2 job status" },
+        { command: "dub_help", description: "pyVideoTrans video dubbing help" },
+        { command: "dub_status", description: "Check pyVideoTrans dubbing status" },
         { command: "voxvoices", description: "Show saved VoxCPM2 voices" },
         { command: "voxvoice", description: "Generate using a saved VoxCPM2 voice" },
         { command: "voxrename", description: "Rename VoxCPM2 saved voice" },
@@ -4876,7 +5119,7 @@ const index = {
     } catch (error) {
       console.error("Telegram webhook registration check failed:", error instanceof Error ? error.name : "unknown");
     }
-    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2), checkKaggleConnection(env2), pollVoxKaggle(env2), probeKaggleReadMethods(env2)]);
+    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2), checkKaggleConnection(env2), pollVoxKaggle(env2), probeKaggleReadMethods(env2), pollPyvt(), pyvtPreflight(env2)]);
     for (const r of results) {
       if (r.status === "rejected") console.error("Scheduled processing failed", String(r.reason).slice(0, 160));
     }
