@@ -95,6 +95,8 @@ function apiConfigured(env:VoiceEnv):boolean{
 export async function handleVoiceMessage(env:VoiceEnv,msg:VoiceMessage,chat:string,content:string):Promise<boolean>{
   const [commandRaw]=content.trim().split(/\s+/,1)
   const cmd=(commandRaw||'').split('@')[0].toLowerCase()
+  // Never treat help/AI requests as speech text, even inside an active clone wizard.
+  if (['/ask','/help','/commands'].includes(cmd)) return false
   const recognized=['/savevoice','/voices','/clone','/clone_help','/cancel','/clonelang'].includes(cmd)
   let current:Session|null=null
   if(!recognized&&!inboundFile(msg)&&!content.trim())return false
@@ -280,5 +282,41 @@ export async function processQwenVoiceJobs(env:VoiceEnv):Promise<void>{
     console.error('Qwen voice job #'+job.id+' failed:',e instanceof Error?e.message.slice(0,120):'unknown')
     await env.MEMORY_DB.prepare("UPDATE qwen_clone_jobs SET status='failed',updated_at=unixepoch() WHERE id=?").bind(job.id).run()
     await say(env,job.chat_id,'Qwen voice job #'+job.id+' failed. No automatic retry, to avoid duplicate GPU charges.').catch(()=>undefined)
+  }
+}
+
+/**
+ * Text-only context for the existing Cloudflare AI assistant.
+ * It can reason about available voice slots and current wizard state.
+ * Never include file IDs, audio, tokens, reference transcripts or user speech text.
+ */
+export async function voiceAssistantContext(env:VoiceEnv,chat:string):Promise<string>{
+  try{
+    await init(env.MEMORY_DB)
+    const [data,active,job]=await Promise.all([
+      profiles(env.MEMORY_DB,chat),
+      session(env.MEMORY_DB,chat),
+      env.MEMORY_DB.prepare(
+        'SELECT id,status FROM qwen_clone_jobs WHERE chat_id=? ORDER BY id DESC LIMIT 1'
+      ).bind(chat).all<{id:number;status:string}>()
+    ])
+    const safeName=(name:string)=>name.replace(/[\r\n<>]/g,' ').slice(0,48)
+    return JSON.stringify({
+      saved_voice_slots:Array.from({length:5},(_,i)=>({
+        slot:i+1,
+        name:safeName(data.find(x=>x.slot===i+1)?.name||''),
+        configured:Boolean(data.find(x=>x.slot===i+1))
+      })),
+      current_voice_step:active?.state||'none',
+      current_voice_slot:active?.slot||null,
+      chosen_language:active?.lang||'English',
+      latest_voice_job:job.results[0]||null,
+      qwen_backend_configured:apiConfigured(env),
+      mvsep_token_configured:Boolean((env as VoiceEnv & { MVSEP_API_TOKEN?:string }).MVSEP_API_TOKEN),
+      last_updated:'live database snapshot'
+    })
+  }catch(e){
+    console.error('Qwen assistant context error:',e instanceof Error?e.name:'unknown')
+    return '{"status":"voice database context unavailable"}'
   }
 }
