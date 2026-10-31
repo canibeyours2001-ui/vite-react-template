@@ -2980,6 +2980,88 @@ async function checkMvsepAccount(env2) {
     ).bind().run();
   }
 }
+const idPattern = /^[1-9][0-9]{4,15}$/;
+async function initAccess(db) {
+  await db.prepare(
+    "CREATE TABLE IF NOT EXISTS telegram_allowed_users (user_id TEXT PRIMARY KEY, added_at INTEGER NOT NULL DEFAULT (unixepoch()))"
+  ).bind().run();
+}
+async function isAllowedTelegramUser(env2, chatId, userId, chatType) {
+  if (chatType && chatType !== "private") return false;
+  if (chatId !== userId || !idPattern.test(userId)) return false;
+  if (userId === env2.TELEGRAM_CHAT_ID) return true;
+  if (!env2.MEMORY_DB) return false;
+  try {
+    await initAccess(env2.MEMORY_DB);
+    const r = await env2.MEMORY_DB.prepare(
+      "SELECT user_id FROM telegram_allowed_users WHERE user_id=? LIMIT 1"
+    ).bind(userId).all();
+    return r.results.length > 0;
+  } catch (e) {
+    console.error("Telegram allowlist lookup failed", e instanceof Error ? e.name : "unknown");
+    return false;
+  }
+}
+function isAccessCommand(text) {
+  return /^\/(?:allow|deny|allowed|whoami)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text);
+}
+async function handleAccessCommand(env2, fromId, text, send2) {
+  if (!isAccessCommand(text)) return false;
+  const [word, target] = text.trim().split(/\s+/, 2);
+  const cmd = word.toLowerCase().split("@")[0];
+  if (cmd === "/whoami") {
+    await send2("Your Telegram user ID: " + fromId + "\nSend this number to the bot owner to request access.");
+    return true;
+  }
+  if (fromId !== env2.TELEGRAM_CHAT_ID) {
+    await send2("Only the bot owner can manage the Telegram allowlist.");
+    return true;
+  }
+  try {
+    await initAccess(env2.MEMORY_DB);
+    if (cmd === "/allowed") {
+      const rows = await env2.MEMORY_DB.prepare(
+        "SELECT user_id FROM telegram_allowed_users ORDER BY added_at, user_id LIMIT 50"
+      ).bind().all();
+      const extras = rows.results.map((r, i) => String(i + 1) + ". " + r.user_id);
+      await send2("Telegram access\nOwner: " + env2.TELEGRAM_CHAT_ID + "\nAllowed users (" + extras.length + "):\n" + (extras.join("\n") || "None") + "\n\nAdd: /allow USER_ID\nRemove: /deny USER_ID");
+      return true;
+    }
+    if (!idPattern.test(target || "")) {
+      await send2("Use /" + (cmd === "/deny" ? "deny" : "allow") + " USER_ID\nAsk the person to send /whoami to this bot for their numeric user ID.");
+      return true;
+    }
+    if (target === env2.TELEGRAM_CHAT_ID) {
+      await send2("The owner always has access and cannot be removed.");
+      return true;
+    }
+    if (cmd === "/allow") {
+      const total = await env2.MEMORY_DB.prepare(
+        "SELECT COUNT(*) AS total FROM telegram_allowed_users"
+      ).bind().all();
+      const already = await env2.MEMORY_DB.prepare(
+        "SELECT user_id FROM telegram_allowed_users WHERE user_id=?"
+      ).bind(target).all();
+      if (!already.results.length && (total.results[0]?.total || 0) >= 50) {
+        await send2("Allowlist is full (50 additional users). Remove an ID first.");
+        return true;
+      }
+      await env2.MEMORY_DB.prepare(
+        "INSERT OR IGNORE INTO telegram_allowed_users(user_id) VALUES(?)"
+      ).bind(target).run();
+      await send2("Allowed " + target + ". They can now chat privately with this bot.\nNote: allowed users can access configured video/audio generation features.");
+    } else if (cmd === "/deny") {
+      const result = await env2.MEMORY_DB.prepare(
+        "DELETE FROM telegram_allowed_users WHERE user_id=?"
+      ).bind(target).run();
+      await send2(result.meta.changes ? "Removed " + target + " from the allowlist." : target + " was not on the allowlist.");
+    }
+  } catch (e) {
+    console.error("Telegram allowlist update failed", e instanceof Error ? e.name : "unknown");
+    await send2("Could not update the allowlist. Check Cloudflare Worker logs.");
+  }
+  return true;
+}
 const LIMIT = 6 * 1024 * 1024;
 const LANGUAGES = /* @__PURE__ */ new Set(["Auto", "English", "Chinese", "Japanese", "Korean", "German", "French", "Russian", "Portuguese", "Spanish", "Italian"]);
 const help = "Voice cloning:\n/savevoice 1 Narrator (reply to a recording; transcript optional)\n/voices — show your 5 saved slots\n/clone — choose a saved voice or upload custom\n/tts_status — live status of latest generation\n/clonelang English — set speech language\n/cancel — stop\nOnly use your own voice or voices you have permission to clone.";
@@ -3183,7 +3265,7 @@ async function handleVoiceMessage(env2, msg, chat, content) {
 async function handleVoiceCallback(env2, cb) {
   const chat = String(cb.message?.chat.id || "");
   try {
-    if (!chat || chat !== env2.TELEGRAM_CHAT_ID || !cb.data?.startsWith("qw:")) return;
+    if (!cb.data?.startsWith("qw:") || !await isAllowedTelegramUser(env2, chat, String(cb.from.id), cb.message?.chat.type)) return;
     await init(env2.MEMORY_DB);
     const data = cb.data;
     const current = await session(env2.MEMORY_DB, chat);
@@ -3219,7 +3301,8 @@ async function handleVoiceCallback(env2, cb) {
     }
   } catch (e) {
     console.error("Qwen callback failure", e instanceof Error ? e.message.slice(0, 120) : "unknown");
-    if (chat === env2.TELEGRAM_CHAT_ID) await say(env2, chat, "That selection expired or failed. Use /clone to start again.").catch(() => void 0);
+    if (await isAllowedTelegramUser(env2, chat, String(cb.from.id), cb.message?.chat.type))
+      await say(env2, chat, "That selection expired or failed. Use /clone to start again.").catch(() => void 0);
   } finally {
     await tg(env2, "answerCallbackQuery", { callback_query_id: cb.id }).catch(() => void 0);
   }
@@ -3561,19 +3644,24 @@ app.post("/telegram/webhook", async (c) => {
   }
   if (update.callback_query) {
     const cb = update.callback_query;
-    if (String(cb.message?.chat.id) === c.env.TELEGRAM_CHAT_ID && String(cb.from.id) === c.env.TELEGRAM_CHAT_ID && cb.data?.startsWith("qw:")) {
+    const chat = String(cb.message?.chat.id ?? "");
+    const sender2 = String(cb.from.id);
+    if (cb.data?.startsWith("qw:") && await isAllowedTelegramUser(c.env, chat, sender2, cb.message?.chat.type)) {
       c.executionCtx.waitUntil(handleVoiceCallback(c.env, cb));
     }
     return c.json({ ok: true });
   }
   const msg = update.message;
-  if (!msg || String(msg.chat.id) !== c.env.TELEGRAM_CHAT_ID || !msg.text && !msg.caption && !msg.photo?.length && !msg.document && !msg.video && !msg.audio && !msg.voice) {
-    return c.json({ ok: true });
-  }
+  if (!msg || !msg.text && !msg.caption && !msg.photo?.length && !msg.document && !msg.video && !msg.audio && !msg.voice) return c.json({ ok: true });
   const chatId = msg.chat.id;
+  const sender = String(msg.from?.id ?? msg.chat.id);
   const token = c.env.TELEGRAM_BOT_TOKEN;
   const text = (msg.text ?? msg.caption ?? "").trim().slice(0, 2e3);
   if (!token || !c.env.AI) return c.json({ ok: false }, 503);
+  const allowed = await isAllowedTelegramUser(c.env, String(chatId), sender, msg.chat.type);
+  const privateChat = (!msg.chat.type || msg.chat.type === "private") && String(chatId) === sender;
+  if (!privateChat || !allowed && !/^\/whoami(?:@[A-Za-z0-9_]+)?$/i.test(text))
+    return c.json({ ok: true });
   const processMessage = async () => {
     const db = c.env.MEMORY_DB;
     if (!db) {
@@ -3620,6 +3708,8 @@ app.post("/telegram/webhook", async (c) => {
       if (!sent.ok) throw new Error("Telegram sendVideo HTTP " + sent.status);
     };
     try {
+      if (isAccessCommand(text) && await handleAccessCommand(c.env, sender, text, send2)) return;
+      if (!allowed) return;
       if (await handleVoiceMessage(c.env, msg, key, text)) return;
       if (await handleAudioTelegram(c.env, msg, key, text, send2)) return;
       if (text.toLowerCase() === "/forget" || text.toLowerCase() === "/reset") {
@@ -3950,7 +4040,7 @@ app.post("/telegram/webhook", async (c) => {
       }
       if (/^\/(?:help|commands)(?:@\w+)?$/i.test(text)) {
         await send2(
-          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/tts_status — check latest Qwen3-TTS generation\n/voices — list your five slots\n/savevoice 1 Narrator — reply to audio; no transcript required\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
+          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/whoami — show your Telegram user ID\n/allowed — owner: list authorized users\n/allow USER_ID — owner: grant access\n/deny USER_ID — owner: revoke access\n/tts_status — check latest Qwen3-TTS generation\n/voices — list your five slots\n/savevoice 1 Narrator — reply to audio; no transcript required\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
         );
         return;
       }
@@ -3975,6 +4065,8 @@ app.post("/telegram/webhook", async (c) => {
               "You are the helpful AI guide for this Telegram bot. Reply in English and use the last 20 stored chat messages to understand the conversation. Give exact Telegram commands and clear, short examples.",
               "Available commands (do not invent commands):",
               "/help or /commands — show the command menu.",
+              "/whoami — show your Telegram numeric user ID.",
+              "/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.",
               "/ask QUESTION — ask this AI for help; normal messages also reach the AI.",
               "/clone — interactive Qwen3-TTS voice cloning via MVSEP: choose one of five saved slots or a custom voice, then text, then confirm.",
               "/voices — list stored voice slots.",
