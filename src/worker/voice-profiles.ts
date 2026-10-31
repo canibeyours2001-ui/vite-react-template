@@ -31,7 +31,7 @@ type Session={state:string;slot:number|null;custom_file_id:string|null;custom_re
 type Job={id:number;chat_id:string;telegram_file_id:string;ref_text:string;lang:string;speech_text:string}
 const LIMIT=6*1024*1024
 const LANGUAGES=new Set(['Auto','English','Chinese','Japanese','Korean','German','French','Russian','Portuguese','Spanish','Italian'])
-const help='Voice cloning:\n/savevoice 1 Narrator | exact reference transcript (as a reply to a voice recording)\n/voices — show your 5 saved slots\n/clone — choose a saved voice or upload custom\n/tts_status — live status of latest generation\n/clonelang English — set speech language\n/cancel — stop\nOnly use your own voice or voices you have permission to clone.'
+const help='Voice cloning:\n/savevoice 1 Narrator (reply to a recording; transcript optional)\n/voices — show your 5 saved slots\n/clone — choose a saved voice or upload custom\n/tts_status — live status of latest generation\n/clonelang English — set speech language\n/cancel — stop\nOnly use your own voice or voices you have permission to clone.'
 function usableFile(file?:RefFile):file is RefFile{
   if(!file?.file_id || (file.file_size||0)>LIMIT)return false
   const ext=(file.file_name||'').toLowerCase()
@@ -129,19 +129,19 @@ export async function handleVoiceMessage(env:VoiceEnv,msg:VoiceMessage,chat:stri
       await say(env,chat,'Saved voice profiles:\n'+Array.from({length:5},(_,i)=>{
         const v=data.find(x=>x.slot===i+1)
         return (i+1)+'. '+(v?v.name:'Empty')
-      }).join('\n')+'\n\nAdd or update: reply to a reference recording with /savevoice SLOT NAME | exact transcript.')
+      }).join('\n')+'\n\nSave: reply to a recording with /savevoice 1 Narrator. No transcript required.')
       return true
     }
     if(cmd==='/savevoice'){
       const rest=content.replace(/^\/savevoice(?:@\w+)?\s*/i,'')
-      const m=rest.match(/^([1-5])\s+([^|\n]{1,50})\s*\|\s*(.{1,1000})$/s)
+      const m=rest.match(/^([1-5])\s+([^|\n]{1,50}?)(?:\s*\|\s*(.{1,1000}))?$/s)
       const ref=selectedFile(msg)
       if(!m||!ref||!usableFile(ref)){
-        await say(env,chat,'Reply to a 3–15 sec reference audio/voice with:\n/savevoice 1 Narrator | the exact spoken words')
+        await say(env,chat,'Reply to a 3–15 sec reference audio/voice with:\n/savevoice 1 Narrator\nTranscript not required.')
         return true
       }
       await env.MEMORY_DB.prepare('INSERT INTO qwen_voice_profiles (chat_id,slot,name,telegram_file_id,ref_text) VALUES (?,?,?,?,?) ON CONFLICT(chat_id,slot) DO UPDATE SET name=excluded.name,telegram_file_id=excluded.telegram_file_id,ref_text=excluded.ref_text,updated_at=unixepoch()')
-        .bind(chat,Number(m[1]),m[2].trim(),ref.file_id,m[3].trim()).run()
+        .bind(chat,Number(m[1]),m[2].trim(),ref.file_id,(m[3]||'').trim()).run()
       await say(env,chat,'Saved voice '+m[1]+': '+m[2].trim()+'. Use /clone to generate.')
       return true
     }
@@ -163,17 +163,12 @@ export async function handleVoiceMessage(env:VoiceEnv,msg:VoiceMessage,chat:stri
     if(current.state==='custom_audio'){
       const ref=inboundFile(msg)
       if(!ref||!usableFile(ref)){await say(env,chat,'Please send an audio file or voice message (up to 6 MB).');return true}
-      await setSession(env.MEMORY_DB,chat,'custom_transcript',null,ref.file_id,null,current.lang)
-      await say(env,chat,'Now type the EXACT words spoken in your reference recording.')
+      await setSession(env.MEMORY_DB,chat,'target_text',null,ref.file_id,'',current.lang)
+      await say(env,chat,'Reference voice uploaded. Send the NEW text to speak. No transcript required.')
       return true
     }
-    if(current.state==='custom_transcript'){
-      if(!text||text.length>1000){await say(env,chat,'Send the reference transcript (1–1000 characters).');return true}
-      await setSession(env.MEMORY_DB,chat,'target_text',null,current.custom_file_id,text,current.lang)
-      await say(env,chat,'Reference transcript saved. Now send the NEW text you want the voice to speak. Max 1000 characters.')
-      return true
-    }
-    if(current.state==='target_text'){
+    // Existing sessions at the old transcript step now accept target speech directly.
+    if(current.state==='target_text'||current.state==='custom_transcript'){
       if(!text||text.length>1000){await say(env,chat,'Send target speech text (1–1000 characters).');return true}
       let fid=current.custom_file_id,ref=current.custom_ref_text,voiceName='Custom upload'
       if(current.slot&&current.slot>0){
@@ -181,14 +176,14 @@ export async function handleVoiceMessage(env:VoiceEnv,msg:VoiceMessage,chat:stri
         if(!row){await clearSession(env.MEMORY_DB,chat);await say(env,chat,'Saved voice missing. Retry /clone.');return true}
         fid=row.telegram_file_id;ref=row.ref_text;voiceName=row.name
       }
-      if(!fid||!ref){await say(env,chat,'Reference audio or transcript missing. Retry /clone.');return true}
+      if(!fid){await say(env,chat,'Reference audio missing. Retry /clone.');return true}
       await env.MEMORY_DB.prepare('INSERT OR IGNORE INTO qwen_clone_jobs (chat_id,source_message_id,telegram_file_id,ref_text,speech_text,lang,status) VALUES (?,?,?,?,?,?,\'pending\')')
-        .bind(chat,msg.message_id,fid,ref,text,current.lang).run()
+        .bind(chat,msg.message_id,fid,ref||'',text,current.lang).run()
       const job=(await env.MEMORY_DB.prepare('SELECT id FROM qwen_clone_jobs WHERE chat_id=? AND source_message_id=?').bind(chat,msg.message_id).all<{id:number}>()).results[0]
       await clearSession(env.MEMORY_DB,chat)
       if(!job){await say(env,chat,'Could not prepare generation.');return true}
       await say(env,chat,'Ready to generate with '+voiceName+' ('+current.lang+').\nText: '+text.slice(0,320)+
-        '\n\nConfirm to start GPU inference (charges may apply).',
+        '\n\nConfirm to submit to MVSEP (credits may apply).',
         {inline_keyboard:[[{text:'Generate audio',callback_data:'qw:gen:'+job.id}],
           [{text:'Cancel',callback_data:'qw:drop:'+job.id}]]})
       return true
@@ -317,7 +312,7 @@ async function mvsepCreate(env:VoiceEnv,job:Job,blob:Blob):Promise<string>{
   f.set('audiofile',blob,'reference.ogg')
   f.set('sep_type','120')
   f.set('add_opt1',job.speech_text)
-  f.set('add_opt2',job.ref_text)
+  if(job.ref_text.trim())f.set('add_opt2',job.ref_text.trim())
   f.set('add_opt3',job.lang.toLowerCase())
   f.set('add_opt4','0')
   f.set('output_format','0')
