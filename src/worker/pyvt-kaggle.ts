@@ -405,10 +405,18 @@ export async function pyvtEdgeSmoke(env:VideoEnv):Promise<void>{
  if(job.status==='failed'&&job.version){
   const detail=await db.prepare('SELECT detail FROM pyvt_edge_smoke WHERE id=1')
    .bind().all<{detail:string}>()
-  if((detail.results[0]?.detail||'').length>12)return
+  await db.prepare("CREATE TABLE IF NOT EXISTS pyvt_edge_debug ("+
+    "id INTEGER PRIMARY KEY CHECK(id=1),log_text TEXT NOT NULL)"
+  ).bind().run()
+  const already=await db.prepare('SELECT id FROM pyvt_edge_debug WHERE id=1')
+   .bind().all<{id:number}>()
+  if(already.results[0])return
   try{
    const output=await kaggle(env,'output',{userName:OWNER,kernelSlug:name,versionLabel:'v'+job.version})
-   const raw=String(output.log||output.message||'').slice(-1600)
+   const full=String(output.log||output.message||'').slice(-55000)
+   await db.prepare('INSERT OR REPLACE INTO pyvt_edge_debug(id,log_text) VALUES(1,?)')
+    .bind(full).run()
+   const raw=full.slice(-1600)
    await db.prepare('UPDATE pyvt_edge_smoke SET detail=?,updated_at=unixepoch() WHERE id=1')
     .bind(raw||'No log returned from Kaggle').run()
   }catch(e){
