@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { handleAudioTelegram, pollAudioJobs, mvsepStatus, qwenCloneProxy } from './audio-tools'
 
 type AIClient = {
   run: (
@@ -19,6 +20,9 @@ type Bindings = {
   MODAL_WAN_API_KEY?: string
   MODAL_MOTION_API_BASE?: string
   MODAL_MOTION_API_KEY?: string
+  MVSEP_API_TOKEN?: string
+  QWEN_TTS_API_BASE?: string
+  QWEN_TTS_API_KEY?: string
   AI: AIClient
   MEMORY_DB: {
     prepare: (query: string) => {
@@ -139,6 +143,32 @@ app.post('/api/ai', async (c) => {
 })
 
 
+// Protected audio endpoints reuse the existing strong AI_ACCESS_KEY.
+app.get('/api/mvsep/status/:hash', async (c) => {
+  if (!c.env.AI_ACCESS_KEY || c.env.AI_ACCESS_KEY.length < 24 ||
+    c.req.header('X-AI-Access-Key') !== c.env.AI_ACCESS_KEY) {
+    return c.json({ ok: false, error: 'Unauthorized' }, 401)
+  }
+  try {
+    return c.json(await mvsepStatus(c.req.param('hash')))
+  } catch {
+    return c.json({ ok: false, error: 'Could not retrieve MVSEP status' }, 502)
+  }
+})
+
+app.post('/api/qwen/clone', async (c) => {
+  if (!c.env.AI_ACCESS_KEY || c.env.AI_ACCESS_KEY.length < 24 ||
+    c.req.header('X-AI-Access-Key') !== c.env.AI_ACCESS_KEY) {
+    return c.json({ ok: false, error: 'Unauthorized' }, 401)
+  }
+  try {
+    return await qwenCloneProxy(c.env, c.req.raw)
+  } catch (error) {
+    console.error('Qwen proxy error', error instanceof Error ? error.name : 'unknown')
+    return c.json({ ok: false, error: 'Qwen backend request failed' }, 502)
+  }
+})
+
 type TelegramPhoto = {
   file_id: string
   file_size?: number
@@ -156,6 +186,8 @@ type TelegramUpdate = {
     message_id: number
     video?: { file_id: string; file_size?: number; mime_type?: string }
     reply_to_message?: {
+      audio?: {file_id:string;file_size?:number;file_name?:string;mime_type?:string}
+      voice?: {file_id:string;file_size?:number;file_name?:string;mime_type?:string}
       photo?: TelegramPhoto[]
       document?: { file_id: string; mime_type?: string; file_size?: number }
     }
@@ -225,6 +257,7 @@ app.post('/telegram/webhook', async (c) => {
       if (!sent.ok) throw new Error('Telegram sendVideo HTTP ' + sent.status)
     }
     try {
+      if (await handleAudioTelegram(c.env, msg, key, text, send)) return
       if (text.toLowerCase() === '/forget' || text.toLowerCase() === '/reset') {
         await db.prepare('DELETE FROM messages WHERE chat_id = ?').bind(key).run()
         await send('Conversation memory cleared. We can start fresh.')
@@ -814,6 +847,9 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    await processQueuedMotion(env)
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env)])
+    for (const r of results) {
+      if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
+    }
   }
 }
