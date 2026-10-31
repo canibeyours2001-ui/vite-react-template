@@ -272,6 +272,58 @@ async function deliver(env:VoxEnv,job:Job,url:string){
  const j=await out.json() as {ok?:boolean}
  if(!out.ok||!j.ok)throw Error('Telegram audio delivery failed')
 }
+
+/** Read-only diagnostics for a current run; never submits GPU jobs. */
+export async function diagnoseVoxJob(env:VoxEnv):Promise<void>{
+ if(!env.MEMORY_DB||!env.KAGGLE_API_TOKEN)return
+ await env.MEMORY_DB.prepare(
+  'CREATE TABLE IF NOT EXISTS vox_kaggle_diagnostics ('+
+  'id INTEGER PRIMARY KEY,checked_at INTEGER NOT NULL,version INTEGER NOT NULL,'+
+  'kaggle_status TEXT NOT NULL,detail TEXT NOT NULL,'+
+  'status_keys TEXT NOT NULL,output_keys TEXT NOT NULL,'+
+  'output_names TEXT NOT NULL,download_hosts TEXT NOT NULL)'
+ ).bind().run()
+ const active=await env.MEMORY_DB.prepare(
+  "SELECT id,version_number FROM vox_kaggle_jobs WHERE status IN ('submitted','running') ORDER BY id LIMIT 1"
+ ).bind().all<{id:number;version_number:number|null}>()
+ const job=active.results[0]
+ if(!job?.version_number)return
+ const prev=await env.MEMORY_DB.prepare('SELECT checked_at FROM vox_kaggle_diagnostics WHERE id=?')
+  .bind(job.id).all<{checked_at:number}>()
+ if(prev.results[0]?.checked_at && prev.results[0].checked_at > Math.floor(Date.now()/1000)-55)return
+ let state:Record<string,unknown>={}, output:Record<string,unknown>={}, detail=''
+ try{state=await kaggle(env,'status',{userName:OWNER,kernelSlug:SLUG,versionLabel:'v'+job.version_number})}
+ catch(e){detail='status:'+String(e instanceof Error?e.message:'network').slice(0,120)}
+ try{output=await kaggle(env,'output',{userName:OWNER,kernelSlug:SLUG,versionLabel:'v'+job.version_number})}
+ catch(e){detail+=' output:'+String(e instanceof Error?e.message:'network').slice(0,120)}
+ const files=(output.files||output.outputFiles||[]) as unknown
+ const names:string[]=[],hosts:string[]=[]
+ if(Array.isArray(files)){
+  for(const item of files.slice(0,15)){
+   if(!item||typeof item!=='object')continue
+   const obj=item as Record<string,unknown>
+   names.push(String(obj.fileName||obj.file_name||'').slice(0,100))
+   for(const name of ['url','downloadUrl','download_url']){
+    const raw=obj[name]
+    if(typeof raw!=='string')continue
+    try{hosts.push(new URL(raw).hostname+':'+name)}catch{}
+   }
+  }
+ }
+ await env.MEMORY_DB.prepare(
+  'INSERT INTO vox_kaggle_diagnostics(id,checked_at,version,kaggle_status,detail,status_keys,output_keys,output_names,download_hosts) '+
+  'VALUES(?,unixepoch(),?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET checked_at=unixepoch(),'+
+  'version=excluded.version,kaggle_status=excluded.kaggle_status,detail=excluded.detail,'+
+  'status_keys=excluded.status_keys,output_keys=excluded.output_keys,'+
+  'output_names=excluded.output_names,download_hosts=excluded.download_hosts'
+ ).bind(job.id,job.version_number,String(state.status||state.state||'unknown').slice(0,100),
+  detail+' '+String(state.failureMessage||'').slice(0,180),
+  Object.keys(state).slice(0,20).join(','),
+  Object.keys(output).slice(0,20).join(','),
+  names.join('|').slice(0,1200),hosts.join('|').slice(0,600)
+ ).run()
+}
+
 export async function pollVoxKaggle(env:VoxEnv):Promise<void>{
  if(!env.MEMORY_DB||!env.KAGGLE_API_TOKEN)return
  await init(env.MEMORY_DB)
