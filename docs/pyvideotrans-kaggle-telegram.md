@@ -49,3 +49,18 @@ References: https://core.telegram.org/bots/api and https://github.com/Kaggle/kag
 The Worker creates `pyvt_config` only when a `/dub` request or poll needs it. If no row exists, video GPU submissions are disabled. After CPU preflight and a controlled successful video integration test, the administrator can deliberately enable `pyvt_config.enabled=1` using Cloudflare D1 (never via Telegram). This keeps existing users from accidentally consuming GPU quota on untested video builds.
 
 The optional numeric 1–5 in `/dub vox ...` reuses the Telegram user's saved VoxCPM2 reference sample. The sample is embedded only into the private Kaggle job source (never into a public file URL); that job decodes it to a WAV and supplies `--reference-wav` to native VoxCPM2 to improve timbre consistency over subtitle segments. Edge TTS takes a Microsoft voice name instead of a numbered slot.
+
+## Telegram target-language and voice wizard
+
+Send `/dub` in your private bot chat to choose through inline Telegram buttons:
+
+1. **Target language:** English or Burmese. The wizard initially assumes the opposite source language (Burmese → English or English → Burmese).
+2. **Dubbing engine:** Microsoft Edge TTS (network voice) or VoxCPM2 (Kaggle T4 GPU).
+3. **Voice:**
+   - English Edge: Aria (US woman), Guy (US man), Christopher (US man).
+   - Burmese Edge: Nilar (woman), Thiha (man).
+   - VoxCPM2: new/default voice or an existing private saved-voice slot 1–5 (from `/voxvoices`).
+
+These selections are saved per private Telegram chat in D1 `pyvt_dub_selections`. After choosing, send a video (maximum 20 MB) or reply to an existing video using `/dub`. The previously supported direct commands, including `/dub edge en my` and `/dub vox en my 1`, remain available. The direct command parser also now correctly accepts single-digit saved-voice slots.
+
+**Safety:** This is the *selection UI only*. Actual video jobs remain disabled unless the private `pyvt_config.enabled` flag is set after successful Kaggle runtime and MP4 delivery tests. Current CPU-only environment preflight and voice-provider checks do not automatically enable dubbing jobs. There is no public menu endpoint, and all callbacks require existing Telegram private-chat authorization.
