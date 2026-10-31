@@ -339,7 +339,13 @@ export async function pyvtPreflight(env:VideoEnv):Promise<void>{
    else if(state.includes('ERROR')||state.includes('FAIL')||state.includes('CANCEL')){status='failed';detail=String(response.failureMessage||state).slice(0,240)}
    await db.prepare("UPDATE pyvt_preflight SET status=?,detail=?,updated_at=unixepoch() WHERE id=1 AND status IN ('submitted','running')")
      .bind(status,detail).run()
-  }catch(e){console.error('pyVideoTrans preflight poll failed',e instanceof Error?e.name:'unknown')}
+  }catch(e){
+    const reason=e instanceof Error?e.message.slice(0,160):'unknown'
+    console.error('pyVideoTrans preflight poll failed',e instanceof Error?e.name:'unknown')
+    await db.prepare(
+      "UPDATE pyvt_preflight SET detail=?,updated_at=unixepoch() WHERE id=1 AND status IN ('submitted','running')"
+    ).bind('Status API: '+reason).run()
+   }
  }
 }
 
