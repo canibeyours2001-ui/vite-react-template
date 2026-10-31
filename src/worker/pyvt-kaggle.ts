@@ -25,7 +25,18 @@ const SLUG='pyvideotrans-telegram-dub'
 const KAGGLE='https://api.kaggle.com/v1/kernels/'
 const MAX_INPUT=20*1024*1024
 const MAX_OUTPUT=49*1024*1024
-const READY=false // safety switch: enable after real Python 3.10/Kaggle runtime test
+// Disabled by default. Only an explicit private admin DB flag can enable
+// costly Kaggle video jobs after Python 3.10 and video pipeline validation.
+async function isReady(env:VideoEnv):Promise<boolean>{
+ await env.MEMORY_DB.prepare(
+  "CREATE TABLE IF NOT EXISTS pyvt_config (id INTEGER PRIMARY KEY CHECK(id=1),"+
+  "enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)))"
+ ).bind().run()
+ const r=await env.MEMORY_DB.prepare(
+  'SELECT enabled FROM pyvt_config WHERE id=1'
+ ).bind().all<{enabled:number}>()
+ return r.results[0]?.enabled===1
+}
 const HELP='Video translation + dubbing (private Kaggle jobs):\n'+
  '/dub edge en my — dub English video into Burmese using Microsoft Edge TTS (Nilar).\n'+
  '/dub vox en my — dub with VoxCPM2 on Kaggle T4 GPU.\n'+
@@ -72,7 +83,7 @@ export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:stri
     'No dubbing job yet. Use /dub_help for the supported commands.')
    return true
   }
-  if(!READY){
+  if(!await isReady(env)){
    await send('Video dubbing on Kaggle is in compatibility testing. No GPU job submitted. '+HELP)
    return true
   }
@@ -316,7 +327,7 @@ export async function pyvtPreflight(env:VideoEnv):Promise<void>{
 }
 
 export async function pollPyvt(env:VideoEnv):Promise<void>{
- if(!READY||!env.KAGGLE_API_TOKEN||!env.MEMORY_DB)return
+ if(!env.KAGGLE_API_TOKEN||!env.MEMORY_DB||!await isReady(env))return
  await init(env.MEMORY_DB)
  const active=await env.MEMORY_DB.prepare(
   "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,status,version_number,created_at,error_message "+
