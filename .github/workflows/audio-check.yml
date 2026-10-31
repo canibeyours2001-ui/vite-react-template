@@ -3,7 +3,7 @@ on:
   pull_request:
   push:
     branches:
-      - fix/kaggle-vox-output-speed
+      - fix/vox-long-form-tts
 permissions:
   contents: write
 jobs:
@@ -22,7 +22,7 @@ jobs:
       - run: npx tsc --noEmit -p tsconfig.worker.json
       - run: npm run build
       - name: Preserve compiled Worker for safe direct Cloudflare deployment
-        if: github.event_name == 'push' && github.ref == 'refs/heads/fix/kaggle-vox-output-speed'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/fix/vox-long-form-tts'
         run: |
           mkdir -p deploy
           cp dist/vite_react_template/index.js deploy/worker-bundle.mjs
