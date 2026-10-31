@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { handleAudioTelegram, pollAudioJobs, mvsepStatus, qwenCloneProxy } from './audio-tools'
+import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs } from './voice-profiles'
 
 type AIClient = {
   run: (
@@ -177,12 +178,20 @@ type TelegramPhoto = {
 }
 
 type TelegramUpdate = {
+  callback_query?: {
+    id: string
+    data?: string
+    from: {id: number}
+    message?: {chat: {id: number}; message_id: number}
+  }
   message?: {
     chat: { id: number }
     text?: string
     caption?: string
     photo?: TelegramPhoto[]
     document?: { file_id: string; mime_type?: string; file_name?: string; file_size?: number }
+    audio?: {file_id:string;file_size?:number;file_name?:string;mime_type?:string}
+    voice?: {file_id:string;file_size?:number;file_name?:string;mime_type?:string}
     message_id: number
     video?: { file_id: string; file_size?: number; mime_type?: string }
     reply_to_message?: {
@@ -203,8 +212,16 @@ app.post('/telegram/webhook', async (c) => {
   try { update = await c.req.json<TelegramUpdate>() }
   catch { return c.text('Bad request', 400) }
 
+  if (update.callback_query) {
+    const cb = update.callback_query
+    if (String(cb.message?.chat.id) === c.env.TELEGRAM_CHAT_ID &&
+        String(cb.from.id) === c.env.TELEGRAM_CHAT_ID && cb.data?.startsWith('qw:')) {
+      c.executionCtx.waitUntil(handleVoiceCallback(c.env,cb))
+    }
+    return c.json({ok:true})
+  }
   const msg = update.message
-  if (!msg || String(msg.chat.id) !== c.env.TELEGRAM_CHAT_ID || (!msg.text && !msg.caption && !msg.photo?.length && !msg.document && !msg.video)) {
+  if (!msg || String(msg.chat.id) !== c.env.TELEGRAM_CHAT_ID || (!msg.text && !msg.caption && !msg.photo?.length && !msg.document && !msg.video && !msg.audio && !msg.voice)) {
     return c.json({ ok: true })
   }
   const chatId = msg.chat.id
@@ -257,6 +274,7 @@ app.post('/telegram/webhook', async (c) => {
       if (!sent.ok) throw new Error('Telegram sendVideo HTTP ' + sent.status)
     }
     try {
+      if (await handleVoiceMessage(c.env,msg,key,text)) return
       if (await handleAudioTelegram(c.env, msg, key, text, send)) return
       if (text.toLowerCase() === '/forget' || text.toLowerCase() === '/reset') {
         await db.prepare('DELETE FROM messages WHERE chat_id = ?').bind(key).run()
@@ -847,7 +865,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }
