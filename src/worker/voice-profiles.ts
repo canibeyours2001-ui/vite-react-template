@@ -13,8 +13,7 @@ export type VoiceEnv = {
   MEMORY_DB: D1
   TELEGRAM_BOT_TOKEN: string
   TELEGRAM_CHAT_ID: string
-  QWEN_TTS_API_BASE?: string
-  QWEN_TTS_API_KEY?: string
+  MVSEP_API_TOKEN?: string
 }
 type RefFile = { file_id:string; file_size?:number; file_name?:string; mime_type?:string }
 export type VoiceMessage = {
@@ -54,6 +53,7 @@ async function say(env:VoiceEnv,chat:string,text:string,keyboard?:{inline_keyboa
 }
 async function init(db:D1){
   await db.prepare('CREATE TABLE IF NOT EXISTS qwen_voice_profiles (chat_id TEXT NOT NULL, slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 5), name TEXT NOT NULL, telegram_file_id TEXT NOT NULL, ref_text TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT (unixepoch()), PRIMARY KEY (chat_id,slot))').bind().run()
+  await db.prepare('CREATE TABLE IF NOT EXISTS mvsep_tts_tracking (job_id INTEGER PRIMARY KEY, hash TEXT UNIQUE NOT NULL, status_message_id INTEGER, last_label TEXT NOT NULL DEFAULT \'\', checked_at INTEGER NOT NULL DEFAULT 0)').bind().run()
   await db.prepare('CREATE TABLE IF NOT EXISTS qwen_clone_sessions (chat_id TEXT PRIMARY KEY, state TEXT NOT NULL, slot INTEGER, custom_file_id TEXT, custom_ref_text TEXT, lang TEXT NOT NULL DEFAULT \'English\', updated_at INTEGER NOT NULL DEFAULT (unixepoch()))').bind().run()
   await db.prepare('CREATE TABLE IF NOT EXISTS qwen_clone_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, source_message_id INTEGER NOT NULL, telegram_file_id TEXT NOT NULL, ref_text TEXT NOT NULL, speech_text TEXT NOT NULL, lang TEXT NOT NULL, status TEXT NOT NULL DEFAULT \'pending\', created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()), UNIQUE(chat_id,source_message_id))').bind().run()
 }
@@ -89,7 +89,7 @@ function inboundFile(m:VoiceMessage):RefFile|undefined{
   return m.audio||m.voice||(m.document&&usableFile(m.document)?m.document:undefined)
 }
 function apiConfigured(env:VoiceEnv):boolean{
-  return Boolean(env.QWEN_TTS_API_BASE&&env.QWEN_TTS_API_KEY)
+  return Boolean(env.MVSEP_API_TOKEN)
 }
 /** Returns true for an intercepted voice command or active clone session. */
 export async function handleVoiceMessage(env:VoiceEnv,msg:VoiceMessage,chat:string,content:string):Promise<boolean>{
@@ -211,12 +211,12 @@ export async function handleVoiceCallback(env:VoiceEnv,cb:VoiceCallback):Promise
       const id=Number(data.split(':')[2])
       if(!Number.isSafeInteger(id)||id<1)throw new Error('Invalid job')
       if(confirm&&!apiConfigured(env)){
-        await say(env,chat,'Your voice and text are ready, but Qwen Modal GPU endpoint is not configured yet. No generation has started or been billed.')
+        await say(env,chat,'MVSEP_API_TOKEN is missing. No job was submitted.')
       }else{
         const res=await env.MEMORY_DB.prepare(
           "UPDATE qwen_clone_jobs SET status=?,updated_at=unixepoch() WHERE id=? AND chat_id=? AND status='pending'"
         ).bind(confirm?'queued':'cancelled',id,chat).run()
-        if(res.meta.changes===1)await say(env,chat,confirm?'Audio generation queued. The bot will deliver the WAV when ready.':'Generation cancelled.')
+        if(res.meta.changes===1)await say(env,chat,confirm?'MVSEP Qwen3-TTS job queued. Status will update automatically.':'Generation cancelled.')
         else await say(env,chat,'This request was already handled.')
       }
     }
@@ -240,48 +240,177 @@ async function download(env:VoiceEnv,id:string):Promise<Blob>{
   if(b.size<1||b.size>LIMIT)throw new Error('Audio size invalid')
   return b
 }
-/** Performs at most one explicit-confirmed generation per scheduled invocation.
- * Claims pending request before sending to GPU, no automatic retry if uncertain.
+/**
+ * MVSEP Qwen3-TTS Voice Cloning, sep_type=120.
+ * This path uses ONLY MVSEP_API_TOKEN; no Modal or GPU deployment is needed.
+ * Once confirmed, jobs are claimed before submission. A timeout never retries
+ * an uncertain paid request automatically.
  */
+const MVSEP_API='https://sg.mvsep.com/api'
+type MvsepResponse={
+  success?:boolean;status?:string;
+  data?:{hash?:string;link?:string;message?:string;current_order?:number;queue_count?:number;
+    finished_chunks?:number;all_chunks?:number;files?:unknown}
+}
+function mvsepLink(raw:unknown):string|null{
+  if(typeof raw!=='string')return null
+  try{
+    const u=new URL(raw)
+    if(u.protocol==='https:' && (u.hostname==='mvsep.com' || u.hostname.endsWith('.mvsep.com')))return u.href
+  }catch{}
+  return null
+}
+function outputLinks(value:unknown):string[]{
+  const links:string[]=[]
+  const visit=(v:unknown,depth:number)=>{
+    if(depth>4||links.length>6)return
+    const url=mvsepLink(v)
+    if(url){links.push(url);return}
+    if(Array.isArray(v)){for(const x of v)visit(x,depth+1)}
+    else if(v&&typeof v==='object'){
+      for(const [key,x] of Object.entries(v)){
+        if(['url','link','download','download_url','file','path','files','outputs'].includes(key))
+          visit(x,depth+1)
+        else if(typeof x==='object') visit(x,depth+1)
+      }
+    }
+  }
+  visit(value,0)
+  return [...new Set(links)]
+}
+function voiceState(data:MvsepResponse):string{
+  let status='Qwen3-TTS (MVSEP): '+(data.status||'unknown')
+  if(typeof data.data?.current_order==='number')status+='\nQueue position: '+data.data.current_order
+  if(typeof data.data?.queue_count==='number')status+='\nQueue length: '+data.data.queue_count
+  if(typeof data.data?.finished_chunks==='number'&&typeof data.data?.all_chunks==='number')
+    status+='\nChunks: '+data.data.finished_chunks+'/'+data.data.all_chunks
+  if(data.status==='failed'&&data.data?.message)status+='\n'+data.data.message.slice(0,200)
+  return status.slice(0,3000)
+}
+async function mvsepGet(hash:string):Promise<MvsepResponse>{
+  const r=await fetch(MVSEP_API+'/separation/get?hash='+encodeURIComponent(hash),
+    {signal:AbortSignal.timeout(18000)})
+  if(!r.ok)throw new Error('MVSEP status HTTP '+r.status)
+  return r.json() as Promise<MvsepResponse>
+}
+async function mvsepCreate(env:VoiceEnv,job:Job,blob:Blob):Promise<string>{
+  const f=new FormData()
+  f.set('api_token',env.MVSEP_API_TOKEN!)
+  f.set('audiofile',blob,'reference.ogg')
+  f.set('sep_type','120')
+  f.set('add_opt1',job.speech_text)
+  f.set('add_opt2',job.ref_text)
+  f.set('add_opt3',job.lang.toLowerCase())
+  f.set('add_opt4','0')
+  f.set('output_format','0')
+  f.set('is_demo','0')
+  const r=await fetch(MVSEP_API+'/separation/create',{method:'POST',body:f,
+    signal:AbortSignal.timeout(90000)})
+  const j=await r.json() as MvsepResponse
+  if(!r.ok||!j.success||!j.data?.hash)
+    throw new Error('MVSEP rejected submission: '+String(j.data?.message||r.status).slice(0,200))
+  return j.data.hash
+}
+async function statusMessage(env:VoiceEnv,chat:string,id:number,text:string){
+  if(id>0){
+    try{
+      await tg(env,'editMessageText',{chat_id:chat,message_id:id,text:text.slice(0,3900),
+        disable_web_page_preview:true})
+      return
+    }catch(e){console.error('TTS status edit failed',e instanceof Error?e.name:'unknown')}
+  }
+  await say(env,chat,text)
+}
 export async function processQwenVoiceJobs(env:VoiceEnv):Promise<void>{
   if(!apiConfigured(env))return
-  const url=new URL(env.QWEN_TTS_API_BASE!)
-  if(url.protocol!=='https:'||!url.hostname.endsWith('.modal.run')||url.pathname!=='/'||
-    url.search||url.hash||url.username||url.password)return
   await init(env.MEMORY_DB)
+  // Always poll previously accepted requests before creating a new paid request.
+  const rows=await env.MEMORY_DB.prepare(
+    "SELECT j.id,j.chat_id,t.hash,t.status_message_id,t.last_label FROM qwen_clone_jobs j "+
+    "JOIN mvsep_tts_tracking t ON t.job_id=j.id "+
+    "WHERE j.status IN ('waiting','processing','distributing','merging') AND t.checked_at < unixepoch()-35 "+
+    "ORDER BY t.checked_at ASC LIMIT 4"
+  ).bind().all<{id:number;chat_id:string;hash:string;status_message_id:number;last_label:string}>()
+  for(const active of rows.results){
+    try{
+      const state=await mvsepGet(active.hash)
+      const stage=state.status||'unknown'
+      const label=voiceState(state)+'\nJob: '+active.id
+      await env.MEMORY_DB.prepare(
+        'UPDATE mvsep_tts_tracking SET checked_at=unixepoch(), last_label=? WHERE job_id=?'
+      ).bind(label,active.id).run()
+      if(label!==active.last_label) await statusMessage(env,active.chat_id,active.status_message_id,label)
+      if(['waiting','processing','distributing','merging'].includes(stage)){
+        await env.MEMORY_DB.prepare('UPDATE qwen_clone_jobs SET status=?,updated_at=unixepoch() WHERE id=?')
+          .bind(stage,active.id).run()
+      }else if(stage==='done'){
+        // Mark as delivering BEFORE sending to Telegram to prevent duplicate deliveries.
+        const claimed=await env.MEMORY_DB.prepare(
+          "UPDATE qwen_clone_jobs SET status='delivering',updated_at=unixepoch() WHERE id=? AND status IN ('waiting','processing','distributing','merging')"
+        ).bind(active.id).run()
+        if(claimed.meta.changes!==1)continue
+        const files=outputLinks(state.data?.files)
+        const fallback=mvsepLink(state.data?.link)
+        try{
+          if(files.length){
+            const url=files[0]
+            // Telegram fetches an HTTPS MVSEP file URL directly (no large Worker uploads).
+            const sent=await tg(env,'sendAudio',{
+              chat_id:active.chat_id,audio:url,
+              caption:'Qwen3-TTS generated audio #'+active.id
+            })
+            if(!sent)throw new Error('No Telegram response')
+          }else if(fallback){
+            await say(env,active.chat_id,'Qwen3-TTS completed. Download: '+fallback)
+          }else{
+            await say(env,active.chat_id,'Qwen3-TTS completed, but no download link was returned. Check MVSEP job '+active.hash)
+          }
+          await env.MEMORY_DB.prepare("UPDATE qwen_clone_jobs SET status='done',updated_at=unixepoch() WHERE id=?")
+            .bind(active.id).run()
+        }catch{
+          await env.MEMORY_DB.prepare("UPDATE qwen_clone_jobs SET status='delivery-failed',updated_at=unixepoch() WHERE id=?")
+            .bind(active.id).run()
+          await say(env,active.chat_id,'Audio is ready, but Telegram delivery failed. MVSEP result: '+(fallback||files[0]||active.hash)).catch(()=>undefined)
+        }
+      }else if(['failed','not_found'].includes(stage)){
+        await env.MEMORY_DB.prepare('UPDATE qwen_clone_jobs SET status=?,updated_at=unixepoch() WHERE id=?')
+          .bind(stage,active.id).run()
+      }
+    }catch(e){
+      console.error('MVSEP TTS polling failed',e instanceof Error?e.message.slice(0,100):'unknown')
+      await env.MEMORY_DB.prepare('UPDATE mvsep_tts_tracking SET checked_at=unixepoch() WHERE job_id=?')
+        .bind(active.id).run()
+    }
+  }
+  // Submit at most one confirmed task, and never automatically retry timeouts.
   const found=await env.MEMORY_DB.prepare(
     "SELECT id,chat_id,telegram_file_id,ref_text,lang,speech_text FROM qwen_clone_jobs WHERE status='queued' ORDER BY created_at ASC LIMIT 1"
   ).bind().all<Job>()
   const job=found.results[0]
   if(!job)return
-  const claim=await env.MEMORY_DB.prepare("UPDATE qwen_clone_jobs SET status='running',updated_at=unixepoch() WHERE id=? AND status='queued'").bind(job.id).run()
-  if(claim.meta.changes!==1)return
+  const claimed=await env.MEMORY_DB.prepare(
+    "UPDATE qwen_clone_jobs SET status='submitting',updated_at=unixepoch() WHERE id=? AND status='queued'"
+  ).bind(job.id).run()
+  if(claimed.meta.changes!==1)return
+  let id=0
   try{
-    await say(env,job.chat_id,'Qwen voice job #'+job.id+': preparing audio.')
-    const file=await download(env,job.telegram_file_id)
-    const f=new FormData()
-    f.set('ref_audio',file,'reference.ogg')
-    f.set('ref_text',job.ref_text)
-    f.set('text',job.speech_text)
-    f.set('language',job.lang)
-    await say(env,job.chat_id,'Qwen voice job #'+job.id+': generating speech.')
-    const r=await fetch(url.origin+'/v1/clone',{method:'POST',
-      headers:{Authorization:'Bearer '+env.QWEN_TTS_API_KEY},body:f,signal:AbortSignal.timeout(240000)})
-    if(!r.ok)throw new Error('GPU HTTP '+r.status)
-    const audio=await r.blob()
-    if(audio.size<44||audio.size>45*1024*1024)throw new Error('Invalid generated WAV size')
-    const form=new FormData()
-    form.set('chat_id',job.chat_id)
-    form.set('caption','Qwen3-TTS voice clone #'+job.id)
-    form.set('audio',audio,'qwen-voice-'+job.id+'.wav')
-    const delivered=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendAudio',{
-      method:'POST',body:form,signal:AbortSignal.timeout(60000)})
-    if(!delivered.ok)throw new Error('Telegram output HTTP '+delivered.status)
-    await env.MEMORY_DB.prepare("UPDATE qwen_clone_jobs SET status='done',updated_at=unixepoch() WHERE id=?").bind(job.id).run()
+    const result=await tg(env,'sendMessage',{chat_id:job.chat_id,text:'Qwen3-TTS #'+job.id+': uploading reference to MVSEP...'})
+    id=Number(result.message_id||0)
+    const blob=await download(env,job.telegram_file_id)
+    const hash=await mvsepCreate(env,job,blob)
+    await env.MEMORY_DB.prepare(
+      'INSERT OR REPLACE INTO mvsep_tts_tracking(job_id,hash,status_message_id,last_label,checked_at) VALUES (?,?,?,?,0)'
+    ).bind(job.id,hash,id,'').run()
+    await env.MEMORY_DB.prepare(
+      "UPDATE qwen_clone_jobs SET status='waiting',updated_at=unixepoch() WHERE id=?"
+    ).bind(job.id).run()
+    await statusMessage(env,job.chat_id,id,'Qwen3-TTS submitted to MVSEP.\nJob: '+job.id+'\nTracking automatically every minute.')
   }catch(e){
-    console.error('Qwen voice job #'+job.id+' failed:',e instanceof Error?e.message.slice(0,120):'unknown')
-    await env.MEMORY_DB.prepare("UPDATE qwen_clone_jobs SET status='failed',updated_at=unixepoch() WHERE id=?").bind(job.id).run()
-    await say(env,job.chat_id,'Qwen voice job #'+job.id+' failed. No automatic retry, to avoid duplicate GPU charges.').catch(()=>undefined)
+    console.error('MVSEP TTS submission uncertain:',e instanceof Error?e.message.slice(0,140):'unknown')
+    await env.MEMORY_DB.prepare(
+      "UPDATE qwen_clone_jobs SET status='submit-uncertain',updated_at=unixepoch() WHERE id=?"
+    ).bind(job.id).run()
+    await statusMessage(env,job.chat_id,id,'Qwen3-TTS submission failed or timed out. No automatic resubmission, to avoid duplicate charges. Check MVSEP history.').catch(()=>undefined)
   }
 }
 
@@ -327,7 +456,7 @@ export async function voiceAssistantContext(env:VoiceEnv,chat:string):Promise<st
       latest_voice_job:job.results[0]||null,
       latest_wan_job_status:latestWanStatus,
       latest_mvsep_job_status:latestMvsepStatus,
-      qwen_backend_configured:apiConfigured(env),
+      mvsep_qwen_enabled:apiConfigured(env),
       mvsep_token_configured:Boolean((env as VoiceEnv & { MVSEP_API_TOKEN?:string }).MVSEP_API_TOKEN),
       last_updated:'live database snapshot'
     })
