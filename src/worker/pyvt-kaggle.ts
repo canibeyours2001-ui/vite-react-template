@@ -331,11 +331,23 @@ export async function pyvtPreflight(env:VideoEnv):Promise<void>{
  if((job.status==='submitted'||job.status==='running')&&job.version){
   try{
    const response=await kaggle(env,'status',{
-    userName:OWNER,kernelSlug:'pyvideotrans-compatibility-check',versionLabel:'v'+job.version
+    userName:OWNER,kernelSlug:'private-pyvideotrans-python-3-10-environment-check',versionLabel:'v'+job.version
    })
    const state=String(response.status||response.state||'').toUpperCase()
    let status='running',detail=''
-   if(state.includes('COMPLETE')||state.includes('SUCCESS')){status='done';detail='Kaggle CPU environment completed; inspect full script log for CLI assert'}
+   if(state.includes('COMPLETE')||state.includes('SUCCESS')){
+    const output=await kaggle(env,'output',{
+     userName:OWNER,kernelSlug:'private-pyvideotrans-python-3-10-environment-check',
+     versionLabel:'v'+job.version
+    })
+    const log=String(output.log||'')
+    if(log.includes('PYVT_PREFLIGHT_OK')){
+     status='done';detail='Python 3.10, pyVideoTrans CLI and both TTS providers verified'
+    }else{
+     status='failed'
+     detail='Kaggle completed but expected PYVT_PREFLIGHT_OK not found; inspect private notebook logs'
+    }
+   }
    else if(state.includes('ERROR')||state.includes('FAIL')||state.includes('CANCEL')){status='failed';detail=String(response.failureMessage||state).slice(0,240)}
    await db.prepare("UPDATE pyvt_preflight SET status=?,detail=?,updated_at=unixepoch() WHERE id=1 AND status IN ('submitted','running')")
      .bind(status,detail).run()
@@ -447,7 +459,7 @@ export async function pollPyvt(env:VideoEnv):Promise<void>{
   }
   const sign=await signature(env.TELEGRAM_WEBHOOK_SECRET,next.id,expires)
   const response=await kaggle(env,'push',{
-   slug:KERNEL,newTitle:'pyVideoTrans Telegram Edge or VoxCPM2',
+   slug:KERNEL,newTitle:'pyvideotrans-telegram-dub',
    text:renderKernel(next,fileURL(next.id,expires,sign),voiceB64),
    language:'python',kernelType:'script',isPrivate:true,enableGpu:next.engine==='vox',
    enableInternet:true,machineShape:'NvidiaTeslaT4',sessionTimeoutSeconds:3600,
