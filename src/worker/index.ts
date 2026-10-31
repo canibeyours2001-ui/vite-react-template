@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { handleAudioTelegram, pollAudioJobs, mvsepStatus, checkMvsepAccount } from './audio-tools'
 import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAssistantContext } from './voice-profiles'
+import { isAllowedTelegramUser, handleAccessCommand, isAccessCommand } from './telegram-access'
 
 type AIClient = {
   run: (
@@ -167,10 +168,11 @@ type TelegramUpdate = {
     id: string
     data?: string
     from: {id: number}
-    message?: {chat: {id: number}; message_id: number}
+    message?: {chat: {id: number; type?: string}; message_id: number}
   }
   message?: {
-    chat: { id: number }
+    chat: { id: number; type?: string }
+    from?: { id: number }
     text?: string
     caption?: string
     photo?: TelegramPhoto[]
@@ -199,20 +201,28 @@ app.post('/telegram/webhook', async (c) => {
 
   if (update.callback_query) {
     const cb = update.callback_query
-    if (String(cb.message?.chat.id) === c.env.TELEGRAM_CHAT_ID &&
-        String(cb.from.id) === c.env.TELEGRAM_CHAT_ID && cb.data?.startsWith('qw:')) {
+    const chat = String(cb.message?.chat.id ?? '')
+    const sender = String(cb.from.id)
+    if (cb.data?.startsWith('qw:') &&
+        await isAllowedTelegramUser(c.env,chat,sender,cb.message?.chat.type)) {
       c.executionCtx.waitUntil(handleVoiceCallback(c.env,cb))
     }
     return c.json({ok:true})
   }
   const msg = update.message
-  if (!msg || String(msg.chat.id) !== c.env.TELEGRAM_CHAT_ID || (!msg.text && !msg.caption && !msg.photo?.length && !msg.document && !msg.video && !msg.audio && !msg.voice)) {
-    return c.json({ ok: true })
-  }
+  if (!msg || (!msg.text && !msg.caption && !msg.photo?.length && !msg.document &&
+    !msg.video && !msg.audio && !msg.voice)) return c.json({ok:true})
   const chatId = msg.chat.id
+  const sender = String(msg.from?.id ?? msg.chat.id)
   const token = c.env.TELEGRAM_BOT_TOKEN
   const text = (msg.text ?? msg.caption ?? '').trim().slice(0, 2000)
-  if (!token || !c.env.AI) return c.json({ ok: false }, 503)
+  if (!token || !c.env.AI) return c.json({ok:false},503)
+  // Only private chats. Unapproved users can request their own ID via /whoami.
+  const allowed = await isAllowedTelegramUser(c.env,String(chatId),sender,msg.chat.type)
+  const privateChat = (!msg.chat.type || msg.chat.type === 'private') &&
+    String(chatId) === sender
+  if (!privateChat || (!allowed && !/^\\/whoami(?:@[A-Za-z0-9_]+)?$/i.test(text)))
+    return c.json({ok:true})
 
   const processMessage = async () => {
     const db = c.env.MEMORY_DB
@@ -259,6 +269,8 @@ app.post('/telegram/webhook', async (c) => {
       if (!sent.ok) throw new Error('Telegram sendVideo HTTP ' + sent.status)
     }
     try {
+      if (isAccessCommand(text) && await handleAccessCommand(c.env,sender,text,send)) return
+      if (!allowed) return
       if (await handleVoiceMessage(c.env,msg,key,text)) return
       if (await handleAudioTelegram(c.env, msg, key, text, send)) return
       if (text.toLowerCase() === '/forget' || text.toLowerCase() === '/reset') {
@@ -608,6 +620,10 @@ app.post('/telegram/webhook', async (c) => {
         await send(
           'Available bot commands:\n' +
           '/clone — choose one of five saved voices or upload custom\n' +
+          '/whoami — show your Telegram user ID\n' +
+          '/allowed — owner: list authorized users\n' +
+          '/allow USER_ID — owner: grant access\n' +
+          '/deny USER_ID — owner: revoke access\n' +
           '/tts_status — check latest Qwen3-TTS generation\n' +
           '/voices — list your five slots\n' +
           '/savevoice 1 Narrator — reply to audio; no transcript required\n' +
@@ -649,6 +665,8 @@ app.post('/telegram/webhook', async (c) => {
               'You are the helpful AI guide for this Telegram bot. Reply in English and use the last 20 stored chat messages to understand the conversation. Give exact Telegram commands and clear, short examples.',
               'Available commands (do not invent commands):',
               '/help or /commands — show the command menu.',
+              '/whoami — show your Telegram numeric user ID.',
+              '/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.',
               '/ask QUESTION — ask this AI for help; normal messages also reach the AI.',
               '/clone — interactive Qwen3-TTS voice cloning via MVSEP: choose one of five saved slots or a custom voice, then text, then confirm.',
               '/voices — list stored voice slots.',
