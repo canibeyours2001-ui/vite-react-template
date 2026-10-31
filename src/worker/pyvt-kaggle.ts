@@ -403,8 +403,6 @@ export async function pyvtEdgeSmoke(env:VideoEnv):Promise<void>{
  if(!job)return
  const name='pyvideotrans-edge-tts-smoke'
  if(job.status==='failed'&&job.version){
-  const detail=await db.prepare('SELECT detail FROM pyvt_edge_smoke WHERE id=1')
-   .bind().all<{detail:string}>()
   await db.prepare("CREATE TABLE IF NOT EXISTS pyvt_edge_debug ("+
     "id INTEGER PRIMARY KEY CHECK(id=1),log_text TEXT NOT NULL)"
   ).bind().run()
