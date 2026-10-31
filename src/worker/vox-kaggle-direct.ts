@@ -3,6 +3,7 @@
  * Uses the same HTTP RPCs as Kaggle's official Python SDK (no OCI, no shell).
  * Every submitted private Kaggle kernel gets one version, with serialized jobs.
  */
+import {setupVoxVoices,storeVoxReference,voiceForJob,voxVoiceMenu} from './vox-voice-profiles'
 type D1 = { prepare(query:string):{bind(...v:(string|number)[]):{
  run():Promise<{meta:{changes:number}}>;all<T>():Promise<{results:T[]}>
 }}}
@@ -196,11 +197,25 @@ async function readTextDocument(env:VoxEnv,file:VoxTelegramDocument):Promise<str
 export async function handleVoxTelegram(env:VoxEnv,chat:string,messageId:number,text:string,
  send:(s:string)=>Promise<void>,message?:VoxTelegramMessage):Promise<boolean>{
  const cmd=text.trim().split(/\s+/,1)[0]?.split('@')[0].toLowerCase()
- if(!['/vox','/vox_status','/vox_help'].includes(cmd))return false
+ if(!['/vox','/voxvoice','/voxvoices','/voxrename','/vox_status','/vox_help'].includes(cmd))return false
  try{
   await init(env.MEMORY_DB)
   if(cmd==='/vox_help'){
-   await send('Kaggle VoxCPM2 TTS: /vox YOUR TEXT\nCheck status: /vox_status\nEach job runs in a private Kaggle notebook version (T4 GPU). Up to 8,000 characters. For long scripts, send a UTF-8 .txt file with caption /vox, or reply to a .txt file with /vox.')
+   await send('VoxCPM2: /vox TEXT creates a new voice. /voxvoice 1 TEXT uses a saved voice. /voxvoices lists 5 slots. /voxrename 1 Narrator names a slot. Tap Save this voice after generation. For long scripts, use .txt with caption /vox or reply with /voxvoice 1. Max 8,000 characters.')
+   return true
+  }
+  if(cmd==='/voxvoices'){
+   await voxVoiceMenu(env,chat,send)
+   return true
+  }
+  if(cmd==='/voxrename'){
+   const p=text.trim().match(/^\/voxrename(?:@[A-Za-z0-9_]+)?\s+([1-5])\s+([^\n]{1,50})$/i)
+   if(!p){await send('Usage: /voxrename 1 Narrator');return true}
+   await setupVoxVoices(env.MEMORY_DB)
+   const r=await env.MEMORY_DB.prepare(
+    "UPDATE vox_saved_voices SET name=?,updated_at=unixepoch() WHERE chat_id=? AND slot=?"
+   ).bind(p[2].trim(),chat,Number(p[1])).run()
+   await send(r.meta.changes?'Voice '+p[1]+' renamed to '+p[2].trim():'That voice slot is empty.')
    return true
   }
   if(cmd==='/vox_status'){
@@ -210,7 +225,19 @@ export async function handleVoxTelegram(env:VoxEnv,chat:string,messageId:number,
      'No VoxCPM2 job yet. Use /vox YOUR TEXT.')
    return true
   }
-  let phrase=text.replace(/^\/vox(?:@[A-Za-z0-9_]+)?(?:\s+|$)/i,'').trim()
+  let phrase='',slot=0
+  if(cmd==='/voxvoice'){
+   const m=text.trim().match(/^\/voxvoice(?:@[A-Za-z0-9_]+)?\s+([1-5])(?:\s+([\s\S]*))?$/i)
+   if(!m){await send('Use /voxvoice 1 YOUR TEXT, or reply to a .txt file with /voxvoice 1.');return true}
+   slot=Number(m[1]);phrase=(m[2]||'').trim()
+   await setupVoxVoices(env.MEMORY_DB)
+   const found=await env.MEMORY_DB.prepare(
+    'SELECT slot FROM vox_saved_voices WHERE chat_id=? AND slot=?'
+   ).bind(chat,slot).all<{slot:number}>()
+   if(!found.results.length){await send('Voice slot '+slot+' is empty. See /voxvoices.');return true}
+  }else{
+   phrase=text.replace(/^\/vox(?:@[A-Za-z0-9_]+)?(?:\s+|$)/i,'').trim()
+  }
   const doc=message?.document || message?.reply_to_message?.document
   if(!phrase && doc){
    try{phrase=await readTextDocument(env,doc)}
@@ -239,7 +266,11 @@ export async function handleVoxTelegram(env:VoxEnv,chat:string,messageId:number,
    'INSERT OR IGNORE INTO vox_kaggle_jobs(chat_id,message_id,text) VALUES(?,?,?)'
   ).bind(chat,messageId,phrase).run()
   const r=await env.MEMORY_DB.prepare('SELECT id FROM vox_kaggle_jobs WHERE chat_id=? AND message_id=?').bind(chat,messageId).all<{id:number}>()
-  await send('Kaggle VoxCPM2 job #'+r.results[0]?.id+' queued. GPU starts automatically when available. Use /vox_status.')
+  const jobId=r.results[0]?.id
+  if(slot&&jobId)await env.MEMORY_DB.prepare(
+   'INSERT OR IGNORE INTO vox_job_voice_slot(job_id,chat_id,slot) VALUES(?,?,?)'
+  ).bind(jobId,chat,slot).run()
+  await send('Kaggle VoxCPM2 job #'+jobId+' queued'+(slot?' with saved voice '+slot:' with new voice')+'. Use /vox_status.')
   return true
  }catch(e){
   console.error('Vox command failed',e instanceof Error?e.name:'unknown')
