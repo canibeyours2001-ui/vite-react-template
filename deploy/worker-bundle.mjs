@@ -3121,8 +3121,8 @@ function voiceButtons(data) {
   return { inline_keyboard: buttons };
 }
 function selectedFile(m) {
-  const reply = m.reply_to_message;
-  return reply?.audio || reply?.voice || (reply?.document && usableFile(reply.document) ? reply.document : void 0);
+  const reply2 = m.reply_to_message;
+  return reply2?.audio || reply2?.voice || (reply2?.document && usableFile(reply2.document) ? reply2.document : void 0);
 }
 function inboundFile(m) {
   return m.audio || m.voice || (m.document && usableFile(m.document) ? m.document : void 0);
@@ -3702,9 +3702,9 @@ async function handleVoxCallback(env2, cb) {
 }
 const MAX_VOX_CHARS = 8e3;
 const OWNER$1 = "cyawzin";
-const SLUG = "voxcpm2-telegram-worker";
+const SLUG$1 = "voxcpm2-telegram-worker";
 const BASE = "https://api.kaggle.com/v1/kernels/";
-const KERNEL = OWNER$1 + "/" + SLUG;
+const KERNEL$1 = OWNER$1 + "/" + SLUG$1;
 async function init$1(db) {
   await db.prepare(
     "CREATE TABLE IF NOT EXISTS vox_kaggle_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT NOT NULL,message_id INTEGER NOT NULL,text TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',version_number INTEGER,error_message TEXT,created_at INTEGER NOT NULL DEFAULT (unixepoch()),updated_at INTEGER NOT NULL DEFAULT (unixepoch()),UNIQUE(chat_id,message_id))"
@@ -4023,7 +4023,7 @@ async function pollVoxKaggle(env2) {
     if (!job.version_number) return;
     try {
       const version2 = "v" + job.version_number;
-      const state = await kaggle$1(env2, "status", { userName: OWNER$1, kernelSlug: SLUG, versionLabel: version2 });
+      const state = await kaggle$1(env2, "status", { userName: OWNER$1, kernelSlug: SLUG$1, versionLabel: version2 });
       const raw = String(state.status || state.state || "").toUpperCase();
       if (raw.includes("ERROR") || raw.includes("FAIL") || raw.includes("CANCEL")) {
         await env2.MEMORY_DB.prepare(
@@ -4033,7 +4033,7 @@ async function pollVoxKaggle(env2) {
         return;
       }
       if (raw.includes("COMPLETE") || raw.includes("SUCCESS")) {
-        const outputs = await kaggle$1(env2, "output", { userName: OWNER$1, kernelSlug: SLUG, versionLabel: version2 });
+        const outputs = await kaggle$1(env2, "output", { userName: OWNER$1, kernelSlug: SLUG$1, versionLabel: version2 });
         const url = matchOutput(outputs);
         const previewUrl = matchOutput(outputs, "vox_voice_sample.mp3");
         if (!url) throw Error("Completed Kaggle run has no WAV download URL");
@@ -4047,7 +4047,7 @@ async function pollVoxKaggle(env2) {
         } catch (e) {
           console.error("Vox delivery uncertain", e instanceof Error ? e.message.slice(0, 120) : "unknown");
           await env2.MEMORY_DB.prepare("UPDATE vox_kaggle_jobs SET status='delivery-uncertain',updated_at=unixepoch() WHERE id=?").bind(job.id).run();
-          await tell(env2, job.chat_id, "VoxCPM2 audio is generated but delivery needs review. Kaggle: https://www.kaggle.com/code/" + KERNEL).catch(() => void 0);
+          await tell(env2, job.chat_id, "VoxCPM2 audio is generated but delivery needs review. Kaggle: https://www.kaggle.com/code/" + KERNEL$1).catch(() => void 0);
         }
         return;
       }
@@ -4069,7 +4069,7 @@ async function pollVoxKaggle(env2) {
   try {
     const sampleB64 = await voiceForJob(env2.MEMORY_DB, next.id, next.chat_id);
     const result = await kaggle$1(env2, "push", {
-      slug: KERNEL,
+      slug: KERNEL$1,
       newTitle: "VoxCPM2 Telegram Worker",
       text: pythonFor(next.text, sampleB64),
       language: "python",
@@ -4098,10 +4098,21 @@ async function pollVoxKaggle(env2) {
     await tell(env2, next.chat_id, "VoxCPM2 job #" + next.id + " submission could not be confirmed. Check Kaggle notebook history; no automatic retry to avoid GPU duplication.").catch(() => void 0);
   }
 }
+const KERNEL = "cyawzin/pyvideotrans-telegram-dub";
 const OWNER = "cyawzin";
+const SLUG = "pyvideotrans-telegram-dub";
 const KAGGLE = "https://api.kaggle.com/v1/kernels/";
 const MAX_INPUT = 20 * 1024 * 1024;
-const READY = false;
+const MAX_OUTPUT = 49 * 1024 * 1024;
+async function isReady(env2) {
+  await env2.MEMORY_DB.prepare(
+    "CREATE TABLE IF NOT EXISTS pyvt_config (id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)))"
+  ).bind().run();
+  const r = await env2.MEMORY_DB.prepare(
+    "SELECT enabled FROM pyvt_config WHERE id=1"
+  ).bind().all();
+  return r.results[0]?.enabled === 1;
+}
 const HELP = "Video translation + dubbing (private Kaggle jobs):\n/dub edge en my — dub English video into Burmese using Microsoft Edge TTS (Nilar).\n/dub vox en my — dub with VoxCPM2 on Kaggle T4 GPU.\n/dub_status — latest dubbing job status.\nAttach a video <=20MB with /dub ... as its caption, or reply to a video with the command.\nThis beta is not enabled until Kaggle runtime testing confirms the video pipeline.";
 const defaultVoices = {
   my: "my-MM-NilarNeural",
@@ -4114,6 +4125,15 @@ async function init(db) {
   await db.prepare(
     "CREATE TABLE IF NOT EXISTS pyvt_kaggle_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT NOT NULL,message_id INTEGER NOT NULL,file_id TEXT NOT NULL,file_ext TEXT NOT NULL,file_size INTEGER NOT NULL,source_lang TEXT NOT NULL,target_lang TEXT NOT NULL,engine TEXT NOT NULL,voice TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',version_number INTEGER,error_message TEXT,created_at INTEGER NOT NULL DEFAULT (unixepoch()),updated_at INTEGER NOT NULL DEFAULT (unixepoch()),UNIQUE(chat_id,message_id))"
   ).bind().run();
+}
+async function reply(env2, chat, text) {
+  const r = await fetch("https://api.telegram.org/bot" + env2.TELEGRAM_BOT_TOKEN + "/sendMessage", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: chat, text: text.slice(0, 3900) }),
+    signal: AbortSignal.timeout(15e3)
+  });
+  if (!r.ok) throw Error("Telegram message failed");
 }
 function selectMedia(msg) {
   return msg.video || msg.document || msg.reply_to_message?.video || msg.reply_to_message?.document || null;
@@ -4135,7 +4155,7 @@ async function pyvtCommand(env2, msg, chat, text, send2) {
       await send2(j ? "Video dub job #" + j.id + ": " + j.status + (j.error_message ? "\n" + j.error_message : "") : "No dubbing job yet. Use /dub_help for the supported commands.");
       return true;
     }
-    if (!READY) {
+    if (!await isReady(env2)) {
       await send2("Video dubbing on Kaggle is in compatibility testing. No GPU job submitted. " + HELP);
       return true;
     }
@@ -4208,6 +4228,9 @@ function safeEqual(a, b) {
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
 }
+function fileURL(id, expiration, sig) {
+  return "https://vite-react-template.canibeyours2001.workers.dev/telegram/webhook?pvfile=" + id + "&expire=" + expiration + "&sig=" + sig;
+}
 async function pyvtSignedFile(env2, request) {
   const url = new URL(request.url);
   const id = Number(url.searchParams.get("pvfile")), expiry = Number(url.searchParams.get("expire"));
@@ -4240,6 +4263,44 @@ async function pyvtSignedFile(env2, request) {
     }
   });
 }
+function renderKernel(job, inputUrl) {
+  const task = {
+    url: inputUrl,
+    source: job.source_lang,
+    target: job.target_lang,
+    provider: job.engine,
+    voice: job.voice,
+    ext: job.file_ext
+  };
+  return [
+    "import json, os, sys, subprocess, pathlib, shutil",
+    "TASK=json.loads(" + JSON.stringify(JSON.stringify(task)) + ")",
+    "ROOT=pathlib.Path('/kaggle/temp/pyvideotrans-job')",
+    "ROOT.mkdir(parents=True,exist_ok=True)",
+    "subprocess.run([sys.executable,'-m','pip','install','-q','requests','uv'],check=True)",
+    "import requests",
+    "video=ROOT/('source.'+TASK['ext'])",
+    "with requests.get(TASK['url'],stream=True,timeout=100) as r:",
+    "    r.raise_for_status()",
+    "    with video.open('wb') as dst:",
+    "        total=0",
+    "        for chunk in r.iter_content(1024*1024):",
+    "            total+=len(chunk)",
+    "            if total>20*1024*1024: raise ValueError('Video >20MB')",
+    "            dst.write(chunk)",
+    "if video.stat().st_size<4096: raise ValueError('Video empty')",
+    "repo=ROOT/'pyvideotrans'",
+    "subprocess.run(['git','clone','--quiet','--depth','1','--branch','main','https://github.com/canibeyours2001-ui/pyvideotrans.git',str(repo)],check=True,timeout=120)",
+    "subprocess.run(['uv','python','install','3.10'],check=True,timeout=240)",
+    "subprocess.run(['uv','sync','--python','3.10','--no-dev','--project',str(repo)],check=True,timeout=2100)",
+    "python=repo/'.venv/bin/python'",
+    "command=[str(python),str(repo/'tools/kaggle_video_dub_job.py'),'--task','vtv','--input',str(video),'--tts',TASK['provider'],'--voice-role',TASK['voice'],'--source-language-code',TASK['source'],'--target-language-code',TASK['target'],'--translate-type','0','--whisper-model','small','--recogn-type','0','--temp-output',str(ROOT/'results'),'--final-output','/kaggle/working/pyvideotrans_result.mp4','--voice-autorate']",
+    "if TASK['provider']=='voxcpm2': command.append('--cuda')",
+    "subprocess.run(command,check=True,cwd=str(repo),timeout=3200)",
+    "assert pathlib.Path('/kaggle/working/pyvideotrans_result.mp4').stat().st_size>4096",
+    "print('PYVIDEOTRANS_VIDEO_READY')"
+  ].join("\n");
+}
 async function kaggle(env2, method, body) {
   const isPush = method === "push", u = new URL(KAGGLE + method);
   if (!isPush) for (const k of ["userName", "kernelSlug", "versionLabel"]) {
@@ -4259,6 +4320,39 @@ async function kaggle(env2, method, body) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.error) throw Error("Kaggle " + method + " HTTP " + response.status);
   return data;
+}
+function resultUrl(files) {
+  const list = files.files || files.outputFiles;
+  if (!Array.isArray(list)) return null;
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object") continue;
+    const f = raw;
+    const name = String(f.fileName || f.file_name || ""), url = f.url;
+    if (name !== "pyvideotrans_result.mp4" || typeof url !== "string") continue;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "https:" && (parsed.hostname === "storage.googleapis.com" || parsed.hostname === "api.kaggle.com" || parsed.hostname === "www.kaggle.com" || parsed.hostname.endsWith(".kaggleusercontent.com") || parsed.hostname.endsWith(".googleapis.com"))) return parsed.href;
+    } catch {
+    }
+  }
+  return null;
+}
+async function sendVideo(env2, job, url) {
+  const r = await fetch(url, { signal: AbortSignal.timeout(6e4) });
+  if (!r.ok || Number(r.headers.get("content-length") || 0) > MAX_OUTPUT) throw Error("Kaggle video download unavailable");
+  const video = await r.blob();
+  if (video.size < 4096 || video.size > MAX_OUTPUT) throw Error("Video too large or missing");
+  const form = new FormData();
+  form.set("chat_id", job.chat_id);
+  form.set("caption", "pyVideoTrans Kaggle job #" + job.id + " completed (" + job.engine + " TTS)");
+  form.set("video", video, "pyvideotrans-" + job.id + ".mp4");
+  const sent = await fetch("https://api.telegram.org/bot" + env2.TELEGRAM_BOT_TOKEN + "/sendVideo", {
+    method: "POST",
+    body: form,
+    signal: AbortSignal.timeout(65e3)
+  });
+  const resp = await sent.json();
+  if (!sent.ok || !resp.ok) throw Error("Telegram sendVideo failed");
 }
 async function pyvtPreflight(env2) {
   if (!env2.KAGGLE_API_TOKEN || !env2.MEMORY_DB) return;
@@ -4334,7 +4428,93 @@ async function pyvtPreflight(env2) {
   }
 }
 async function pollPyvt(env2) {
-  return;
+  if (!env2.KAGGLE_API_TOKEN || !env2.MEMORY_DB || !await isReady(env2)) return;
+  await init(env2.MEMORY_DB);
+  const active = await env2.MEMORY_DB.prepare(
+    "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,status,version_number,created_at,error_message FROM pyvt_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain') ORDER BY id LIMIT 1"
+  ).bind().all();
+  const job = active.results[0];
+  if (job) {
+    if (["submitting", "delivering", "submit-uncertain"].includes(job.status) || !job.version_number) return;
+    try {
+      const result = await kaggle(env2, "status", { userName: OWNER, kernelSlug: SLUG, versionLabel: "v" + job.version_number });
+      const state = String(result.status || result.state || "").toUpperCase();
+      if (state.includes("FAIL") || state.includes("ERROR") || state.includes("CANCEL")) {
+        await env2.MEMORY_DB.prepare(
+          "UPDATE pyvt_kaggle_jobs SET status='failed',error_message='Kaggle job failed',updated_at=unixepoch() WHERE id=?"
+        ).bind(job.id).run();
+        await reply(env2, job.chat_id, "Video dub #" + job.id + " failed on Kaggle. Review notebook logs.").catch(() => void 0);
+        return;
+      }
+      if (state.includes("COMPLETE") || state.includes("SUCCESS")) {
+        const files = await kaggle(env2, "output", { userName: OWNER, kernelSlug: SLUG, versionLabel: "v" + job.version_number });
+        const url = resultUrl(files);
+        if (!url) return;
+        const claim = await env2.MEMORY_DB.prepare(
+          "UPDATE pyvt_kaggle_jobs SET status='delivering',updated_at=unixepoch() WHERE id=? AND status IN ('submitted','running')"
+        ).bind(job.id).run();
+        if (claim.meta.changes !== 1) return;
+        try {
+          await sendVideo(env2, job, url);
+          await env2.MEMORY_DB.prepare("UPDATE pyvt_kaggle_jobs SET status='done',updated_at=unixepoch() WHERE id=?").bind(job.id).run();
+        } catch (e) {
+          console.error("pyVideoTrans delivery uncertain", e instanceof Error ? e.name : "unknown");
+          await env2.MEMORY_DB.prepare(
+            "UPDATE pyvt_kaggle_jobs SET status='delivery-uncertain',error_message='Video may be ready on Kaggle',updated_at=unixepoch() WHERE id=?"
+          ).bind(job.id).run();
+          await reply(env2, job.chat_id, "Video dub #" + job.id + " finished, but Telegram delivery is uncertain. Check Kaggle " + KERNEL).catch(() => void 0);
+        }
+        return;
+      }
+      await env2.MEMORY_DB.prepare(
+        "UPDATE pyvt_kaggle_jobs SET status='running',updated_at=unixepoch() WHERE id=? AND status='submitted'"
+      ).bind(job.id).run();
+    } catch (e) {
+      console.error("pyVideoTrans status failure", e instanceof Error ? e.name : "unknown");
+    }
+    return;
+  }
+  const locked = await env2.MEMORY_DB.prepare(
+    "UPDATE pyvt_kaggle_jobs SET status='submitting',updated_at=unixepoch() WHERE id=(SELECT id FROM pyvt_kaggle_jobs WHERE status='queued' ORDER BY id LIMIT 1) AND NOT EXISTS (SELECT 1 FROM pyvt_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain'))"
+  ).bind().run();
+  if (!locked.meta.changes) return;
+  const first = await env2.MEMORY_DB.prepare(
+    "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,status,version_number,created_at,error_message FROM pyvt_kaggle_jobs WHERE status='submitting' ORDER BY id LIMIT 1"
+  ).bind().all();
+  const next = first.results[0];
+  if (!next) return;
+  const expires = Math.floor(Date.now() / 1e3) + 43200;
+  try {
+    const sign = await signature(env2.TELEGRAM_WEBHOOK_SECRET, next.id, expires);
+    const response = await kaggle(env2, "push", {
+      slug: KERNEL,
+      newTitle: "pyVideoTrans Telegram Edge or VoxCPM2",
+      text: renderKernel(next, fileURL(next.id, expires, sign)),
+      language: "python",
+      kernelType: "script",
+      isPrivate: true,
+      enableGpu: next.engine === "vox",
+      enableInternet: true,
+      machineShape: "NvidiaTeslaT4",
+      sessionTimeoutSeconds: 3600,
+      datasetDataSources: [],
+      competitionDataSources: [],
+      kernelDataSources: [],
+      modelDataSources: []
+    });
+    const version2 = Number(response.versionNumber || response.version_number || 0);
+    if (!Number.isSafeInteger(version2) || version2 < 1) throw Error("Kaggle submission not confirmed");
+    await env2.MEMORY_DB.prepare(
+      "UPDATE pyvt_kaggle_jobs SET status='submitted',version_number=?,updated_at=unixepoch() WHERE id=?"
+    ).bind(version2, next.id).run();
+    await reply(env2, next.chat_id, "Video dub #" + next.id + " submitted to Kaggle version " + version2 + " (" + next.engine + " TTS).").catch(() => void 0);
+  } catch (e) {
+    console.error("pyVideoTrans submission uncertain", e instanceof Error ? e.name : "unknown");
+    await env2.MEMORY_DB.prepare(
+      "UPDATE pyvt_kaggle_jobs SET status='submit-uncertain',error_message='Kaggle submission uncertain: no automatic retry',updated_at=unixepoch() WHERE id=?"
+    ).bind(next.id).run();
+    await reply(env2, next.chat_id, "Video dubbing job submission was uncertain. No automatic retry; inspect private Kaggle run history.").catch(() => void 0);
+  }
 }
 const app = new Hono();
 app.get("/api/", (c) => {
@@ -4474,13 +4654,13 @@ app.post("/telegram/webhook", async (c) => {
       return;
     }
     const key = String(chatId);
-    const send2 = async (reply) => {
+    const send2 = async (reply2) => {
       const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           chat_id: chatId,
-          text: reply.slice(0, 3900),
+          text: reply2.slice(0, 3900),
           reply_parameters: { message_id: msg.message_id }
         })
       });
@@ -4898,11 +5078,11 @@ app.post("/telegram/webhook", async (c) => {
         ],
         max_tokens: 650
       });
-      const reply = typeof answer.response === "string" && answer.response.trim() ? answer.response.trim().slice(0, 3900) : "I could not produce an answer. Please try asking again.";
-      await send2(reply);
+      const reply2 = typeof answer.response === "string" && answer.response.trim() ? answer.response.trim().slice(0, 3900) : "I could not produce an answer. Please try asking again.";
+      await send2(reply2);
       await db.prepare(
         "INSERT OR REPLACE INTO messages (chat_id, message_id, role, content) VALUES (?, ?, 'assistant', ?)"
-      ).bind(key, msg.message_id, reply).run();
+      ).bind(key, msg.message_id, reply2).run();
       await db.prepare(
         "DELETE FROM messages WHERE chat_id = ? AND rowid NOT IN (SELECT rowid FROM messages WHERE chat_id = ? ORDER BY message_id DESC, role ASC LIMIT 20)"
       ).bind(key, key).run();
@@ -5119,7 +5299,7 @@ const index = {
     } catch (error) {
       console.error("Telegram webhook registration check failed:", error instanceof Error ? error.name : "unknown");
     }
-    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2), checkKaggleConnection(env2), pollVoxKaggle(env2), probeKaggleReadMethods(env2), pollPyvt(), pyvtPreflight(env2)]);
+    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2), checkKaggleConnection(env2), pollVoxKaggle(env2), probeKaggleReadMethods(env2), pollPyvt(env2), pyvtPreflight(env2)]);
     for (const r of results) {
       if (r.status === "rejected") console.error("Scheduled processing failed", String(r.reason).slice(0, 160));
     }
