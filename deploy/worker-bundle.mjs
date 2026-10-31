@@ -4113,7 +4113,7 @@ async function isReady(env2) {
   ).bind().all();
   return r.results[0]?.enabled === 1;
 }
-const HELP = "Video translation + dubbing (private Kaggle jobs):\n/dub edge en my — dub English video into Burmese using Microsoft Edge TTS (Nilar).\n/dub vox en my — dub with VoxCPM2 on Kaggle T4 GPU.\n/dub_status — latest dubbing job status.\nAttach a video <=20MB with /dub ... as its caption, or reply to a video with the command.\nThis beta is not enabled until Kaggle runtime testing confirms the video pipeline.";
+const HELP = "Video translation + dubbing (private Kaggle jobs):\n/dub edge en my — dub English video into Burmese using Microsoft Edge TTS (Nilar).\n/dub vox en my — dub with VoxCPM2 on Kaggle T4 GPU.\n/dub vox en my 1 — reuse your saved VoxCPM2 voice slot 1.\n/dub_status — latest dubbing job status.\nAttach a video <=20MB with /dub ... as its caption, or reply to a video with the command.\nThis beta is not enabled until Kaggle runtime testing confirms the video pipeline.";
 const defaultVoices = {
   my: "my-MM-NilarNeural",
   en: "en-US-AriaNeural",
@@ -4123,7 +4123,7 @@ const defaultVoices = {
 };
 async function init(db) {
   await db.prepare(
-    "CREATE TABLE IF NOT EXISTS pyvt_kaggle_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT NOT NULL,message_id INTEGER NOT NULL,file_id TEXT NOT NULL,file_ext TEXT NOT NULL,file_size INTEGER NOT NULL,source_lang TEXT NOT NULL,target_lang TEXT NOT NULL,engine TEXT NOT NULL,voice TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',version_number INTEGER,error_message TEXT,created_at INTEGER NOT NULL DEFAULT (unixepoch()),updated_at INTEGER NOT NULL DEFAULT (unixepoch()),UNIQUE(chat_id,message_id))"
+    "CREATE TABLE IF NOT EXISTS pyvt_kaggle_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT NOT NULL,message_id INTEGER NOT NULL,file_id TEXT NOT NULL,file_ext TEXT NOT NULL,file_size INTEGER NOT NULL,source_lang TEXT NOT NULL,target_lang TEXT NOT NULL,engine TEXT NOT NULL,voice TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',version_number INTEGER,error_message TEXT,voice_slot INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL DEFAULT (unixepoch()),updated_at INTEGER NOT NULL DEFAULT (unixepoch()),UNIQUE(chat_id,message_id))"
   ).bind().run();
 }
 async function reply(env2, chat, text) {
@@ -4165,7 +4165,20 @@ async function pyvtCommand(env2, msg, chat, text, send2) {
       return true;
     }
     const engine = parsed[1].toLowerCase(), sourceLang = parsed[2].toLowerCase(), targetLang = parsed[3].toLowerCase();
-    const voice = parsed[4] || (engine === "edge" ? defaultVoices[targetLang] : "Narrator");
+    const rawVoice = parsed[4];
+    const slot = engine === "vox" && rawVoice && /^[1-5]$/.test(rawVoice) ? Number(rawVoice) : 0;
+    if (engine === "vox" && rawVoice && !slot) {
+      await send2("For VoxCPM2 use a saved slot 1–5, e.g. /dub vox en my 1. Omit it for default voice.");
+      return true;
+    }
+    if (slot) {
+      const found = await env2.MEMORY_DB.prepare("SELECT slot FROM vox_saved_voices WHERE chat_id=? AND slot=? LIMIT 1").bind(chat, slot).all();
+      if (!found.results.length) {
+        await send2("VoxCPM2 voice slot " + slot + " is empty. Use /voxvoices.");
+        return true;
+      }
+    }
+    const voice = engine === "vox" ? "Narrator" : rawVoice || defaultVoices[targetLang];
     if (engine === "edge" && !voice) {
       await send2("Choose an Edge voice for this language, e.g. /dub edge en my my-MM-NilarNeural");
       return true;
@@ -4193,8 +4206,8 @@ async function pyvtCommand(env2, msg, chat, text, send2) {
       return true;
     }
     await env2.MEMORY_DB.prepare(
-      "INSERT OR IGNORE INTO pyvt_kaggle_jobs(chat_id,message_id,file_id,file_ext,file_size,source_lang,target_lang,engine,voice) VALUES(?,?,?,?,?,?,?,?,?)"
-    ).bind(chat, msg.message_id, media.file_id, ext, media.file_size, sourceLang, targetLang, engine, voice).run();
+      "INSERT OR IGNORE INTO pyvt_kaggle_jobs(chat_id,message_id,file_id,file_ext,file_size,source_lang,target_lang,engine,voice,voice_slot) VALUES(?,?,?,?,?,?,?,?,?,?)"
+    ).bind(chat, msg.message_id, media.file_id, ext, media.file_size, sourceLang, targetLang, engine, voice, slot).run();
     const result = await env2.MEMORY_DB.prepare(
       "SELECT id FROM pyvt_kaggle_jobs WHERE chat_id=? AND message_id=?"
     ).bind(chat, msg.message_id).all();
@@ -4263,17 +4276,18 @@ async function pyvtSignedFile(env2, request) {
     }
   });
 }
-function renderKernel(job, inputUrl) {
+function renderKernel(job, inputUrl, voiceB64) {
   const task = {
     url: inputUrl,
     source: job.source_lang,
     target: job.target_lang,
     provider: job.engine,
     voice: job.voice,
-    ext: job.file_ext
+    ext: job.file_ext,
+    voice_ref_b64: voiceB64
   };
   return [
-    "import json, os, sys, subprocess, pathlib, shutil",
+    "import json, os, sys, subprocess, pathlib, shutil, base64",
     "TASK=json.loads(" + JSON.stringify(JSON.stringify(task)) + ")",
     "ROOT=pathlib.Path('/kaggle/temp/pyvideotrans-job')",
     "ROOT.mkdir(parents=True,exist_ok=True)",
@@ -4296,6 +4310,14 @@ function renderKernel(job, inputUrl) {
     "python=repo/'.venv/bin/python'",
     "command=[str(python),str(repo/'tools/kaggle_video_dub_job.py'),'--task','vtv','--input',str(video),'--tts',TASK['provider'],'--voice-role',TASK['voice'],'--source-language-code',TASK['source'],'--target-language-code',TASK['target'],'--translate-type','0','--whisper-model','small','--recogn-type','0','--temp-output',str(ROOT/'results'),'--final-output','/kaggle/working/pyvideotrans_result.mp4','--voice-autorate']",
     "if TASK['provider']=='voxcpm2': command.append('--cuda')",
+    "if TASK.get('voice_ref_b64'):",
+    "    blob=base64.b64decode(TASK['voice_ref_b64'],validate=True)",
+    "    if len(blob)<1500 or len(blob)>180000: raise ValueError('Bad saved voice reference')",
+    "    refmp3=ROOT/'voice-reference.mp3'",
+    "    refwav=ROOT/'voice-reference.wav'",
+    "    refmp3.write_bytes(blob)",
+    "    subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(refmp3),'-ac','1','-ar','48000',str(refwav)],check=True,timeout=40)",
+    "    command.extend(['--reference-wav',str(refwav)])",
     "subprocess.run(command,check=True,cwd=str(repo),timeout=3200)",
     "assert pathlib.Path('/kaggle/working/pyvideotrans_result.mp4').stat().st_size>4096",
     "print('PYVIDEOTRANS_VIDEO_READY')"
@@ -4431,7 +4453,7 @@ async function pollPyvt(env2) {
   if (!env2.KAGGLE_API_TOKEN || !env2.MEMORY_DB || !await isReady(env2)) return;
   await init(env2.MEMORY_DB);
   const active = await env2.MEMORY_DB.prepare(
-    "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,status,version_number,created_at,error_message FROM pyvt_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain') ORDER BY id LIMIT 1"
+    "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,voice_slot,status,version_number,created_at,error_message FROM pyvt_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain') ORDER BY id LIMIT 1"
   ).bind().all();
   const job = active.results[0];
   if (job) {
@@ -4479,17 +4501,23 @@ async function pollPyvt(env2) {
   ).bind().run();
   if (!locked.meta.changes) return;
   const first = await env2.MEMORY_DB.prepare(
-    "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,status,version_number,created_at,error_message FROM pyvt_kaggle_jobs WHERE status='submitting' ORDER BY id LIMIT 1"
+    "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,voice_slot,status,version_number,created_at,error_message FROM pyvt_kaggle_jobs WHERE status='submitting' ORDER BY id LIMIT 1"
   ).bind().all();
   const next = first.results[0];
   if (!next) return;
   const expires = Math.floor(Date.now() / 1e3) + 43200;
   try {
+    let voiceB64 = "";
+    if (next.voice_slot) {
+      const sample = await env2.MEMORY_DB.prepare("SELECT audio_b64 FROM vox_saved_voices WHERE chat_id=? AND slot=?").bind(next.chat_id, next.voice_slot).all();
+      voiceB64 = sample.results[0]?.audio_b64 || "";
+      if (!voiceB64) throw Error("Saved voice slot unavailable");
+    }
     const sign = await signature(env2.TELEGRAM_WEBHOOK_SECRET, next.id, expires);
     const response = await kaggle(env2, "push", {
       slug: KERNEL,
       newTitle: "pyVideoTrans Telegram Edge or VoxCPM2",
-      text: renderKernel(next, fileURL(next.id, expires, sign)),
+      text: renderKernel(next, fileURL(next.id, expires, sign), voiceB64),
       language: "python",
       kernelType: "script",
       isPrivate: true,
