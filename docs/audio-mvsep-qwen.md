@@ -28,12 +28,12 @@ D1 stores the five voice names and Telegram file IDs. It may store optional tran
 1. Run `/clone`.
 2. Tap one of the five saved voices or **Upload custom voice**.
 3. For custom reference audio, upload a recording; no reference transcript is needed.
-4. Send your new text (max 1,000 characters).
+4. Send your speech as plain text (up to Telegram's 4,096-character per-message limit). For longer scripts, send `/tts_long` after choosing your voice, then send several ordinary Telegram text messages, and finish with `/tts_done`. The bot combines them in Telegram message order, up to a 128 KiB UTF-8 safeguard. MVSEP determines the actual maximum it can generate; it may reject very long input.
 5. Tap **Generate audio** to explicitly confirm an MVSEP submission.
 6. The existing cron checks status every minute and edits a Telegram status message on changes.
 7. On completion, the bot returns an MP3 if MVSEP's URL works with Telegram or a safe MVSEP result link.
 
-`/tts_status` checks your latest Qwen3-TTS job on demand. `/clonelang English` selects a supported language. `/cancel` exits the selection wizard.
+`/tts_long` begins plain-text multi-message collection; `/tts_done` finishes the script and displays the normal credit-confirmation buttons. No text-file uploads are supported or needed. `/tts_status` checks your latest Qwen3-TTS job on demand. `/clonelang English` selects a supported language. `/cancel` exits the selection wizard.
 
 The official Qwen3-TTS model does not list Burmese among supported languages. Burmese output is experimental.
 
@@ -66,7 +66,7 @@ Only clone voices you own or have permission to use. MVSEP jobs may consume cred
 
 ## Installed commands
 
-`/help`, `/commands`, `/ask`, `/clone`, `/clone_help`, `/savevoice`, `/voices`, `/clonelang`, `/tts_status`, `/cancel`, `/separate`, `/sep_status`, `/sep_help`, plus existing WAN video/motion commands.
+`/help`, `/commands`, `/ask`, `/clone`, `/clone_help`, `/savevoice`, `/voices`, `/clonelang`, `/tts_long`, `/tts_done`, `/tts_status`, `/cancel`, `/separate`, `/sep_status`, `/sep_help`, plus existing WAN video/motion commands.
 
 ## Recovery
 
