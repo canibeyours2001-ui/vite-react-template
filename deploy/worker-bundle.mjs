@@ -410,7 +410,7 @@ const {
   removeListener,
   report,
   resourceUsage,
-  send,
+  send: send$1,
   setegid,
   seteuid,
   setgid,
@@ -505,7 +505,7 @@ const _process = {
   openStdin,
   assert,
   binding,
-  send,
+  send: send$1,
   exitCode,
   channel,
   getegid,
@@ -3112,13 +3112,13 @@ async function clearSession(db, chat) {
   await db.prepare("DELETE FROM qwen_clone_long_parts WHERE chat_id=?").bind(chat).run();
 }
 function voiceButtons(data) {
-  const buttons = Array.from({ length: 5 }, (_, i) => {
+  const buttons2 = Array.from({ length: 5 }, (_, i) => {
     const voice = data.find((v) => v.slot === i + 1);
     return [{ text: voice ? i + 1 + ". " + voice.name : i + 1 + ". (empty)", callback_data: voice ? "qw:slot:" + (i + 1) : "qw:empty" }];
   });
-  buttons.push([{ text: "Upload custom voice 🎤", callback_data: "qw:custom" }]);
-  buttons.push([{ text: "Cancel", callback_data: "qw:cancel" }]);
-  return { inline_keyboard: buttons };
+  buttons2.push([{ text: "Upload custom voice 🎤", callback_data: "qw:custom" }]);
+  buttons2.push([{ text: "Cancel", callback_data: "qw:cancel" }]);
+  return { inline_keyboard: buttons2 };
 }
 function selectedFile(m) {
   const reply2 = m.reply_to_message;
@@ -4098,6 +4098,162 @@ async function pollVoxKaggle(env2) {
     await tell(env2, next.chat_id, "VoxCPM2 job #" + next.id + " submission could not be confirmed. Check Kaggle notebook history; no automatic retry to avoid GPU duplication.").catch(() => void 0);
   }
 }
+const edgeVoices = {
+  en: [
+    { name: "Aria • woman (US)", code: "en-US-AriaNeural" },
+    { name: "Guy • man (US)", code: "en-US-GuyNeural" },
+    { name: "Christopher • man (US)", code: "en-US-ChristopherNeural" }
+  ],
+  my: [
+    { name: "Nilar • woman (Burmese)", code: "my-MM-NilarNeural" },
+    { name: "Thiha • man (Burmese)", code: "my-MM-ThihaNeural" }
+  ]
+};
+async function ensureDubMenu(db) {
+  await db.prepare(
+    'CREATE TABLE IF NOT EXISTS pyvt_dub_selections (chat_id TEXT PRIMARY KEY,source_lang TEXT NOT NULL DEFAULT "en",target_lang TEXT NOT NULL DEFAULT "my",engine TEXT NOT NULL DEFAULT "edge",voice TEXT NOT NULL DEFAULT "my-MM-NilarNeural",voice_slot INTEGER NOT NULL DEFAULT 0,stage TEXT NOT NULL DEFAULT "target",updated_at INTEGER NOT NULL DEFAULT (unixepoch()))'
+  ).bind().run();
+}
+async function send(env2, method, payload) {
+  const res = await fetch("https://api.telegram.org/bot" + env2.TELEGRAM_BOT_TOKEN + "/" + method, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15e3)
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) throw Error("Telegram " + method + " failed");
+}
+const buttons = (rows) => ({ inline_keyboard: rows });
+async function startDubMenu(env2, chat) {
+  await ensureDubMenu(env2.MEMORY_DB);
+  await env2.MEMORY_DB.prepare(
+    "INSERT INTO pyvt_dub_selections(chat_id,stage,source_lang,target_lang,engine,voice,voice_slot) VALUES(?,'target','en','my','edge','my-MM-NilarNeural',0) ON CONFLICT(chat_id) DO UPDATE SET stage='target',updated_at=unixepoch()"
+  ).bind(chat).run();
+  await send(env2, "sendMessage", {
+    chat_id: chat,
+    text: "🎬 pyVideoTrans dubbing\nStep 1/3 — Choose the language you want in the final video.",
+    reply_markup: buttons([
+      [{ text: "🇬🇧 English", callback_data: "pd:lang:en" }],
+      [{ text: "🇲🇲 Burmese (မြန်မာ)", callback_data: "pd:lang:my" }]
+    ])
+  });
+}
+async function selectedDubCommand(env2, chat) {
+  await ensureDubMenu(env2.MEMORY_DB);
+  const r = await env2.MEMORY_DB.prepare(
+    "SELECT source_lang,target_lang,engine,voice,voice_slot,stage FROM pyvt_dub_selections WHERE chat_id=?"
+  ).bind(chat).all();
+  const s = r.results[0];
+  if (!s || s.stage !== "ready") return null;
+  if (!["en", "my"].includes(s.source_lang) || !["en", "my"].includes(s.target_lang) || !["vox", "edge"].includes(s.engine)) return null;
+  if (s.engine === "vox") {
+    if (s.voice_slot < 0 || s.voice_slot > 5) return null;
+    return "/dub vox " + s.source_lang + " " + s.target_lang + (s.voice_slot ? " " + s.voice_slot : "");
+  }
+  const allowed = (edgeVoices[s.target_lang] || []).some((v) => v.code === s.voice);
+  if (!allowed) return null;
+  return "/dub edge " + s.source_lang + " " + s.target_lang + " " + s.voice;
+}
+async function dubMenuCallback(env2, cb) {
+  const chat = String(cb.message?.chat.id ?? "");
+  try {
+    if (!chat || String(cb.from.id) !== chat || !cb.data?.startsWith("pd:")) return;
+    await ensureDubMenu(env2.MEMORY_DB);
+    const current = (await env2.MEMORY_DB.prepare(
+      "SELECT chat_id,source_lang,target_lang,engine,voice,voice_slot,stage,updated_at FROM pyvt_dub_selections WHERE chat_id=?"
+    ).bind(chat).all()).results[0];
+    if (!current) throw Error("Selection expired. Restart /dub.");
+    const [_, action, value] = cb.data.split(":");
+    if (action === "lang" && current.stage === "target" && ["en", "my"].includes(value)) {
+      const source = value === "en" ? "my" : "en";
+      await env2.MEMORY_DB.prepare(
+        "UPDATE pyvt_dub_selections SET source_lang=?,target_lang=?,stage='engine',updated_at=unixepoch() WHERE chat_id=? AND stage='target'"
+      ).bind(source, value, chat).run();
+      await send(env2, "sendMessage", {
+        chat_id: chat,
+        text: "Step 2/3 — " + (source === "my" ? "Burmese" : "English") + " → " + (value === "my" ? "Burmese" : "English") + "\nChoose the dubbing engine.",
+        reply_markup: buttons([
+          [{ text: "🔊 Microsoft Edge TTS", callback_data: "pd:engine:edge" }],
+          [{ text: "🎙️ VoxCPM2 (Kaggle GPU)", callback_data: "pd:engine:vox" }]
+        ])
+      });
+      return;
+    }
+    if (action === "engine" && current.stage === "engine" && ["edge", "vox"].includes(value)) {
+      await env2.MEMORY_DB.prepare(
+        "UPDATE pyvt_dub_selections SET engine=?,stage='voice',updated_at=unixepoch() WHERE chat_id=? AND stage='engine'"
+      ).bind(value, chat).run();
+      if (value === "edge") {
+        const voices = edgeVoices[current.target_lang] || [];
+        await send(env2, "sendMessage", {
+          chat_id: chat,
+          text: "Step 3/3 — Choose the Microsoft " + (current.target_lang === "my" ? "Burmese" : "English") + " voice.",
+          reply_markup: buttons(voices.map((v, i) => [{ text: v.name, callback_data: "pd:voice:e" + i }]))
+        });
+      } else {
+        const v = await env2.MEMORY_DB.prepare(
+          "SELECT slot,name FROM vox_saved_voices WHERE chat_id=? ORDER BY slot"
+        ).bind(chat).all();
+        const rows = [[{ text: "New/default voice", callback_data: "pd:voice:v0" }]];
+        for (const saved of v.results) {
+          if (Number.isInteger(saved.slot) && saved.slot >= 1 && saved.slot <= 5) {
+            rows.push([{
+              text: "Saved " + saved.slot + " • " + saved.name.slice(0, 35),
+              callback_data: "pd:voice:v" + saved.slot
+            }]);
+          }
+        }
+        await send(env2, "sendMessage", {
+          chat_id: chat,
+          text: "Step 3/3 — Choose a VoxCPM2 voice. Your saved voices from /voxvoices are available here.",
+          reply_markup: buttons(rows)
+        });
+      }
+      return;
+    }
+    if (action === "voice" && current.stage === "voice" && /^[ev][0-9]$/.test(value)) {
+      let voice = "", slot = 0, label = "";
+      if (current.engine === "edge" && value.startsWith("e")) {
+        const index2 = Number(value[1]);
+        const entry = (edgeVoices[current.target_lang] || [])[index2];
+        if (!entry) throw Error("Invalid voice choice");
+        voice = entry.code;
+        label = entry.name;
+      } else if (current.engine === "vox" && value.startsWith("v")) {
+        slot = Number(value[1]);
+        if (slot > 5) throw Error("Invalid voice slot");
+        if (slot) {
+          const found = await env2.MEMORY_DB.prepare(
+            "SELECT name FROM vox_saved_voices WHERE chat_id=? AND slot=?"
+          ).bind(chat, slot).all();
+          if (!found.results[0]) throw Error("That saved voice slot is unavailable");
+          label = "Saved voice " + slot + " • " + found.results[0].name;
+        } else label = "New/default VoxCPM2 voice";
+        voice = "Narrator";
+      } else throw Error("Voice engine does not match");
+      await env2.MEMORY_DB.prepare(
+        "UPDATE pyvt_dub_selections SET voice=?,voice_slot=?,stage='ready',updated_at=unixepoch() WHERE chat_id=? AND stage='voice'"
+      ).bind(voice, slot, chat).run();
+      const src = current.source_lang === "my" ? "Burmese" : "English";
+      const trg = current.target_lang === "my" ? "Burmese" : "English";
+      await send(env2, "sendMessage", { chat_id: chat, text: "✅ Selection saved!\n" + src + " → " + trg + "\nEngine: " + (current.engine === "edge" ? "Microsoft Edge TTS" : "VoxCPM2") + "\nVoice: " + label + "\n\nSend a video up to 20 MB to use these settings, or reply to one with /dub.\nVideo processing is still in compatibility testing, so no Kaggle GPU run will start until it is enabled.\nSend /dub to change the language or voice." });
+      return;
+    }
+    await send(env2, "sendMessage", {
+      chat_id: chat,
+      text: "This selection is outdated. Send /dub to choose language, engine and voice again."
+    });
+  } catch (e) {
+    console.error("pyVideoTrans menu failed", e instanceof Error ? e.name : "unknown");
+    if (chat) await send(env2, "sendMessage", {
+      chat_id: chat,
+      text: "Unable to save that dubbing choice. Send /dub to restart the menu."
+    }).catch(() => void 0);
+  } finally {
+    await send(env2, "answerCallbackQuery", { callback_query_id: cb.id }).catch(() => void 0);
+  }
+}
 const KERNEL = "cyawzin/pyvideotrans-telegram-dub";
 const OWNER = "cyawzin";
 const SLUG = "pyvideotrans-telegram-dub";
@@ -4113,7 +4269,7 @@ async function isReady(env2) {
   ).bind().all();
   return r.results[0]?.enabled === 1;
 }
-const HELP = "Video translation + dubbing (private Kaggle jobs):\n/dub edge en my — dub English video into Burmese using Microsoft Edge TTS (Nilar).\n/dub vox en my — dub with VoxCPM2 on Kaggle T4 GPU.\n/dub vox en my 1 — reuse your saved VoxCPM2 voice slot 1.\n/dub_status — latest dubbing job status.\nAttach a video <=20MB with /dub ... as its caption, or reply to a video with the command.\nThis beta is not enabled until Kaggle runtime testing confirms the video pipeline.";
+const HELP = "Video translation + dubbing (private Kaggle jobs):\n/dub — choose English/Burmese target, Edge or VoxCPM2, and voice using buttons.\n/dub edge en my — dub English video into Burmese using Microsoft Edge TTS (Nilar).\n/dub vox en my — dub with VoxCPM2 on Kaggle T4 GPU.\n/dub vox en my 1 — reuse your saved VoxCPM2 voice slot 1.\n/dub_status — latest dubbing job status.\nAttach a video <=20MB with /dub ... as its caption, or reply to a video with the command.\nThis beta is not enabled until Kaggle runtime testing confirms the video pipeline.";
 const defaultVoices = {
   my: "my-MM-NilarNeural",
   en: "en-US-AriaNeural",
@@ -4155,11 +4311,17 @@ async function pyvtCommand(env2, msg, chat, text, send2) {
       await send2(j ? "Video dub job #" + j.id + ": " + j.status + (j.error_message ? "\n" + j.error_message : "") : "No dubbing job yet. Use /dub_help for the supported commands.");
       return true;
     }
+    if (command === "/dub" && /^\/dub(?:@[A-Za-z0-9_]+)?$/.test(text.trim())) {
+      const choice = selectMedia(msg) ? await selectedDubCommand(env2, chat) : null;
+      if (choice) return pyvtCommand(env2, msg, chat, choice, send2);
+      await startDubMenu(env2, chat);
+      return true;
+    }
     if (!await isReady(env2)) {
       await send2("Video dubbing on Kaggle is in compatibility testing. No GPU job submitted. " + HELP);
       return true;
     }
-    const parsed = text.trim().match(/^\/dub(?:@[a-zA-Z0-9_]+)?\s+(edge|vox)\s+([a-z]{2,3})\s+([a-z]{2,3})(?:\s+([a-zA-Z-]{4,80}))?$/i);
+    const parsed = text.trim().match(/^\/dub(?:@[a-zA-Z0-9_]+)?\s+(edge|vox)\s+([a-z]{2,3})\s+([a-z]{2,3})(?:\s+([a-zA-Z0-9-]{1,80}))?$/i);
     if (!parsed) {
       await send2(HELP);
       return true;
@@ -4217,6 +4379,13 @@ async function pyvtCommand(env2, msg, chat, text, send2) {
     await send2("The video dubbing queue is unavailable. No new Kaggle GPU job was confirmed.").catch(() => void 0);
   }
   return true;
+}
+async function pyvtSelectedMedia(env2, msg, chat, send2) {
+  const media = selectMedia(msg);
+  if (!media || !msg.video && !msg.reply_to_message?.video && !(media.mime_type || "").startsWith("video/") && !/\.(mp4|mkv|mov|webm)$/i.test(media.file_name || "")) return false;
+  const selected = await selectedDubCommand(env2, chat);
+  if (!selected) return false;
+  return pyvtCommand(env2, msg, chat, selected, send2);
 }
 function hex(bytes) {
   return [...new Uint8Array(bytes)].map((x) => x.toString(16).padStart(2, "0")).join("");
@@ -4661,6 +4830,8 @@ app.post("/telegram/webhook", async (c) => {
       c.executionCtx.waitUntil(handleVoiceCallback(c.env, cb));
     } else if (cb.data?.startsWith("vx:") && await isAllowedTelegramUser(c.env, chat, sender2, cb.message?.chat.type)) {
       c.executionCtx.waitUntil(handleVoxCallback(c.env, cb));
+    } else if (cb.data?.startsWith("pd:") && await isAllowedTelegramUser(c.env, chat, sender2, cb.message?.chat.type)) {
+      c.executionCtx.waitUntil(dubMenuCallback(c.env, cb));
     }
     return c.json({ ok: true });
   }
@@ -4724,6 +4895,7 @@ app.post("/telegram/webhook", async (c) => {
       if (isAccessCommand(text) && await handleAccessCommand(c.env, sender, text, send2)) return;
       if (!allowed) return;
       if (await pyvtCommand(c.env, msg, key, text, send2)) return;
+      if (await pyvtSelectedMedia(c.env, msg, key, send2)) return;
       if (await handleVoxTelegram(c.env, key, msg.message_id, text, send2, msg)) return;
       if (await handleVoiceMessage(c.env, msg, key, text)) return;
       if (await handleAudioTelegram(c.env, msg, key, text, send2)) return;
@@ -5055,7 +5227,7 @@ app.post("/telegram/webhook", async (c) => {
       }
       if (/^\/(?:help|commands)(?:@\w+)?$/i.test(text)) {
         await send2(
-          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/whoami — show your Telegram user ID\n/allowed — owner: list authorized users\n/allow USER_ID — owner: grant access\n/deny USER_ID — owner: revoke access\n/tts_status — check latest Qwen3-TTS generation\n/tts_long — compose long Qwen speech from plain text messages\n/tts_done — finish composing, then review and confirm\n/vox TEXT — Kaggle VoxCPM2 Burmese speech (up to 8,000 characters)\n/vox — attach or reply to a UTF-8 .txt script for long narration\n/vox_status — Kaggle VoxCPM2 job status\n/dub_help — pyVideoTrans video dubbing with Edge or VoxCPM2\n/dub_status — last Kaggle video dubbing status\n/voxvoices — show five saved VoxCPM2 voices\n/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n/voxrename 1 Name — rename saved VoxCPM2 voice\n/voices — list your five slots\n/savevoice 1 Narrator — reply to audio; no transcript required\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
+          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/whoami — show your Telegram user ID\n/allowed — owner: list authorized users\n/allow USER_ID — owner: grant access\n/deny USER_ID — owner: revoke access\n/tts_status — check latest Qwen3-TTS generation\n/tts_long — compose long Qwen speech from plain text messages\n/tts_done — finish composing, then review and confirm\n/vox TEXT — Kaggle VoxCPM2 Burmese speech (up to 8,000 characters)\n/vox — attach or reply to a UTF-8 .txt script for long narration\n/vox_status — Kaggle VoxCPM2 job status\n/dub — choose English/Burmese target, TTS engine and voice\n/dub_help — pyVideoTrans video dubbing with Edge or VoxCPM2\n/dub_status — last Kaggle video dubbing status\n/voxvoices — show five saved VoxCPM2 voices\n/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n/voxrename 1 Name — rename saved VoxCPM2 voice\n/voices — list your five slots\n/savevoice 1 Narrator — reply to audio; no transcript required\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
         );
         return;
       }
@@ -5080,7 +5252,7 @@ app.post("/telegram/webhook", async (c) => {
               "You are the helpful AI guide for this Telegram bot. Reply in English and use the last 20 stored chat messages to understand the conversation. Give exact Telegram commands and clear, short examples.",
               "Available commands (do not invent commands):",
               "/help or /commands — show the command menu.",
-              "/dub_help — pyVideoTrans video translation and dubbing planned for private Kaggle jobs. Choose Microsoft Edge TTS or VoxCPM2; currently disabled until environment testing succeeds.",
+              "/dub — open Telegram buttons to choose target English or Burmese, Microsoft Edge TTS or VoxCPM2, and voice. /dub_help gives instructions. Video jobs remain disabled until Kaggle tests pass.",
               "/vox TEXT — request VoxCPM2 Burmese speech (up to 8,000 characters); after output click Save this voice, then a slot. /voxvoice 1 TEXT reuses stored reference; /voxvoices lists five slots; /voxrename 1 Name renames. Reply to a UTF-8 .txt file with /vox or /voxvoice 1, or attach a .txt file as caption. /vox_status gives status; no OCI needed.",
               "/whoami — show your Telegram numeric user ID.",
               "/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.",
@@ -5288,6 +5460,7 @@ async function registerTelegramWebhook(env2) {
         { command: "clone", description: "Pick a saved or custom voice" },
         { command: "vox", description: "Kaggle VoxCPM2 Burmese speech" },
         { command: "vox_status", description: "Check VoxCPM2 job status" },
+        { command: "dub", description: "Choose dubbing language and voice" },
         { command: "dub_help", description: "pyVideoTrans video dubbing help" },
         { command: "dub_status", description: "Check pyVideoTrans dubbing status" },
         { command: "voxvoices", description: "Show saved VoxCPM2 voices" },

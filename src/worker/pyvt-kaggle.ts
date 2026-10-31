@@ -7,6 +7,7 @@
  * /telegram/webhook path (different HTTP method from Telegram's POST update).
  * Telegram and Kaggle bearer credentials never enter the Kaggle notebook.
  */
+import {startDubMenu,selectedDubCommand} from './pyvt-menu'
 type DB={prepare(sql:string):{bind(...x:(string|number)[]):{
  run():Promise<{meta:{changes:number}}>;all<T>():Promise<{results:T[]}>
 }}}
@@ -38,6 +39,7 @@ async function isReady(env:VideoEnv):Promise<boolean>{
  return r.results[0]?.enabled===1
 }
 const HELP='Video translation + dubbing (private Kaggle jobs):\n'+
+ '/dub — choose English/Burmese target, Edge or VoxCPM2, and voice using buttons.\n'+
  '/dub edge en my — dub English video into Burmese using Microsoft Edge TTS (Nilar).\n'+
  '/dub vox en my — dub with VoxCPM2 on Kaggle T4 GPU.\n'+
  '/dub vox en my 1 — reuse your saved VoxCPM2 voice slot 1.\n'+
@@ -84,11 +86,19 @@ export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:stri
     'No dubbing job yet. Use /dub_help for the supported commands.')
    return true
   }
+  // /dub alone opens the language → engine → voice menu. If a video is
+  // attached and preferences are ready, reuse them without resetting.
+  if(command==='/dub'&&/^\/dub(?:@[A-Za-z0-9_]+)?$/.test(text.trim())){
+   const choice=selectMedia(msg)?await selectedDubCommand(env,chat):null
+   if(choice)return pyvtCommand(env,msg,chat,choice,send)
+   await startDubMenu(env,chat)
+   return true
+  }
   if(!await isReady(env)){
    await send('Video dubbing on Kaggle is in compatibility testing. No GPU job submitted. '+HELP)
    return true
   }
-  const parsed=text.trim().match(/^\/dub(?:@[a-zA-Z0-9_]+)?\s+(edge|vox)\s+([a-z]{2,3})\s+([a-z]{2,3})(?:\s+([a-zA-Z-]{4,80}))?$/i)
+  const parsed=text.trim().match(/^\/dub(?:@[a-zA-Z0-9_]+)?\s+(edge|vox)\s+([a-z]{2,3})\s+([a-z]{2,3})(?:\s+([a-zA-Z0-9-]{1,80}))?$/i)
   if(!parsed){await send(HELP);return true}
   const engine=parsed[1].toLowerCase(),sourceLang=parsed[2].toLowerCase(),targetLang=parsed[3].toLowerCase()
   const rawVoice=parsed[4]
@@ -126,6 +136,18 @@ export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:stri
   await send('The video dubbing queue is unavailable. No new Kaggle GPU job was confirmed.').catch(()=>undefined)
  }
  return true
+}
+/** A video sent after /dub menu uses its saved language and voice.
+ * Other Telegram media retain their existing behavior. */
+export async function pyvtSelectedMedia(env:VideoEnv,msg:Message,chat:string,
+ send:(text:string)=>Promise<void>):Promise<boolean>{
+ const media=selectMedia(msg)
+ if(!media || (!msg.video && !msg.reply_to_message?.video &&
+  !(media.mime_type||'').startsWith('video/') &&
+  !/\.(mp4|mkv|mov|webm)$/i.test(media.file_name||'')))return false
+ const selected=await selectedDubCommand(env,chat)
+ if(!selected)return false
+ return pyvtCommand(env,msg,chat,selected,send)
 }
 function hex(bytes:ArrayBuffer):string{
  return [...new Uint8Array(bytes)].map(x=>x.toString(16).padStart(2,'0')).join('')
