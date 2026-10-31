@@ -1,0 +1,75 @@
+# MVSEP-only audio integration
+
+This project uses the existing Cloudflare Hono Worker, Telegram bot and D1 database. **No new Modal server or GPU is deployed for audio**. The old WAN 2.2 video endpoints remain intact.
+
+## Dependencies and model IDs
+
+- **MVSEP Qwen3-TTS Voice Cloning**: `sep_type=120`
+- **MVSEP Qwen3-TTS Voice Design**: `sep_type=119` (API available, no Telegram UI in this release)
+- **MVSEP Qwen3-TTS Custom Voice**: `sep_type=118` (API available, no Telegram UI in this release)
+- **MVSEP vocal/instrument separation**: `sep_type=26` default
+- API base used: `https://sg.mvsep.com/api` (official Singapore region)
+- Auth: existing Cloudflare secret `MVSEP_API_TOKEN`
+
+Official reference: https://mvsep.com/en/full_api
+
+## Save up to five reference voices
+
+1. Send a clear 3–15 sec reference audio/voice recording to your authorized Telegram bot.
+2. Reply directly to that recording using:
+   `/savevoice 1 Narrator | exact words spoken in the recording`
+3. Repeat with slots 1, 2, 3, 4, and 5 and any short labels you choose.
+4. Run `/voices` to see the saved names.
+
+D1 stores the five voice names, Telegram file IDs, and transcripts — not raw audio bytes. `getFile` resolves file IDs when generation starts. Replacing a slot updates its existing record.
+
+## Generate voice audio
+
+1. Run `/clone`.
+2. Tap one of the five saved voices or **Upload custom voice**.
+3. For custom reference audio, upload a recording and supply its exact transcript.
+4. Send your new text (max 1,000 characters).
+5. Tap **Generate audio** to explicitly confirm an MVSEP submission.
+6. The existing cron checks status every minute and edits a Telegram status message on changes.
+7. On completion, the bot returns an MP3 if MVSEP's URL works with Telegram or a safe MVSEP result link.
+
+`/tts_status` checks your latest Qwen3-TTS job on demand. `/clonelang English` selects a supported language. `/cancel` exits the selection wizard.
+
+The official Qwen3-TTS model does not list Burmese among supported languages. Burmese output is experimental.
+
+Only clone voices you own or have permission to use. MVSEP jobs may consume credits; the bot requires an explicit confirmation and never retries uncertain submissions automatically.
+
+## MVSEP source separation and live status
+
+- Reply to an audio file with `/separate 26`.
+- Use `/sep_status` for status and links.
+- Status displays queue position, current stage and completed chunks when MVSEP supplies them.
+- Uses the same scheduled Worker; no additional server is necessary.
+
+## AI conversation helper
+
+- `/help` or `/commands`: list real commands.
+- `/ask Your question`: consult the existing Workers AI assistant.
+- Ordinary chat messages also go to AI when outside active voice wizards.
+- The AI reads up to 20 Telegram messages already stored in D1 and a sanitized view of voice slots, wizard state, and latest audio/video statuses.
+- It does not see other ChatGPT conversations or arbitrary prior Telegram messages.
+- The AI gives guidance; paid jobs require the confirmation button.
+
+## Validation and safety
+
+- GitHub Actions type-checks and builds the Vite Hono application.
+- Production deployment preserves Cloudflare D1, Workers AI, all secrets, static assets, existing cron and WAN endpoints.
+- The scheduled Worker stores a read-only MVSEP account validity check in `mvsep_connection_health`, checking once at most every six hours.
+- The bot is restricted to the authorized `TELEGRAM_CHAT_ID` and Telegram webhook secret.
+- Voice-profile audio and scripts are sent to MVSEP only on confirmed submission.
+- No MVSEP generation was submitted automatically during deployment.
+
+## Installed commands
+
+`/help`, `/commands`, `/ask`, `/clone`, `/clone_help`, `/savevoice`, `/voices`, `/clonelang`, `/tts_status`, `/cancel`, `/separate`, `/sep_status`, `/sep_help`, plus existing WAN video/motion commands.
+
+## Recovery
+
+Previous Cloudflare deployment version before the MVSEP rollout:
+`d3656c5e-7f68-4d9d-80d7-ab599da4ec11`.
+Record new deployment versions after each upgrade. GitHub is the source of truth for further changes.

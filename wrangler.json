@@ -27,5 +27,10 @@
   "vars": {
     "MODAL_WAN_API_BASE": "https://canibeyours2001-ui--wan22-ti2v-5b-web-api.modal.run",
     "MODAL_MOTION_API_BASE": "https://canibeyours2001-ui--wan22-animate-telegram-web-api.us-east.modal.run"
+  },
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
   }
 }
