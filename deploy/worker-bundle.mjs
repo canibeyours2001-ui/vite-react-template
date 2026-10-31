@@ -3623,6 +3623,53 @@ async function checkKaggleConnection(env2) {
     "INSERT INTO vox_kaggle_probe(id,checked_at,token_kind,primary_status,secondary_status) VALUES(1,unixepoch(),?,?,?) ON CONFLICT(id) DO UPDATE SET checked_at=unixepoch(),token_kind=excluded.token_kind,primary_status=excluded.primary_status,secondary_status=excluded.secondary_status"
   ).bind(tokenKind, primary, secondary).run();
 }
+async function probeKaggleReadMethods(env2) {
+  if (!env2.KAGGLE_API_TOKEN || !env2.MEMORY_DB) return;
+  await env2.MEMORY_DB.prepare(
+    "CREATE TABLE IF NOT EXISTS vox_kaggle_rpc_probe (id INTEGER PRIMARY KEY CHECK(id=1),checked_at INTEGER NOT NULL,get_status INTEGER NOT NULL,post_status INTEGER NOT NULL,get_output INTEGER NOT NULL,post_output INTEGER NOT NULL,status_shape TEXT NOT NULL,output_shape TEXT NOT NULL)"
+  ).bind().run();
+  const existing = await env2.MEMORY_DB.prepare(
+    "SELECT checked_at FROM vox_kaggle_rpc_probe WHERE id=1"
+  ).bind().all();
+  if (existing.results[0]) return;
+  const args = { userName: OWNER, kernelSlug: "voxcpm2-full-working" };
+  const shape = (body) => Object.keys(body || {}).filter(
+    (x) => ["status", "failureMessage", "files", "nextPageToken", "log", "url", "code", "message", "error"].includes(x)
+  ).join(",");
+  const probe = async (action, method) => {
+    const base = "https://api.kaggle.com/v1/kernels/" + action;
+    const query = "?userName=" + OWNER + "&kernelSlug=voxcpm2-full-working";
+    try {
+      const r = await fetch(base + (method === "GET" ? query : ""), {
+        method,
+        headers: {
+          Authorization: "Bearer " + env2.KAGGLE_API_TOKEN,
+          Accept: "application/json",
+          ...method === "POST" ? { "Content-Type": "application/json" } : {}
+        },
+        ...method === "POST" ? { body: JSON.stringify(args) } : {},
+        redirect: "manual",
+        signal: AbortSignal.timeout(12e3)
+      });
+      let data = {};
+      if ((r.headers.get("content-type") || "").includes("json"))
+        data = await r.json().catch(() => ({}));
+      else await r.body?.cancel();
+      return { status: r.status, shape: shape(data) };
+    } catch {
+      return { status: 0, shape: "network-failure" };
+    }
+  };
+  const [a, b, c, d] = await Promise.all([
+    probe("status", "GET"),
+    probe("status", "POST"),
+    probe("output", "GET"),
+    probe("output", "POST")
+  ]);
+  await env2.MEMORY_DB.prepare(
+    "INSERT INTO vox_kaggle_rpc_probe(id,checked_at,get_status,post_status,get_output,post_output,status_shape,output_shape) VALUES(1,unixepoch(),?,?,?,?,?,?)"
+  ).bind(a.status, b.status, c.status, d.status, a.shape || b.shape, c.shape || d.shape).run();
+}
 async function verified(env2) {
   if (!env2.KAGGLE_API_TOKEN) return false;
   await init(env2.MEMORY_DB);
@@ -4586,7 +4633,7 @@ const index = {
     } catch (error) {
       console.error("Telegram webhook registration check failed:", error instanceof Error ? error.name : "unknown");
     }
-    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2), checkKaggleConnection(env2), pollVoxKaggle(env2)]);
+    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2), checkKaggleConnection(env2), pollVoxKaggle(env2), probeKaggleReadMethods(env2)]);
     for (const r of results) {
       if (r.status === "rejected") console.error("Scheduled processing failed", String(r.reason).slice(0, 160));
     }
