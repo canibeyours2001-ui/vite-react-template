@@ -34,7 +34,7 @@ type MvsepResult = {
 }
 const BASE = 'https://sg.mvsep.com/api'
 const LIMIT = 12 * 1024 * 1024
-const MODEL = 40
+const MODEL = 26
 
 function hashOk(hash: string): boolean {
   return /^[A-Za-z0-9_.-]{6,200}$/.test(hash)
@@ -158,7 +158,7 @@ export async function handleAudioTelegram(
       return true
     }
     if (command === '/sep_help') {
-      await send('MVSEP: send an audio file, REPLY to it with /separate 40. ' +
+      await send('MVSEP: send an audio file, REPLY to it with /separate 26. ' +
         'The bot updates a status message every minute. Use /sep_status for the latest status.')
       return true
     }
@@ -178,7 +178,7 @@ export async function handleAudioTelegram(
     }
     const model = arg ? Number(arg) : MODEL
     if (!Number.isInteger(model) || model < 1 || model > 9999) {
-      await send('Invalid MVSEP model number, e.g. /separate 40')
+      await send('Invalid MVSEP model number, e.g. /separate 26')
       return true
     }
     const replied = msg.reply_to_message
