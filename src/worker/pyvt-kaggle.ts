@@ -8,7 +8,7 @@
  * Telegram and Kaggle bearer credentials never enter the Kaggle notebook.
  */
 type DB={prepare(sql:string):{bind(...x:(string|number)[]):{
- run():Promise<{meta:{changes:number}}>;all<T>():Promise<{results:T[]>}
+ run():Promise<{meta:{changes:number}}>;all<T>():Promise<{results:T[]}>
 }}}
 export type VideoEnv={
  MEMORY_DB:DB;KAGGLE_API_TOKEN?:string;TELEGRAM_BOT_TOKEN:string;
