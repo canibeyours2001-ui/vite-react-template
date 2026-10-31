@@ -402,6 +402,21 @@ export async function pyvtEdgeSmoke(env:VideoEnv):Promise<void>{
  const job=rows.results[0]
  if(!job)return
  const name='pyvideotrans-edge-tts-smoke'
+ if(job.status==='failed'&&job.version){
+  const detail=await db.prepare('SELECT detail FROM pyvt_edge_smoke WHERE id=1')
+   .bind().all<{detail:string}>()
+  if((detail.results[0]?.detail||'').length>12)return
+  try{
+   const output=await kaggle(env,'output',{userName:OWNER,kernelSlug:name,versionLabel:'v'+job.version})
+   const raw=String(output.log||output.message||'').slice(-1600)
+   await db.prepare('UPDATE pyvt_edge_smoke SET detail=?,updated_at=unixepoch() WHERE id=1')
+    .bind(raw||'No log returned from Kaggle').run()
+  }catch(e){
+   await db.prepare('UPDATE pyvt_edge_smoke SET detail=?,updated_at=unixepoch() WHERE id=1')
+    .bind('Log read failed: '+(e instanceof Error?e.message:'unknown')).run()
+  }
+  return
+ }
  if(job.status==='requested'){
   const lock=await db.prepare(
    "UPDATE pyvt_edge_smoke SET status='submitting',updated_at=unixepoch() WHERE id=1 AND status='requested'"
