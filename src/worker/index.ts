@@ -3,6 +3,7 @@ import { handleAudioTelegram, pollAudioJobs, mvsepStatus, checkMvsepAccount } fr
 import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAssistantContext } from './voice-profiles'
 import { isAllowedTelegramUser, handleAccessCommand, isAccessCommand } from './telegram-access'
 import {handleVoxTelegram,checkKaggleConnection,pollVoxKaggle,probeKaggleReadMethods} from './vox-kaggle-direct'
+import {handleVoxCallback} from './vox-voice-profiles'
 
 type AIClient = {
   run: (
@@ -208,6 +209,9 @@ app.post('/telegram/webhook', async (c) => {
     if (cb.data?.startsWith('qw:') &&
         await isAllowedTelegramUser(c.env,chat,sender,cb.message?.chat.type)) {
       c.executionCtx.waitUntil(handleVoiceCallback(c.env,cb))
+    }else if(cb.data?.startsWith('vx:') &&
+        await isAllowedTelegramUser(c.env,chat,sender,cb.message?.chat.type)) {
+      c.executionCtx.waitUntil(handleVoxCallback(c.env,cb))
     }
     return c.json({ok:true})
   }
@@ -631,6 +635,9 @@ app.post('/telegram/webhook', async (c) => {
           '/vox TEXT — Kaggle VoxCPM2 Burmese speech (up to 8,000 characters)\n' +
           '/vox — attach or reply to a UTF-8 .txt script for long narration\n' +
           '/vox_status — Kaggle VoxCPM2 job status\n' +
+          '/voxvoices — show five saved VoxCPM2 voices\n' +
+          '/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n' +
+          '/voxrename 1 Name — rename saved VoxCPM2 voice\n' +
           '/voices — list your five slots\n' +
           '/savevoice 1 Narrator — reply to audio; no transcript required\n' +
           '/clonelang English — choose TTS language\n' +
@@ -671,7 +678,7 @@ app.post('/telegram/webhook', async (c) => {
               'You are the helpful AI guide for this Telegram bot. Reply in English and use the last 20 stored chat messages to understand the conversation. Give exact Telegram commands and clear, short examples.',
               'Available commands (do not invent commands):',
               '/help or /commands — show the command menu.',
-              '/vox TEXT — request VoxCPM2 Burmese speech (up to 8,000 characters). Reply to a UTF-8 .txt file with /vox, or attach a .txt file with caption /vox for long scripts. /vox_status gives status; no OCI needed.',
+              '/vox TEXT — request VoxCPM2 Burmese speech (up to 8,000 characters); after output click Save this voice, then a slot. /voxvoice 1 TEXT reuses stored reference; /voxvoices lists five slots; /voxrename 1 Name renames. Reply to a UTF-8 .txt file with /vox or /voxvoice 1, or attach a .txt file as caption. /vox_status gives status; no OCI needed.',
               '/whoami — show your Telegram numeric user ID.',
               '/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.',
               '/ask QUESTION — ask this AI for help; normal messages also reach the AI.',
@@ -919,6 +926,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'clone',description:'Pick a saved or custom voice'},
         {command:'vox',description:'Kaggle VoxCPM2 Burmese speech'},
         {command:'vox_status',description:'Check VoxCPM2 job status'},
+        {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
+        {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
+        {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
         {command:'tts_status',description:'Check Qwen3-TTS generation status'},
         {command:'voices',description:'View your five saved voices'},
         {command:'savevoice',description:'Save reference voice to slot 1 to 5'},
