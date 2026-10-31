@@ -7,6 +7,9 @@ type D1 = { prepare(query:string):{bind(...v:(string|number)[]):{
  run():Promise<{meta:{changes:number}}>;all<T>():Promise<{results:T[]}>
 }}}
 export type VoxEnv = {MEMORY_DB:D1;TELEGRAM_BOT_TOKEN:string;KAGGLE_API_TOKEN?:string}
+const MAX_VOX_CHARS=8000
+type VoxTelegramDocument={file_id:string;file_size?:number;file_name?:string;mime_type?:string}
+export type VoxTelegramMessage={document?:VoxTelegramDocument;reply_to_message?:{document?:VoxTelegramDocument}}
 type Job = {id:number;chat_id:string;text:string;status:string;version_number:number|null;error_message:string|null}
 const OWNER='cyawzin'
 const SLUG='voxcpm2-telegram-worker'
@@ -168,14 +171,36 @@ async function verified(env:VoxEnv):Promise<boolean>{
  const r=await env.MEMORY_DB.prepare('SELECT ok FROM vox_kaggle_health WHERE id=1').bind().all<{ok:number}>()
  return r.results[0]?.ok===1
 }
+async function readTextDocument(env:VoxEnv,file:VoxTelegramDocument):Promise<string>{
+ const name=file.file_name||''
+ if(!name.toLowerCase().endsWith('.txt'))throw Error('Only UTF-8 .txt files are supported')
+ if(!file.file_id || (file.file_size||0)>65536)throw Error('Text file exceeds 64 KB')
+ const token=env.TELEGRAM_BOT_TOKEN
+ const meta=await fetch('https://api.telegram.org/bot'+token+'/getFile?file_id='+encodeURIComponent(file.file_id),{
+  signal:AbortSignal.timeout(12000)
+ })
+ const info=await meta.json() as {ok?:boolean;result?:{file_path?:string;file_size?:number}}
+ const path=info.result?.file_path||''
+ if(!meta.ok||!info.ok||!path||path.startsWith('/')||path.includes('..')||(info.result?.file_size||0)>65536)
+  throw Error('Telegram text file unavailable')
+ const url='https://api.telegram.org/file/bot'+token+'/'+path.split('/').map(encodeURIComponent).join('/')
+ const res=await fetch(url,{signal:AbortSignal.timeout(20000)})
+ if(!res.ok || Number(res.headers.get('content-length')||0)>65536)throw Error('Text download failed')
+ const buf=await res.arrayBuffer()
+ if(buf.byteLength>65536)throw Error('Text file too large')
+ const txt=new TextDecoder('utf-8',{fatal:true}).decode(buf).replace(/^\uFEFF/,'').trim()
+ if(txt.includes('\0'))throw Error('Invalid text document')
+ return txt
+}
+
 export async function handleVoxTelegram(env:VoxEnv,chat:string,messageId:number,text:string,
- send:(s:string)=>Promise<void>):Promise<boolean>{
+ send:(s:string)=>Promise<void>,message?:VoxTelegramMessage):Promise<boolean>{
  const cmd=text.trim().split(/\s+/,1)[0]?.split('@')[0].toLowerCase()
  if(!['/vox','/vox_status','/vox_help'].includes(cmd))return false
  try{
   await init(env.MEMORY_DB)
   if(cmd==='/vox_help'){
-   await send('Kaggle VoxCPM2 TTS: /vox YOUR TEXT\nCheck status: /vox_status\nEach job runs in a private Kaggle notebook version (T4 GPU). Maximum 450 characters.')
+   await send('Kaggle VoxCPM2 TTS: /vox YOUR TEXT\nCheck status: /vox_status\nEach job runs in a private Kaggle notebook version (T4 GPU). Up to 8,000 characters. For long scripts, send a UTF-8 .txt file with caption /vox, or reply to a .txt file with /vox.')
    return true
   }
   if(cmd==='/vox_status'){
@@ -185,9 +210,18 @@ export async function handleVoxTelegram(env:VoxEnv,chat:string,messageId:number,
      'No VoxCPM2 job yet. Use /vox YOUR TEXT.')
    return true
   }
-  const phrase=text.replace(/^\/vox(?:@[A-Za-z0-9_]+)?(?:\s+|$)/i,'').trim()
-  if(!phrase || phrase.length>450){
-   await send('Usage: /vox YOUR TEXT (1–450 characters)\nExample: /vox မင်္ဂလာပါ။')
+  let phrase=text.replace(/^\/vox(?:@[A-Za-z0-9_]+)?(?:\s+|$)/i,'').trim()
+  const doc=message?.document || message?.reply_to_message?.document
+  if(!phrase && doc){
+   try{phrase=await readTextDocument(env,doc)}
+   catch(e){
+    console.error('Vox text document invalid',e instanceof Error?e.name:'unknown')
+    await send('Please attach a UTF-8 .txt file (max 8,000 characters / 64 KB) with caption /vox, or reply to it using /vox.')
+    return true
+   }
+  }
+  if(!phrase || phrase.length>MAX_VOX_CHARS){
+   await send('Usage: /vox YOUR TEXT (1–8,000 characters). For long scripts, send a UTF-8 .txt file with caption /vox or reply to that file with /vox. Your script exceeds the limit or is empty.')
    return true
   }
   if(!await verified(env)){
@@ -214,31 +248,10 @@ export async function handleVoxTelegram(env:VoxEnv,chat:string,messageId:number,
  }
 }
 /** Separate kernel from the user's original seven-cell, dual-T4 Gradio studio. */
+const VOX_KERNEL_PYTHON="import subprocess, json, time, re\nfrom pathlib import Path\nstart=time.monotonic()\nsubprocess.run(['python','-m','pip','install','-q','voxcpm>=2.0.3','soundfile','huggingface_hub'],check=True)\nprint('VOX_STAGE pip_seconds',round(time.monotonic()-start,1),flush=True)\nimport numpy as np\nimport soundfile as sf\nfrom huggingface_hub import snapshot_download\nfrom voxcpm import VoxCPM\nTASK=json.loads(__VOX_TASK_LITERAL__)\ntext=TASK['text'].strip()\n\ndef split_script(src,limit=240):\n    items=re.split(r'(?<=[။.!?！？。])\\s*|\\n+',src)\n    out=[]\n    buf=''\n    def emit():\n        nonlocal buf\n        if buf.strip():\n            out.append(buf.strip())\n        buf=''\n    for item in items:\n        piece=item.strip()\n        if not piece:\n            continue\n        if len(piece)>limit:\n            emit()\n            while len(piece)>limit:\n                idx=max(piece.rfind(' ',0,limit+1),piece.rfind('၊',0,limit+1),piece.rfind(',',0,limit+1))\n                if idx<limit//2:\n                    idx=limit\n                elif piece[idx:idx+1] in ('၊',','):\n                    idx+=1\n                out.append(piece[:idx].strip())\n                piece=piece[idx:].strip()\n            if piece:\n                buf=piece\n            continue\n        trial=(buf+' '+piece).strip() if buf else piece\n        if len(trial)>limit:\n            emit()\n            buf=piece\n        else:\n            buf=trial\n    emit()\n    return out\n\nchunks=split_script(text)\nif not chunks or len(chunks)>64 or any(len(x)>240 for x in chunks):\n    raise ValueError('Unsupported text length or chunk count')\nprint('VOX_STAGE chunk_count',len(chunks),flush=True)\nMODEL_DIR='/kaggle/temp/VoxCPM2'\nPath(MODEL_DIR).mkdir(parents=True,exist_ok=True)\nif not Path(MODEL_DIR,'model.safetensors').exists():\n    snapshot_download(repo_id='openbmb/VoxCPM2',local_dir=MODEL_DIR)\nprint('VOX_STAGE model_download_seconds',round(time.monotonic()-start,1),flush=True)\nmodel=VoxCPM.from_pretrained(MODEL_DIR,load_denoiser=False,optimize=False,device='cuda')\nprint('VOX_STAGE model_loaded_seconds',round(time.monotonic()-start,1),flush=True)\nsample_rate=int(model.tts_model.sample_rate)\npieces=[]\nfor index,part in enumerate(chunks):\n    wav=model.generate(text=part,cfg_value=2.0,inference_timesteps=10,normalize=False)\n    audio=np.asarray(wav,dtype=np.float32).reshape(-1)\n    if audio.size<100:\n        raise RuntimeError('Empty audio chunk '+str(index+1))\n    pieces.append(audio)\n    if index<len(chunks)-1:\n        pieces.append(np.zeros(int(sample_rate*0.18),dtype=np.float32))\n    print('VOX_CHUNK',index+1,'/',len(chunks),'elapsed_s',round(time.monotonic()-start,1),flush=True)\nmerged=np.concatenate(pieces)\ntmp=Path('/kaggle/temp/vox_merged.wav')\nsf.write(str(tmp),merged,sample_rate,subtype='PCM_16')\nout=Path('/kaggle/working/vox_generated.mp3')\nsubprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(tmp),'-codec:a','libmp3lame','-b:a','112k',str(out)],check=True,timeout=180)\nif not out.is_file() or out.stat().st_size<1024 or out.stat().st_size>20*1024*1024:\n    raise RuntimeError('MP3 output missing or too large for Telegram')\nprint('VOX_GENERATED_SUCCESS',round(time.monotonic()-start,1),'file_bytes',out.stat().st_size,flush=True)\n";
 function pythonFor(text:string):string{
  const safe=JSON.stringify(JSON.stringify({text}))
- return [
- 'import subprocess, json, os, time',
- 'start=time.monotonic()',
- "subprocess.run(['python','-m','pip','install','-q','voxcpm>=2.0.3','soundfile','huggingface_hub'],check=True)",
- "print('VOX_STAGE pip_seconds',round(time.monotonic()-start,1),flush=True)",
- 'from pathlib import Path',
- 'import soundfile as sf',
- 'from huggingface_hub import snapshot_download',
- 'from voxcpm import VoxCPM',
- 'TASK=json.loads('+safe+')',
- "# Keep large model weights out of /kaggle/working, which Kaggle packages as output.",
- "MODEL_DIR='/kaggle/temp/VoxCPM2'",
- "Path(MODEL_DIR).mkdir(parents=True,exist_ok=True)",
- "if not Path(MODEL_DIR,'model.safetensors').exists():",
- "    snapshot_download(repo_id='openbmb/VoxCPM2',local_dir=MODEL_DIR)",
- "print('VOX_STAGE model_download_seconds',round(time.monotonic()-start,1),flush=True)",
- "model=VoxCPM.from_pretrained(MODEL_DIR,load_denoiser=False,optimize=False,device='cuda')",
- "print('VOX_STAGE model_loaded_seconds',round(time.monotonic()-start,1),flush=True)",
- "wav=model.generate(text=TASK['text'],cfg_value=2.0,inference_timesteps=10,normalize=False)",
- "print('VOX_STAGE generated_seconds',round(time.monotonic()-start,1),flush=True)",
- "sf.write('/kaggle/working/vox_generated.wav',wav,model.tts_model.sample_rate,subtype='PCM_16')",
- "print('VOX_GENERATED_SUCCESS',round(time.monotonic()-start,1),flush=True)",
- ].join('\n')
+ return VOX_KERNEL_PYTHON.replace('__VOX_TASK_LITERAL__',safe)
 }
 function matchOutput(data:Record<string,unknown>):string|null{
  const files=(data.files||data.outputFiles||[]) as unknown
@@ -248,7 +261,7 @@ function matchOutput(data:Record<string,unknown>):string|null{
   const f=v as Record<string,unknown>
   const name=String(f.fileName||f.file_name||'')
   const link=f.url
-  if(!name.endsWith('vox_generated.wav')||typeof link!=='string')continue
+  if(!name.endsWith('vox_generated.mp3')||typeof link!=='string')continue
   try{
    const u=new URL(link)
    // Signed Kaggle/GCS download; do not fetch arbitrary addresses.
@@ -265,14 +278,15 @@ async function deliver(env:VoxEnv,job:Job,url:string){
  const r=await fetch(url,{signal:AbortSignal.timeout(60000)})
  if(!r.ok||Number(r.headers.get('content-length')||0)>20*1024*1024)
   throw Error('Kaggle result download not available')
- const wav=await r.blob()
- if(wav.size<44||wav.size>20*1024*1024)throw Error('Kaggle audio too large or missing')
- const header=String.fromCharCode(...new Uint8Array(await wav.slice(0,12).arrayBuffer()))
- if(!header.startsWith('RIFF')||header.slice(8,12)!=='WAVE')throw Error('Kaggle result not WAV')
+ const audio=await r.blob()
+ if(audio.size<1024||audio.size>20*1024*1024)throw Error('Kaggle audio too large or missing')
+ const header=new Uint8Array(await audio.slice(0,12).arrayBuffer())
+ const marker=String.fromCharCode(...header.slice(0,3))
+ if(marker!=='ID3' && !(header[0]===255 && (header[1]&224)===224))throw Error('Kaggle result not MP3')
  const data=new FormData()
  data.set('chat_id',job.chat_id)
  data.set('caption','Kaggle VoxCPM2 job #'+job.id)
- data.set('audio',wav,'vox-'+job.id+'.wav')
+ data.set('audio',audio,'vox-'+job.id+'.mp3')
  const out=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendAudio',{
   method:'POST',body:data,signal:AbortSignal.timeout(60000)
  })
