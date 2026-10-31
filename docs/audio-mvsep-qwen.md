@@ -11,23 +11,23 @@ This project uses the existing Cloudflare Hono Worker, Telegram bot and D1 datab
 - API base used: `https://sg.mvsep.com/api` (official Singapore region)
 - Auth: existing Cloudflare secret `MVSEP_API_TOKEN`
 
-Official reference: https://mvsep.com/en/full_api
+Official reference: https://mvsep.com/en/full_api — Qwen3-TTS (Voice Cloning), model 120, `add_opt2` is optional and omitted when no transcript is provided.
 
 ## Save up to five reference voices
 
 1. Send a clear 3–15 sec reference audio/voice recording to your authorized Telegram bot.
 2. Reply directly to that recording using:
-   `/savevoice 1 Narrator | words spoken in the recording (optional)`
+   `/savevoice 1 Narrator`
 3. Repeat with slots 1, 2, 3, 4, and 5 and any short labels you choose.
 4. Run `/voices` to see the saved names.
 
-D1 stores the five voice names, Telegram file IDs, and transcripts — not raw audio bytes. `getFile` resolves file IDs when generation starts. Replacing a slot updates its existing record.
+D1 stores the five voice names and Telegram file IDs. It may store optional transcripts for existing profiles, but none are required or prompted for — raw audio is not stored. `getFile` resolves file IDs when generation starts. Replacing a slot updates its existing record.
 
 ## Generate voice audio
 
 1. Run `/clone`.
 2. Tap one of the five saved voices or **Upload custom voice**.
-3. For custom reference audio, upload a recording and supply its exact transcript.
+3. For custom reference audio, upload a recording; no reference transcript is needed.
 4. Send your new text (max 1,000 characters).
 5. Tap **Generate audio** to explicitly confirm an MVSEP submission.
 6. The existing cron checks status every minute and edits a Telegram status message on changes.
