@@ -284,7 +284,7 @@ function pythonFor(text:string,voiceRefB64:string|null):string{
  const safe=JSON.stringify(JSON.stringify({text,voice_ref_b64:voiceRefB64||''}))
  return VOX_KERNEL_PYTHON.replace('__VOX_TASK_LITERAL__',safe)
 }
-function matchOutput(data:Record<string,unknown>):string|null{
+function matchOutput(data:Record<string,unknown>,target='vox_generated.mp3'):string|null{
  const files=(data.files||data.outputFiles||[]) as unknown
  if(!Array.isArray(files))return null
  for(const v of files){
@@ -292,7 +292,7 @@ function matchOutput(data:Record<string,unknown>):string|null{
   const f=v as Record<string,unknown>
   const name=String(f.fileName||f.file_name||'')
   const link=f.url
-  if(!name.endsWith('vox_generated.mp3')||typeof link!=='string')continue
+  if(!name.endsWith(target)||typeof link!=='string')continue
   try{
    const u=new URL(link)
    // Signed Kaggle/GCS download; do not fetch arbitrary addresses.
@@ -305,7 +305,7 @@ function matchOutput(data:Record<string,unknown>):string|null{
  }
  return null
 }
-async function deliver(env:VoxEnv,job:Job,url:string){
+async function deliver(env:VoxEnv,job:Job,url:string,previewUrl:string|null){
  const r=await fetch(url,{signal:AbortSignal.timeout(60000)})
  if(!r.ok||Number(r.headers.get('content-length')||0)>20*1024*1024)
   throw Error('Kaggle result download not available')
@@ -314,10 +314,12 @@ async function deliver(env:VoxEnv,job:Job,url:string){
  const header=new Uint8Array(await audio.slice(0,12).arrayBuffer())
  const marker=String.fromCharCode(...header.slice(0,3))
  if(marker!=='ID3' && !(header[0]===255 && (header[1]&224)===224))throw Error('Kaggle result not MP3')
+ const hasPreview=previewUrl ? await storeVoxReference(env,job.id,job.chat_id,previewUrl) : false
  const data=new FormData()
  data.set('chat_id',job.chat_id)
  data.set('caption','Kaggle VoxCPM2 job #'+job.id)
  data.set('audio',audio,'vox-'+job.id+'.mp3')
+ if(hasPreview)data.set('reply_markup',JSON.stringify({inline_keyboard:[[{text:'⭐ Save this voice',callback_data:'vx:save:'+job.id}]]}))
  const out=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendAudio',{
   method:'POST',body:data,signal:AbortSignal.timeout(60000)
  })
@@ -351,13 +353,14 @@ export async function pollVoxKaggle(env:VoxEnv):Promise<void>{
    if(raw.includes('COMPLETE')||raw.includes('SUCCESS')){
     const outputs=await kaggle(env,'output',{userName:OWNER,kernelSlug:SLUG,versionLabel:version})
     const url=matchOutput(outputs)
+    const previewUrl=matchOutput(outputs,'vox_voice_sample.mp3')
     if(!url)throw Error('Completed Kaggle run has no WAV download URL')
     const claim=await env.MEMORY_DB.prepare(
      "UPDATE vox_kaggle_jobs SET status='delivering',updated_at=unixepoch() WHERE id=? AND status IN ('submitted','running')"
     ).bind(job.id).run()
     if(claim.meta.changes!==1)return
     try{
-     await deliver(env,job,url)
+     await deliver(env,job,url,previewUrl)
      await env.MEMORY_DB.prepare("UPDATE vox_kaggle_jobs SET status='done',updated_at=unixepoch() WHERE id=?").bind(job.id).run()
     }catch(e){
      console.error('Vox delivery uncertain',e instanceof Error?e.message.slice(0,120):'unknown')
@@ -385,8 +388,9 @@ export async function pollVoxKaggle(env:VoxEnv):Promise<void>{
  const next=candidate.results[0]
  if(!next)return
  try{
+  const sampleB64=await voiceForJob(env.MEMORY_DB,next.id,next.chat_id)
   const result=await kaggle(env,'push',{
-   slug:KERNEL,newTitle:'VoxCPM2 Telegram Worker',text:pythonFor(next.text),
+   slug:KERNEL,newTitle:'VoxCPM2 Telegram Worker',text:pythonFor(next.text,sampleB64),
    language:'python',kernelType:'script',isPrivate:true,enableGpu:true,enableInternet:true,
    machineShape:'NvidiaTeslaT4',sessionTimeoutSeconds:3600,
    datasetDataSources:[],competitionDataSources:[],kernelDataSources:[],modelDataSources:[]
