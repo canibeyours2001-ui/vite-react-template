@@ -35,41 +35,14 @@ const LIMIT=6*1024*1024
 // MVSEP publishes no Qwen3-TTS text-size maximum. This limit protects
 // Telegram/Workers/D1 from oversized uploads; it is NOT an MVSEP model limit.
 const MAX_TTS_TEXT_BYTES=128*1024
-const MAX_TTS_FILE_BYTES=128*1024
 const LANGUAGES=new Set(['Auto','English','Chinese','Japanese','Korean','German','French','Russian','Portuguese','Spanish','Italian'])
-const help='Voice cloning:\n/savevoice 1 Narrator (reply to a recording; transcript optional)\n/voices — show your 5 saved slots\n/clone — choose a saved voice or upload custom\n/clonetext — reply to a UTF-8 .txt script after choosing a voice\n/tts_status — live status of latest generation\n/clonelang English — set speech language\n/cancel — stop\nMVSEP publishes no fixed Qwen3-TTS text limit. Send normal Telegram text or a UTF-8 .txt file (up to 128 KiB). MVSEP will validate what it can process. Only use voices you have permission to clone.'
+const help='Voice cloning:\n/savevoice 1 Narrator (reply to audio; transcript optional)\n/voices — saved voice slots\n/clone — select a saved or custom voice\nSend plain speech text (up to Telegram\'s 4,096-character message limit).\n/tts_long — collect a longer script as several plain messages\n/tts_done — finish the long script and review before generating\n/tts_status — check generation\n/clonelang English — set language\n/cancel — cancel voice selection\nNo file upload needed for scripts. MVSEP decides its actual text limit; longer requests may be rejected. Only clone permitted voices.'
 function usableFile(file?:RefFile):file is RefFile{
   if(!file?.file_id || (file.file_size||0)>LIMIT)return false
   const ext=(file.file_name||'').toLowerCase()
   return !file.mime_type || file.mime_type.startsWith('audio/') ||
     /\.(wav|mp3|flac|ogg|oga|m4a)$/i.test(ext)
 }
-function isScriptFile(file?:RefFile):file is RefFile{
-  return Boolean(file?.file_id && /\.txt$/i.test(file.file_name||''))
-}
-/** Read only explicit UTF-8 text documents; never store the Telegram file URL. */
-async function readScriptDocument(env:VoiceEnv,file:RefFile):Promise<string>{
-  if(!isScriptFile(file))throw new Error('Send a .txt document')
-  if((file.file_size||0)>MAX_TTS_FILE_BYTES)throw new Error('Text file exceeds 128 KiB')
-  const meta=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+
-    '/getFile?file_id='+encodeURIComponent(file.file_id),{signal:AbortSignal.timeout(18000)})
-  const data=await meta.json() as {ok?:boolean;result?:{file_path?:string;file_size?:number}}
-  const path=data.result?.file_path||''
-  if(!meta.ok||!data.ok||!path||path.startsWith('/')||path.includes('..')||
-    (data.result?.file_size||0)>MAX_TTS_FILE_BYTES)throw new Error('Invalid text file')
-  const url='https://api.telegram.org/file/bot'+env.TELEGRAM_BOT_TOKEN+'/'+
-    path.split('/').map(encodeURIComponent).join('/')
-  const reply=await fetch(url,{signal:AbortSignal.timeout(24000)})
-  if(!reply.ok||Number(reply.headers.get('content-length')||0)>MAX_TTS_FILE_BYTES)
-    throw new Error('Cannot download text file')
-  const bytes=await reply.arrayBuffer()
-  if(bytes.byteLength>MAX_TTS_FILE_BYTES)throw new Error('Text file too large')
-  const script=new TextDecoder('utf-8',{fatal:true,ignoreBOM:false})
-    .decode(bytes).replace(/^\uFEFF/,'').trim()
-  if(script.includes('\0'))throw new Error('Invalid text file encoding')
-  return script
-}
-
 async function tg(env:VoiceEnv,method:string,data:Record<string,unknown>):Promise<Record<string,unknown>>{
   const resp=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/'+method,{
     method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(data),
@@ -88,6 +61,7 @@ async function init(db:D1){
   await db.prepare('CREATE TABLE IF NOT EXISTS mvsep_tts_tracking (job_id INTEGER PRIMARY KEY, hash TEXT UNIQUE NOT NULL, status_message_id INTEGER, last_label TEXT NOT NULL DEFAULT \'\', checked_at INTEGER NOT NULL DEFAULT 0)').bind().run()
   await db.prepare('CREATE TABLE IF NOT EXISTS qwen_clone_sessions (chat_id TEXT PRIMARY KEY, state TEXT NOT NULL, slot INTEGER, custom_file_id TEXT, custom_ref_text TEXT, lang TEXT NOT NULL DEFAULT \'English\', updated_at INTEGER NOT NULL DEFAULT (unixepoch()))').bind().run()
   await db.prepare('CREATE TABLE IF NOT EXISTS qwen_clone_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, source_message_id INTEGER NOT NULL, telegram_file_id TEXT NOT NULL, ref_text TEXT NOT NULL, speech_text TEXT NOT NULL, lang TEXT NOT NULL, status TEXT NOT NULL DEFAULT \'pending\', created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()), UNIQUE(chat_id,source_message_id))').bind().run()
+  await db.prepare('CREATE TABLE IF NOT EXISTS qwen_clone_long_text (chat_id TEXT PRIMARY KEY, text TEXT NOT NULL DEFAULT \'\', updated_at INTEGER NOT NULL DEFAULT (unixepoch()))').bind().run()
 }
 async function profiles(db:D1,chat:string){
   const data=await db.prepare('SELECT slot,name,telegram_file_id,ref_text FROM qwen_voice_profiles WHERE chat_id=? ORDER BY slot').bind(chat).all<Profile>()
@@ -102,6 +76,7 @@ async function setSession(db:D1,chat:string,st:string,slot:number|null,file:stri
 }
 async function clearSession(db:D1,chat:string){
   await db.prepare('DELETE FROM qwen_clone_sessions WHERE chat_id=?').bind(chat).run()
+  await db.prepare('DELETE FROM qwen_clone_long_text WHERE chat_id=?').bind(chat).run()
 }
 function voiceButtons(data:Profile[]){
   const buttons=Array.from({length:5},(_,i)=>{
@@ -129,9 +104,9 @@ export async function handleVoiceMessage(env:VoiceEnv,msg:VoiceMessage,chat:stri
   const cmd=(commandRaw||'').split('@')[0].toLowerCase()
   // Never treat help/AI requests as speech text, even inside an active clone wizard.
   if (['/ask','/help','/commands'].includes(cmd)) return false
-  const recognized=['/savevoice','/voices','/clone','/clone_help','/tts_status','/cancel','/clonelang','/clonetext'].includes(cmd)
+  const recognized=['/savevoice','/voices','/clone','/clone_help','/tts_status','/cancel','/clonelang','/tts_long','/tts_done'].includes(cmd)
   let current:Session|null=null
-  if(!recognized&&!inboundFile(msg)&&!content.trim()&&!isScriptFile(msg.document))return false
+  if(!recognized&&!inboundFile(msg)&&!content.trim())return false
   try {
     await init(env.MEMORY_DB)
     current=await session(env.MEMORY_DB,chat)
@@ -186,12 +161,14 @@ export async function handleVoiceMessage(env:VoiceEnv,msg:VoiceMessage,chat:stri
     }
     if(cmd==='/clone'){
       const data=await profiles(env.MEMORY_DB,chat)
+      await env.MEMORY_DB.prepare('DELETE FROM qwen_clone_long_text WHERE chat_id=?').bind(chat).run()
       await setSession(env.MEMORY_DB,chat,'select',null,null,null,current?.lang||'English')
       await say(env,chat,'Choose a saved voice or upload a custom recording:',voiceButtons(data))
       return true
     }
-    if(cmd==='/clonetext'&&(!current||!['target_text','custom_transcript'].includes(current.state))){
-      await say(env,chat,'First choose a saved voice with /clone, then reply to a UTF-8 .txt script using /clonetext.');return true
+    if(['target_text','custom_transcript','collect_text'].indexOf(current?.state||'')<0 &&
+        (cmd==='/tts_long'||cmd==='/tts_done')){
+      await say(env,chat,'Choose a saved or custom voice with /clone first. Then use /tts_long to send several plain text messages.');return true
     }
     if(!current||current.state==='select'||current.state==='idle')return false
     const text=content.trim()
@@ -199,28 +176,53 @@ export async function handleVoiceMessage(env:VoiceEnv,msg:VoiceMessage,chat:stri
       const ref=inboundFile(msg)
       if(!ref||!usableFile(ref)){await say(env,chat,'Please send an audio file or voice message (up to 6 MB).');return true}
       await setSession(env.MEMORY_DB,chat,'target_text',null,ref.file_id,'',current.lang)
-      await say(env,chat,'Reference voice uploaded. Send speech text (Telegram supports up to 4,096 characters), or upload a UTF-8 .txt file (up to 128 KiB). You can also reply to a .txt with /clonetext. MVSEP decides the actual maximum. No reference transcript needed.')
+      await say(env,chat,'Reference voice uploaded. Send your spoken text (up to 4,096 characters in one Telegram message). For longer scripts send /tts_long, then multiple plain text messages, then /tts_done. MVSEP determines its text limit. No reference transcript needed.')
       return true
     }
-    // Existing sessions at the old transcript step now accept target speech directly.
-    if(current.state==='target_text'||current.state==='custom_transcript'){
-      // No arbitrary 1,000-character application limit. Forward the intact
-      // speech text to MVSEP; its model decides whether it can process it.
-      const incoming=msg.document&&isScriptFile(msg.document)?msg.document:
-        cmd==='/clonetext'&&isScriptFile(msg.reply_to_message?.document)?msg.reply_to_message!.document:undefined
+    // Long mode combines multiple ordinary Telegram text messages into one
+    // MVSEP job. Never submit a billable task until Generate audio is confirmed.
+    if(cmd==='/tts_long' && ['target_text','custom_transcript'].includes(current.state)){
+      await env.MEMORY_DB.prepare(
+        "INSERT INTO qwen_clone_long_text(chat_id,text) VALUES(?,'') "+
+        "ON CONFLICT(chat_id) DO UPDATE SET text='',updated_at=unixepoch()"
+      ).bind(chat).run()
+      await setSession(env.MEMORY_DB,chat,'collect_text',current.slot,current.custom_file_id,current.custom_ref_text,current.lang)
+      await say(env,chat,'Long speech mode started. Send your script as several PLAIN TEXT messages (each up to 4,096 characters). I will combine them in order. Send /tts_done when finished. Total bot safeguard: 128 KiB of UTF-8 text. MVSEP determines its actual maximum. /cancel stops.')
+      return true
+    }
+    if(current.state==='collect_text' && cmd!=='/tts_done'){
+      if(cmd==='/tts_long'){await say(env,chat,'Long text collection is already active. Send more text or /tts_done.');return true}
+      if(!text || /^\/[a-z_]+(?:\s|$)/i.test(text)){await say(env,chat,'Send PLAIN speech text messages, or /tts_done to finish. /cancel discards the script.');return true}
+      const updated=await env.MEMORY_DB.prepare(
+        "UPDATE qwen_clone_long_text SET text=CASE WHEN text='' THEN ? ELSE text||char(10)||? END, updated_at=unixepoch() "+
+        "WHERE chat_id=? AND length(CAST(text AS BLOB))+length(CAST(? AS BLOB))+1<=?"
+      ).bind(text,text,chat,text,MAX_TTS_TEXT_BYTES).run()
+      if(updated.meta.changes!==1){
+        await say(env,chat,'This script would exceed the 128 KiB bot safeguard. Send /tts_done to finish what you have, or /cancel to restart.')
+        return true
+      }
+      const row=(await env.MEMORY_DB.prepare(
+        'SELECT length(CAST(text AS BLOB)) AS bytes FROM qwen_clone_long_text WHERE chat_id=?'
+      ).bind(chat).all<{bytes:number}>()).results[0]
+      await say(env,chat,'Text added ('+(row?.bytes||0)+' UTF-8 bytes total). Send more text, or /tts_done to review and confirm MVSEP generation.')
+      return true
+    }
+    if(['target_text','custom_transcript'].includes(current.state)||
+       (current.state==='collect_text'&&cmd==='/tts_done')){
       let speechText=text
-      if(incoming){
-        try{speechText=await readScriptDocument(env,incoming)}
-        catch(e){
-          console.error('Qwen text input failed',e instanceof Error?e.name:'unknown')
-          await say(env,chat,'Cannot read your script. Use a UTF-8 .txt document no larger than 128 KiB. Your voice is still selected.');return true
-        }
-      }else if(cmd==='/clonetext'){
-        await say(env,chat,'Reply to a UTF-8 .txt file with /clonetext, or upload the file directly after selecting a voice.');return true
+      if(current.state==='collect_text'){
+        const row=(await env.MEMORY_DB.prepare(
+          'SELECT text FROM qwen_clone_long_text WHERE chat_id=?'
+        ).bind(chat).all<{text:string}>()).results[0]
+        speechText=row?.text.trim()||''
+      }else if(cmd==='/tts_done'){
+        await say(env,chat,'To build a longer script, send /tts_long first; otherwise just send your plain speech text.')
+        return true
       }
       const speechBytes=new TextEncoder().encode(speechText).byteLength
-      if(!speechText||speechBytes>MAX_TTS_TEXT_BYTES){
-        await say(env,chat,'Send speech text, or a UTF-8 .txt file up to 128 KiB. There is no fixed 1,000-character bot limit; MVSEP validates what its model can accept.');return true
+      if(!speechText || speechBytes>MAX_TTS_TEXT_BYTES){
+        await say(env,chat,'Send plain speech text, up to 4,096 characters per Telegram message. For longer text use /tts_long, send several text messages, then /tts_done. MVSEP determines what it can actually generate.')
+        return true
       }
       let fid=current.custom_file_id,ref=current.custom_ref_text,voiceName='Custom upload'
       if(current.slot&&current.slot>0){
@@ -267,7 +269,7 @@ export async function handleVoiceCallback(env:VoiceEnv,cb:VoiceCallback):Promise
       const selected=(await profiles(env.MEMORY_DB,chat)).find(v=>v.slot===slot)
       if(!selected)throw new Error('Voice slot not found')
       await setSession(env.MEMORY_DB,chat,'target_text',slot,null,null,current.lang)
-      await say(env,chat,'Selected: '+selected.name+'\nSend the text you want this voice to speak (Telegram up to 4,096 characters) or upload a UTF-8 .txt file (up to 128 KiB). You may reply to a .txt with /clonetext. MVSEP determines the actual limit. Language: '+current.lang)
+      await say(env,chat,'Selected: '+selected.name+'\nSend plain speech text (up to 4,096 characters per Telegram message). For longer scripts, send /tts_long, then multiple plain text messages, then /tts_done. No text files. MVSEP decides the actual limit. Language: '+current.lang)
     }else if(data==='qw:custom'){
       if(current?.state!=='select')throw new Error('Expired voice picker')
       await setSession(env.MEMORY_DB,chat,'custom_audio',null,null,null,current.lang)
