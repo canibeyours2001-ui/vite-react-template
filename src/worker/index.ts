@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { handleAudioTelegram, pollAudioJobs, mvsepStatus } from './audio-tools'
+import { handleAudioTelegram, pollAudioJobs, mvsepStatus, checkMvsepAccount } from './audio-tools'
 import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAssistantContext } from './voice-profiles'
 
 type AIClient = {
@@ -608,11 +608,12 @@ app.post('/telegram/webhook', async (c) => {
         await send(
           'Available bot commands:\n' +
           '/clone — choose one of five saved voices or upload custom\n' +
+          '/tts_status — check latest Qwen3-TTS generation\n' +
           '/voices — list your five slots\n' +
           '/savevoice 1 Name | exact transcript — reply to audio\n' +
           '/clonelang English — choose TTS language\n' +
           '/cancel — cancel voice selection\n' +
-          '/separate 40 — reply to audio for MVSEP separation\n' +
+          '/separate 26 — reply to audio for MVSEP separation\n' +
           '/sep_status — check separation progress\n' +
           '/video your prompt — WAN text-to-video\n' +
           '/video_status — check WAN generation\n' +
@@ -653,8 +654,9 @@ app.post('/telegram/webhook', async (c) => {
               '/voices — list stored voice slots.',
               '/savevoice N Label | exact reference transcript — reply to 3–15 second reference audio to save N from 1 to 5.',
               '/clonelang English — choose supported language (English, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian or Auto).',
+              '/tts_status — live status of the latest MVSEP Qwen voice generation.',
               '/cancel — exit the voice wizard.',
-              '/separate 40 — reply to an audio file for MVSEP source separation; /sep_status shows progress; /sep_help gives details.',
+              '/separate 26 — reply to an audio file for MVSEP source separation; /sep_status shows progress; /sep_help gives details.',
               '/video PROMPT — WAN text-to-video; /image2video — image-to-video; /video_status and /video_get JOB_ID retrieve results.',
               '/motion — reference-image and driving-video animation instructions; /motion_hq for high-quality experimental option; /motion_status for job state.',
               'Bot state JSON is current context (not a command). Voice cloning uses MVSEP model 120 through the MVSEP API key. No separate GPU provider is required. Check mvsep_qwen_enabled.',
@@ -890,6 +892,7 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'help',description:'Show all available commands'},
         {command:'ask',description:'Ask the AI for commands and guidance'},
         {command:'clone',description:'Pick a saved or custom voice'},
+        {command:'tts_status',description:'Check Qwen3-TTS generation status'},
         {command:'voices',description:'View your five saved voices'},
         {command:'savevoice',description:'Save reference voice to slot 1 to 5'},
         {command:'clonelang',description:'Set voice generation language'},
@@ -920,7 +923,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }
