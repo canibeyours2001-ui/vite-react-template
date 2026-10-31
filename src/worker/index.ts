@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { handleAudioTelegram, pollAudioJobs, mvsepStatus, checkMvsepAccount } from './audio-tools'
 import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAssistantContext } from './voice-profiles'
 import { isAllowedTelegramUser, handleAccessCommand, isAccessCommand } from './telegram-access'
+import { handleVoxTelegram, voxClaim, voxUpdate, voxComplete } from './vox-kaggle'
 
 type AIClient = {
   run: (
@@ -23,6 +24,7 @@ type Bindings = {
   MODAL_MOTION_API_BASE?: string
   MODAL_MOTION_API_KEY?: string
   MVSEP_API_TOKEN?: string
+  VOX_WORKER_KEY?: string
   AI: AIClient
   MEMORY_DB: {
     prepare: (query: string) => {
@@ -35,6 +37,10 @@ type Bindings = {
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
+// Batch job endpoints need an independent secret and must be reachable by the trusted OCI runner.
+app.post('/api/vox/claim', (c)=>voxClaim(c.env,c.req.raw))
+app.post('/api/vox/update', (c)=>voxUpdate(c.env,c.req.raw))
+app.post('/api/vox/complete', (c)=>voxComplete(c.env,c.req.raw))
 
 // Keep the original API working
 app.get('/api/', (c) => {
@@ -271,6 +277,7 @@ app.post('/telegram/webhook', async (c) => {
     try {
       if (isAccessCommand(text) && await handleAccessCommand(c.env,sender,text,send)) return
       if (!allowed) return
+      if (await handleVoxTelegram(c.env,key,msg.message_id,text,send)) return
       if (await handleVoiceMessage(c.env,msg,key,text)) return
       if (await handleAudioTelegram(c.env, msg, key, text, send)) return
       if (text.toLowerCase() === '/forget' || text.toLowerCase() === '/reset') {
@@ -625,6 +632,8 @@ app.post('/telegram/webhook', async (c) => {
           '/allow USER_ID — owner: grant access\n' +
           '/deny USER_ID — owner: revoke access\n' +
           '/tts_status — check latest Qwen3-TTS generation\n' +
+          '/vox TEXT — queue Kaggle VoxCPM2 speech\n' +
+          '/vox_status — latest Kaggle speech job\n' +
           '/voices — list your five slots\n' +
           '/savevoice 1 Narrator — reply to audio; no transcript required\n' +
           '/clonelang English — choose TTS language\n' +
@@ -669,6 +678,7 @@ app.post('/telegram/webhook', async (c) => {
               '/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.',
               '/ask QUESTION — ask this AI for help; normal messages also reach the AI.',
               '/clone — interactive Qwen3-TTS voice cloning via MVSEP: choose one of five saved slots or a custom voice, then text, then confirm.',
+              '/vox TEXT — queue Burmese VoxCPM2 synthesis on a private Kaggle T4 GPU worker; /vox_status and /vox_help for status/help. Only claim it runs once credentials and the dispatcher are installed.',
               '/voices — list stored voice slots.',
               '/savevoice N Label — reply to a 3–15 second reference recording; no transcript required.',
               '/clonelang English — choose supported language (English, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian or Auto).',
@@ -910,6 +920,8 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'help',description:'Show all available commands'},
         {command:'ask',description:'Ask the AI for commands and guidance'},
         {command:'clone',description:'Pick a saved or custom voice'},
+        {command:'vox',description:'Kaggle VoxCPM2 Burmese TTS'},
+        {command:'vox_status',description:'Check Kaggle VoxCPM2 job'},
         {command:'tts_status',description:'Check Qwen3-TTS generation status'},
         {command:'voices',description:'View your five saved voices'},
         {command:'savevoice',description:'Save reference voice to slot 1 to 5'},
