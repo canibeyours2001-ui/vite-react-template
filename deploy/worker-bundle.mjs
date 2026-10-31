@@ -2758,7 +2758,7 @@ var Hono = class extends Hono$1 {
     });
   }
 };
-const BASE = "https://sg.mvsep.com/api";
+const BASE$1 = "https://sg.mvsep.com/api";
 const LIMIT$1 = 12 * 1024 * 1024;
 const MODEL = 26;
 function hashOk(hash) {
@@ -2771,7 +2771,7 @@ async function parseJson(response) {
 }
 async function mvsepStatus(hash) {
   if (!hashOk(hash)) throw new Error("Invalid separation hash");
-  const r = await fetch(BASE + "/separation/get?hash=" + encodeURIComponent(hash), {
+  const r = await fetch(BASE$1 + "/separation/get?hash=" + encodeURIComponent(hash), {
     signal: AbortSignal.timeout(18e3)
   });
   if (!r.ok) throw new Error("MVSEP status HTTP " + r.status);
@@ -2852,7 +2852,7 @@ async function createSeparation(env2, blob, model, name) {
   f.set("sep_type", String(model));
   f.set("output_format", "0");
   f.set("audiofile", blob, name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 100));
-  const r = await fetch(BASE + "/separation/create", {
+  const r = await fetch(BASE$1 + "/separation/create", {
     method: "POST",
     body: f,
     signal: AbortSignal.timeout(55e3)
@@ -2967,7 +2967,7 @@ async function checkMvsepAccount(env2) {
   if (rows.results[0] && rows.results[0].checked_at > Math.floor(Date.now() / 1e3) - 21600) return;
   try {
     const response = await fetch(
-      BASE + "/app/user?api_token=" + encodeURIComponent(env2.MVSEP_API_TOKEN),
+      BASE$1 + "/app/user?api_token=" + encodeURIComponent(env2.MVSEP_API_TOKEN),
       { signal: AbortSignal.timeout(15e3), headers: { "cache-control": "no-store" } }
     );
     const payload = await response.json();
@@ -3070,7 +3070,7 @@ function usableFile(file) {
   const ext = (file.file_name || "").toLowerCase();
   return !file.mime_type || file.mime_type.startsWith("audio/") || /\.(wav|mp3|flac|ogg|oga|m4a)$/i.test(ext);
 }
-async function tg(env2, method, data) {
+async function tg$1(env2, method, data) {
   const resp = await fetch("https://api.telegram.org/bot" + env2.TELEGRAM_BOT_TOKEN + "/" + method, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -3082,13 +3082,13 @@ async function tg(env2, method, data) {
   return json.result || {};
 }
 async function say(env2, chat, text, keyboard) {
-  await tg(env2, "sendMessage", {
+  await tg$1(env2, "sendMessage", {
     chat_id: chat,
     text: text.slice(0, 3900),
     ...keyboard ? { reply_markup: keyboard } : {}
   });
 }
-async function init(db) {
+async function init$1(db) {
   await db.prepare("CREATE TABLE IF NOT EXISTS qwen_voice_profiles (chat_id TEXT NOT NULL, slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 5), name TEXT NOT NULL, telegram_file_id TEXT NOT NULL, ref_text TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT (unixepoch()), PRIMARY KEY (chat_id,slot))").bind().run();
   await db.prepare("CREATE TABLE IF NOT EXISTS mvsep_tts_tracking (job_id INTEGER PRIMARY KEY, hash TEXT UNIQUE NOT NULL, status_message_id INTEGER, last_label TEXT NOT NULL DEFAULT '', checked_at INTEGER NOT NULL DEFAULT 0)").bind().run();
   await db.prepare("CREATE TABLE IF NOT EXISTS qwen_clone_sessions (chat_id TEXT PRIMARY KEY, state TEXT NOT NULL, slot INTEGER, custom_file_id TEXT, custom_ref_text TEXT, lang TEXT NOT NULL DEFAULT 'English', updated_at INTEGER NOT NULL DEFAULT (unixepoch()))").bind().run();
@@ -3135,7 +3135,7 @@ async function handleVoiceMessage(env2, msg, chat, content) {
   let current = null;
   if (!recognized && !inboundFile(msg) && !content.trim()) return false;
   try {
-    await init(env2.MEMORY_DB);
+    await init$1(env2.MEMORY_DB);
     current = await session(env2.MEMORY_DB, chat);
     if (!recognized && !current) return false;
     if (cmd === "/clone_help") {
@@ -3266,7 +3266,7 @@ async function handleVoiceCallback(env2, cb) {
   const chat = String(cb.message?.chat.id || "");
   try {
     if (!cb.data?.startsWith("qw:") || !await isAllowedTelegramUser(env2, chat, String(cb.from.id), cb.message?.chat.type)) return;
-    await init(env2.MEMORY_DB);
+    await init$1(env2.MEMORY_DB);
     const data = cb.data;
     const current = await session(env2.MEMORY_DB, chat);
     if (data === "qw:cancel") {
@@ -3304,7 +3304,7 @@ async function handleVoiceCallback(env2, cb) {
     if (await isAllowedTelegramUser(env2, chat, String(cb.from.id), cb.message?.chat.type))
       await say(env2, chat, "That selection expired or failed. Use /clone to start again.").catch(() => void 0);
   } finally {
-    await tg(env2, "answerCallbackQuery", { callback_query_id: cb.id }).catch(() => void 0);
+    await tg$1(env2, "answerCallbackQuery", { callback_query_id: cb.id }).catch(() => void 0);
   }
 }
 async function download(env2, id) {
@@ -3392,7 +3392,7 @@ async function mvsepCreate(env2, job, blob) {
 async function statusMessage(env2, chat, id, text) {
   if (id > 0) {
     try {
-      await tg(env2, "editMessageText", {
+      await tg$1(env2, "editMessageText", {
         chat_id: chat,
         message_id: id,
         text: text.slice(0, 3900),
@@ -3407,7 +3407,7 @@ async function statusMessage(env2, chat, id, text) {
 }
 async function processQwenVoiceJobs(env2) {
   if (!apiConfigured(env2)) return;
-  await init(env2.MEMORY_DB);
+  await init$1(env2.MEMORY_DB);
   const rows = await env2.MEMORY_DB.prepare(
     "SELECT j.id,j.chat_id,t.hash,t.status_message_id,t.last_label FROM qwen_clone_jobs j JOIN mvsep_tts_tracking t ON t.job_id=j.id WHERE j.status IN ('waiting','processing','distributing','merging') AND t.checked_at < unixepoch()-35 ORDER BY t.checked_at ASC LIMIT 4"
   ).bind().all();
@@ -3432,7 +3432,7 @@ async function processQwenVoiceJobs(env2) {
         try {
           if (files.length) {
             const url = files[0];
-            const sent = await tg(env2, "sendAudio", {
+            const sent = await tg$1(env2, "sendAudio", {
               chat_id: active.chat_id,
               audio: url,
               caption: "Qwen3-TTS generated audio #" + active.id
@@ -3467,7 +3467,7 @@ async function processQwenVoiceJobs(env2) {
   if (claimed.meta.changes !== 1) return;
   let id = 0;
   try {
-    const result = await tg(env2, "sendMessage", { chat_id: job.chat_id, text: "Qwen3-TTS #" + job.id + ": uploading reference to MVSEP..." });
+    const result = await tg$1(env2, "sendMessage", { chat_id: job.chat_id, text: "Qwen3-TTS #" + job.id + ": uploading reference to MVSEP..." });
     id = Number(result.message_id || 0);
     const blob = await download(env2, job.telegram_file_id);
     const hash = await mvsepCreate(env2, job, blob);
@@ -3488,7 +3488,7 @@ async function processQwenVoiceJobs(env2) {
 }
 async function voiceAssistantContext(env2, chat) {
   try {
-    await init(env2.MEMORY_DB);
+    await init$1(env2.MEMORY_DB);
     const [data, active, job] = await Promise.all([
       profiles(env2.MEMORY_DB, chat),
       session(env2.MEMORY_DB, chat),
@@ -3532,6 +3532,341 @@ async function voiceAssistantContext(env2, chat) {
   } catch (e) {
     console.error("Qwen assistant context error:", e instanceof Error ? e.name : "unknown");
     return '{"status":"voice database context unavailable"}';
+  }
+}
+const OWNER = "cyawzin";
+const SLUG = "voxcpm2-telegram-worker";
+const BASE = "https://api.kaggle.com/v1/kernels/";
+const KERNEL = OWNER + "/" + SLUG;
+async function init(db) {
+  await db.prepare(
+    "CREATE TABLE IF NOT EXISTS vox_kaggle_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT NOT NULL,message_id INTEGER NOT NULL,text TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',version_number INTEGER,error_message TEXT,created_at INTEGER NOT NULL DEFAULT (unixepoch()),updated_at INTEGER NOT NULL DEFAULT (unixepoch()),UNIQUE(chat_id,message_id))"
+  ).bind().run();
+  await db.prepare(
+    "CREATE TABLE IF NOT EXISTS vox_kaggle_health (id INTEGER PRIMARY KEY CHECK(id=1),checked_at INTEGER NOT NULL DEFAULT 0,ok INTEGER NOT NULL DEFAULT 0,http_status INTEGER NOT NULL DEFAULT 0)"
+  ).bind().run();
+}
+async function tg(env2, method, fields) {
+  const r = await fetch("https://api.telegram.org/bot" + env2.TELEGRAM_BOT_TOKEN + "/" + method, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(fields),
+    signal: AbortSignal.timeout(18e3)
+  });
+  const d = await r.json();
+  if (!r.ok || !d.ok) throw Error("Telegram " + method + " failed");
+  return d.result || {};
+}
+async function tell(env2, chat, message) {
+  return tg(env2, "sendMessage", { chat_id: chat, text: message.slice(0, 3900) });
+}
+async function kaggle(env2, action, body, timeoutMs = 25e3) {
+  if (!env2.KAGGLE_API_TOKEN) throw Error("Kaggle API token is not configured");
+  if (!["list", "push", "status", "output"].includes(action)) throw Error("Unknown Kaggle action");
+  const query = new URLSearchParams();
+  for (const key of ["user", "pageSize", "userName", "kernelSlug", "versionLabel"]) {
+    const value = body[key];
+    if (typeof value === "string" || typeof value === "number") query.set(key, String(value));
+  }
+  const isPush = action === "push";
+  const url = BASE + action + (isPush ? "" : "?" + query.toString());
+  const response = await fetch(url, {
+    method: isPush ? "POST" : "GET",
+    headers: {
+      Authorization: "Bearer " + env2.KAGGLE_API_TOKEN,
+      Accept: "application/json",
+      ...isPush ? { "Content-Type": "application/json" } : {}
+    },
+    ...isPush ? { body: JSON.stringify(body) } : {},
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || typeof data.code === "number" && data.code >= 400 || isPush && Boolean(data.error)) {
+    throw Error("Kaggle " + action + " HTTP " + response.status);
+  }
+  return data;
+}
+async function checkKaggleConnection(env2) {
+  if (!env2.MEMORY_DB) return;
+  await init(env2.MEMORY_DB);
+  await env2.MEMORY_DB.prepare(
+    "CREATE TABLE IF NOT EXISTS vox_kaggle_probe (id INTEGER PRIMARY KEY CHECK(id=1),checked_at INTEGER NOT NULL,token_kind TEXT NOT NULL,primary_status INTEGER NOT NULL,secondary_status INTEGER NOT NULL)"
+  ).bind().run();
+  const row = await env2.MEMORY_DB.prepare("SELECT checked_at,ok FROM vox_kaggle_health WHERE id=1").bind().all();
+  const last = row.results[0];
+  const age = last?.ok === 1 ? 21600 : 60;
+  if (last?.checked_at && last.checked_at > Math.floor(Date.now() / 1e3) - age) return;
+  const token = env2.KAGGLE_API_TOKEN || "";
+  const tokenKind = token.startsWith("KGAT_") ? "personal-token" : token.startsWith("{") ? "legacy-json" : token.length ? "unknown-format" : "missing";
+  let primary = 0, secondary = 0, ok = 0;
+  if (token) {
+    for (const [index2, url] of [
+      "https://api.kaggle.com/v1/kernels/list",
+      "https://www.kaggle.com/api/v1/kernels/list"
+    ].entries()) {
+      try {
+        const response = await fetch(url + "?user=" + OWNER + "&pageSize=1", {
+          method: "GET",
+          headers: { Authorization: "Bearer " + token, Accept: "application/json" },
+          signal: AbortSignal.timeout(12e3)
+        });
+        const body = await response.json().catch(() => ({}));
+        const status = response.status;
+        if (index2 === 0) primary = status;
+        else secondary = status;
+        if (response.ok && !body.error && !(typeof body.code === "number" && body.code >= 400)) {
+          ok = 1;
+          break;
+        }
+      } catch (e) {
+        console.error("Kaggle probe network failure", index2, e instanceof Error ? e.name : "unknown");
+      }
+    }
+  }
+  await env2.MEMORY_DB.prepare(
+    "INSERT INTO vox_kaggle_health(id,checked_at,ok,http_status) VALUES(1,unixepoch(),?,?) ON CONFLICT(id) DO UPDATE SET checked_at=unixepoch(),ok=excluded.ok,http_status=excluded.http_status"
+  ).bind(ok, primary || secondary).run();
+  await env2.MEMORY_DB.prepare(
+    "INSERT INTO vox_kaggle_probe(id,checked_at,token_kind,primary_status,secondary_status) VALUES(1,unixepoch(),?,?,?) ON CONFLICT(id) DO UPDATE SET checked_at=unixepoch(),token_kind=excluded.token_kind,primary_status=excluded.primary_status,secondary_status=excluded.secondary_status"
+  ).bind(tokenKind, primary, secondary).run();
+}
+async function probeKaggleReadMethods(env2) {
+  if (!env2.KAGGLE_API_TOKEN || !env2.MEMORY_DB) return;
+  await env2.MEMORY_DB.prepare(
+    "CREATE TABLE IF NOT EXISTS vox_kaggle_rpc_probe (id INTEGER PRIMARY KEY CHECK(id=1),checked_at INTEGER NOT NULL,get_status INTEGER NOT NULL,post_status INTEGER NOT NULL,get_output INTEGER NOT NULL,post_output INTEGER NOT NULL,status_shape TEXT NOT NULL,output_shape TEXT NOT NULL)"
+  ).bind().run();
+  const existing = await env2.MEMORY_DB.prepare(
+    "SELECT checked_at FROM vox_kaggle_rpc_probe WHERE id=1"
+  ).bind().all();
+  if (existing.results[0]) return;
+  const args = { userName: OWNER, kernelSlug: "voxcpm2-full-working" };
+  const shape = (body) => Object.keys(body || {}).filter(
+    (x) => ["status", "failureMessage", "files", "nextPageToken", "log", "url", "code", "message", "error"].includes(x)
+  ).join(",");
+  const probe = async (action, method) => {
+    const base = "https://api.kaggle.com/v1/kernels/" + action;
+    const query = "?userName=" + OWNER + "&kernelSlug=voxcpm2-full-working";
+    try {
+      const r = await fetch(base + (method === "GET" ? query : ""), {
+        method,
+        headers: {
+          Authorization: "Bearer " + env2.KAGGLE_API_TOKEN,
+          Accept: "application/json",
+          ...method === "POST" ? { "Content-Type": "application/json" } : {}
+        },
+        ...method === "POST" ? { body: JSON.stringify(args) } : {},
+        redirect: "manual",
+        signal: AbortSignal.timeout(12e3)
+      });
+      let data = {};
+      if ((r.headers.get("content-type") || "").includes("json"))
+        data = await r.json().catch(() => ({}));
+      else await r.body?.cancel();
+      return { status: r.status, shape: shape(data) };
+    } catch {
+      return { status: 0, shape: "network-failure" };
+    }
+  };
+  const [a, b, c, d] = await Promise.all([
+    probe("status", "GET"),
+    probe("status", "POST"),
+    probe("output", "GET"),
+    probe("output", "POST")
+  ]);
+  await env2.MEMORY_DB.prepare(
+    "INSERT INTO vox_kaggle_rpc_probe(id,checked_at,get_status,post_status,get_output,post_output,status_shape,output_shape) VALUES(1,unixepoch(),?,?,?,?,?,?)"
+  ).bind(a.status, b.status, c.status, d.status, a.shape || b.shape, c.shape || d.shape).run();
+}
+async function verified(env2) {
+  if (!env2.KAGGLE_API_TOKEN) return false;
+  await init(env2.MEMORY_DB);
+  const r = await env2.MEMORY_DB.prepare("SELECT ok FROM vox_kaggle_health WHERE id=1").bind().all();
+  return r.results[0]?.ok === 1;
+}
+async function handleVoxTelegram(env2, chat, messageId, text, send2) {
+  const cmd = text.trim().split(/\s+/, 1)[0]?.split("@")[0].toLowerCase();
+  if (!["/vox", "/vox_status", "/vox_help"].includes(cmd)) return false;
+  try {
+    await init(env2.MEMORY_DB);
+    if (cmd === "/vox_help") {
+      await send2("Kaggle VoxCPM2 TTS: /vox YOUR TEXT\nCheck status: /vox_status\nEach job runs in a private Kaggle notebook version (T4 GPU). Maximum 450 characters.");
+      return true;
+    }
+    if (cmd === "/vox_status") {
+      const r2 = await env2.MEMORY_DB.prepare("SELECT id,status,error_message FROM vox_kaggle_jobs WHERE chat_id=? ORDER BY id DESC LIMIT 1").bind(chat).all();
+      const job = r2.results[0];
+      await send2(job ? "VoxCPM2 job #" + job.id + ": " + job.status + (job.error_message ? "\n" + job.error_message : "") : "No VoxCPM2 job yet. Use /vox YOUR TEXT.");
+      return true;
+    }
+    const phrase = text.replace(/^\/vox(?:@[A-Za-z0-9_]+)?(?:\s+|$)/i, "").trim();
+    if (!phrase || phrase.length > 450) {
+      await send2("Usage: /vox YOUR TEXT (1–450 characters)\nExample: /vox မင်္ဂလာပါ။");
+      return true;
+    }
+    if (!await verified(env2)) {
+      await send2("Kaggle API is not verified yet. No GPU job started. Check /vox_status later.");
+      return true;
+    }
+    const active = await env2.MEMORY_DB.prepare(
+      "SELECT COUNT(*) AS cnt FROM vox_kaggle_jobs WHERE chat_id=? AND status IN ('queued','submitting','submitted','running','delivering','submit-uncertain')"
+    ).bind(chat).all();
+    if ((active.results[0]?.cnt || 0) > 1) {
+      await send2("You already have two unfinished VoxCPM2 jobs. Check /vox_status.");
+      return true;
+    }
+    await env2.MEMORY_DB.prepare(
+      "INSERT OR IGNORE INTO vox_kaggle_jobs(chat_id,message_id,text) VALUES(?,?,?)"
+    ).bind(chat, messageId, phrase).run();
+    const r = await env2.MEMORY_DB.prepare("SELECT id FROM vox_kaggle_jobs WHERE chat_id=? AND message_id=?").bind(chat, messageId).all();
+    await send2("Kaggle VoxCPM2 job #" + r.results[0]?.id + " queued. GPU starts automatically when available. Use /vox_status.");
+    return true;
+  } catch (e) {
+    console.error("Vox command failed", e instanceof Error ? e.name : "unknown");
+    await send2("VoxCPM2 request failed. No GPU inference was started.").catch(() => void 0);
+    return true;
+  }
+}
+function pythonFor(text) {
+  const safe = JSON.stringify(JSON.stringify({ text }));
+  return [
+    "import subprocess, json, os",
+    "subprocess.run(['python','-m','pip','install','-q','voxcpm>=2.0.3','soundfile','huggingface_hub'],check=True)",
+    "from pathlib import Path",
+    "import soundfile as sf",
+    "from huggingface_hub import snapshot_download",
+    "from voxcpm import VoxCPM",
+    "TASK=json.loads(" + safe + ")",
+    "MODEL_DIR='/kaggle/working/VoxCPM2'",
+    "if not Path(MODEL_DIR,'model.safetensors').exists():",
+    "    snapshot_download(repo_id='openbmb/VoxCPM2',local_dir=MODEL_DIR)",
+    "model=VoxCPM.from_pretrained(MODEL_DIR,load_denoiser=False,optimize=False,device='cuda')",
+    "wav=model.generate(text=TASK['text'],cfg_value=2.0,inference_timesteps=10,normalize=False)",
+    "sf.write('/kaggle/working/vox_generated.wav',wav,model.tts_model.sample_rate,subtype='PCM_16')",
+    "print('VOX_GENERATED_SUCCESS')"
+  ].join("\n");
+}
+function matchOutput(data) {
+  const files = data.files || data.outputFiles || [];
+  if (!Array.isArray(files)) return null;
+  for (const v of files) {
+    if (!v || typeof v !== "object") continue;
+    const f = v;
+    const name = String(f.fileName || f.file_name || "");
+    const link = f.url;
+    if (!name.endsWith("vox_generated.wav") || typeof link !== "string") continue;
+    try {
+      const u = new URL(link);
+      if (u.protocol === "https:" && (u.hostname === "storage.googleapis.com" || u.hostname.endsWith(".googleapis.com") || u.hostname.endsWith(".kaggleusercontent.com") || u.hostname === "www.kaggle.com" || u.hostname === "api.kaggle.com")) return u.href;
+    } catch {
+    }
+  }
+  return null;
+}
+async function deliver(env2, job, url) {
+  const r = await fetch(url, { signal: AbortSignal.timeout(6e4) });
+  if (!r.ok || Number(r.headers.get("content-length") || 0) > 20 * 1024 * 1024)
+    throw Error("Kaggle result download not available");
+  const wav = await r.blob();
+  if (wav.size < 44 || wav.size > 20 * 1024 * 1024) throw Error("Kaggle audio too large or missing");
+  const header = String.fromCharCode(...new Uint8Array(await wav.slice(0, 12).arrayBuffer()));
+  if (!header.startsWith("RIFF") || header.slice(8, 12) !== "WAVE") throw Error("Kaggle result not WAV");
+  const data = new FormData();
+  data.set("chat_id", job.chat_id);
+  data.set("caption", "Kaggle VoxCPM2 job #" + job.id);
+  data.set("audio", wav, "vox-" + job.id + ".wav");
+  const out = await fetch("https://api.telegram.org/bot" + env2.TELEGRAM_BOT_TOKEN + "/sendAudio", {
+    method: "POST",
+    body: data,
+    signal: AbortSignal.timeout(6e4)
+  });
+  const j = await out.json();
+  if (!out.ok || !j.ok) throw Error("Telegram audio delivery failed");
+}
+async function pollVoxKaggle(env2) {
+  if (!env2.MEMORY_DB || !env2.KAGGLE_API_TOKEN) return;
+  await init(env2.MEMORY_DB);
+  const enabled = await verified(env2);
+  if (!enabled) return;
+  const executing = await env2.MEMORY_DB.prepare(
+    "SELECT id,chat_id,text,status,version_number,error_message FROM vox_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain') ORDER BY id LIMIT 1"
+  ).bind().all();
+  const job = executing.results[0];
+  if (job) {
+    if (["submitting", "submit-uncertain", "delivering"].includes(job.status)) return;
+    if (!job.version_number) return;
+    try {
+      const version2 = "v" + job.version_number;
+      const state = await kaggle(env2, "status", { userName: OWNER, kernelSlug: SLUG, versionLabel: version2 });
+      const raw = String(state.status || state.state || "").toUpperCase();
+      if (raw.includes("ERROR") || raw.includes("FAIL") || raw.includes("CANCEL")) {
+        await env2.MEMORY_DB.prepare(
+          "UPDATE vox_kaggle_jobs SET status='failed',error_message='Kaggle execution failed',updated_at=unixepoch() WHERE id=?"
+        ).bind(job.id).run();
+        await tell(env2, job.chat_id, "Kaggle VoxCPM2 job #" + job.id + " failed. See Kaggle notebook logs.").catch(() => void 0);
+        return;
+      }
+      if (raw.includes("COMPLETE") || raw.includes("SUCCESS")) {
+        const outputs = await kaggle(env2, "output", { userName: OWNER, kernelSlug: SLUG, versionLabel: version2 });
+        const url = matchOutput(outputs);
+        if (!url) throw Error("Completed Kaggle run has no WAV download URL");
+        const claim = await env2.MEMORY_DB.prepare(
+          "UPDATE vox_kaggle_jobs SET status='delivering',updated_at=unixepoch() WHERE id=? AND status IN ('submitted','running')"
+        ).bind(job.id).run();
+        if (claim.meta.changes !== 1) return;
+        try {
+          await deliver(env2, job, url);
+          await env2.MEMORY_DB.prepare("UPDATE vox_kaggle_jobs SET status='done',updated_at=unixepoch() WHERE id=?").bind(job.id).run();
+        } catch (e) {
+          console.error("Vox delivery uncertain", e instanceof Error ? e.message.slice(0, 120) : "unknown");
+          await env2.MEMORY_DB.prepare("UPDATE vox_kaggle_jobs SET status='delivery-uncertain',updated_at=unixepoch() WHERE id=?").bind(job.id).run();
+          await tell(env2, job.chat_id, "VoxCPM2 audio is generated but delivery needs review. Kaggle: https://www.kaggle.com/code/" + KERNEL).catch(() => void 0);
+        }
+        return;
+      }
+      await env2.MEMORY_DB.prepare("UPDATE vox_kaggle_jobs SET status='running',updated_at=unixepoch() WHERE id=? AND status='submitted'").bind(job.id).run();
+    } catch (e) {
+      console.error("Vox status check failed", e instanceof Error ? e.message.slice(0, 120) : "unknown");
+    }
+    return;
+  }
+  const claimed = await env2.MEMORY_DB.prepare(
+    "UPDATE vox_kaggle_jobs SET status='submitting',updated_at=unixepoch() WHERE id=(SELECT id FROM vox_kaggle_jobs WHERE status='queued' ORDER BY id LIMIT 1)AND NOT EXISTS (SELECT 1 FROM vox_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain'))"
+  ).bind().run();
+  if (!claimed.meta.changes) return;
+  const candidate = await env2.MEMORY_DB.prepare(
+    "SELECT id,chat_id,text,status,version_number,error_message FROM vox_kaggle_jobs WHERE status='submitting' ORDER BY updated_at DESC,id DESC LIMIT 1"
+  ).bind().all();
+  const next = candidate.results[0];
+  if (!next) return;
+  try {
+    const result = await kaggle(env2, "push", {
+      slug: KERNEL,
+      newTitle: "VoxCPM2 Telegram Worker",
+      text: pythonFor(next.text),
+      language: "python",
+      kernelType: "script",
+      isPrivate: true,
+      enableGpu: true,
+      enableInternet: true,
+      machineShape: "NvidiaTeslaT4",
+      sessionTimeoutSeconds: 3600,
+      datasetDataSources: [],
+      competitionDataSources: [],
+      kernelDataSources: [],
+      modelDataSources: []
+    }, 45e3);
+    const version2 = Number(result.versionNumber || result.version_number || 0);
+    if (!Number.isSafeInteger(version2) || version2 < 1 || result.error) throw Error("Kaggle push did not return a version");
+    await env2.MEMORY_DB.prepare(
+      "UPDATE vox_kaggle_jobs SET status='submitted',version_number=?,updated_at=unixepoch() WHERE id=?"
+    ).bind(version2, next.id).run();
+    await tell(env2, next.chat_id, "VoxCPM2 job #" + next.id + " submitted to Kaggle GPU (version " + version2 + "). Checking status every minute.").catch(() => void 0);
+  } catch (e) {
+    console.error("Kaggle Vox submission uncertain", e instanceof Error ? e.message.slice(0, 120) : "unknown");
+    await env2.MEMORY_DB.prepare(
+      "UPDATE vox_kaggle_jobs SET status='submit-uncertain',error_message='Submission could not be confirmed; do not retry automatically',updated_at=unixepoch() WHERE id=?"
+    ).bind(next.id).run();
+    await tell(env2, next.chat_id, "VoxCPM2 job #" + next.id + " submission could not be confirmed. Check Kaggle notebook history; no automatic retry to avoid GPU duplication.").catch(() => void 0);
   }
 }
 const app = new Hono();
@@ -3710,6 +4045,7 @@ app.post("/telegram/webhook", async (c) => {
     try {
       if (isAccessCommand(text) && await handleAccessCommand(c.env, sender, text, send2)) return;
       if (!allowed) return;
+      if (await handleVoxTelegram(c.env, key, msg.message_id, text, send2)) return;
       if (await handleVoiceMessage(c.env, msg, key, text)) return;
       if (await handleAudioTelegram(c.env, msg, key, text, send2)) return;
       if (text.toLowerCase() === "/forget" || text.toLowerCase() === "/reset") {
@@ -4040,7 +4376,7 @@ app.post("/telegram/webhook", async (c) => {
       }
       if (/^\/(?:help|commands)(?:@\w+)?$/i.test(text)) {
         await send2(
-          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/whoami — show your Telegram user ID\n/allowed — owner: list authorized users\n/allow USER_ID — owner: grant access\n/deny USER_ID — owner: revoke access\n/tts_status — check latest Qwen3-TTS generation\n/voices — list your five slots\n/savevoice 1 Narrator — reply to audio; no transcript required\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
+          "Available bot commands:\n/clone — choose one of five saved voices or upload custom\n/whoami — show your Telegram user ID\n/allowed — owner: list authorized users\n/allow USER_ID — owner: grant access\n/deny USER_ID — owner: revoke access\n/tts_status — check latest Qwen3-TTS generation\n/vox TEXT — Kaggle VoxCPM2 Burmese speech\n/vox_status — Kaggle VoxCPM2 job status\n/voices — list your five slots\n/savevoice 1 Narrator — reply to audio; no transcript required\n/clonelang English — choose TTS language\n/cancel — cancel voice selection\n/separate 26 — reply to audio for MVSEP separation\n/sep_status — check separation progress\n/video your prompt — WAN text-to-video\n/video_status — check WAN generation\n/motion — WAN animation instructions\n/motion_status — check animation progress\n/ask your question — ask AI for step-by-step instructions\n\nYou can also chat normally with the AI. Voice cloning and voice design use the existing MVSEP API token; no separate GPU setup required."
         );
         return;
       }
@@ -4065,6 +4401,7 @@ app.post("/telegram/webhook", async (c) => {
               "You are the helpful AI guide for this Telegram bot. Reply in English and use the last 20 stored chat messages to understand the conversation. Give exact Telegram commands and clear, short examples.",
               "Available commands (do not invent commands):",
               "/help or /commands — show the command menu.",
+              "/vox TEXT — request VoxCPM2 Burmese speech using a private Kaggle GPU batch job, with /vox_status for status; no OCI needed.",
               "/whoami — show your Telegram numeric user ID.",
               "/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.",
               "/ask QUESTION — ask this AI for help; normal messages also reach the AI.",
@@ -4269,6 +4606,8 @@ async function registerTelegramWebhook(env2) {
         { command: "help", description: "Show all available commands" },
         { command: "ask", description: "Ask the AI for commands and guidance" },
         { command: "clone", description: "Pick a saved or custom voice" },
+        { command: "vox", description: "Kaggle VoxCPM2 Burmese speech" },
+        { command: "vox_status", description: "Check VoxCPM2 job status" },
         { command: "tts_status", description: "Check Qwen3-TTS generation status" },
         { command: "voices", description: "View your five saved voices" },
         { command: "savevoice", description: "Save reference voice to slot 1 to 5" },
@@ -4301,7 +4640,7 @@ const index = {
     } catch (error) {
       console.error("Telegram webhook registration check failed:", error instanceof Error ? error.name : "unknown");
     }
-    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2)]);
+    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2), checkKaggleConnection(env2), pollVoxKaggle(env2), probeKaggleReadMethods(env2)]);
     for (const r of results) {
       if (r.status === "rejected") console.error("Scheduled processing failed", String(r.reason).slice(0, 160));
     }
