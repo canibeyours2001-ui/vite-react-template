@@ -1,6 +1,6 @@
 # Telegram → Cloudflare → private Kaggle pyVideoTrans video dubbing
 
-**Status: staged / compatibility testing. `/dub` is intentionally disabled until the Kaggle Python 3.10 runtime succeeds.** The existing VoxCPM2 text-only API, MVSEP, WAN and Telegram allowlist are not modified.
+**Status: staged / compatibility testing. `/dub` is intentionally disabled (private D1 `pyvt_config.enabled=0`) until Kaggle Python 3.10 and video runtime tests succeed.** The existing VoxCPM2 text-only API, MVSEP, WAN and Telegram allowlist are not modified.
 
 ## Engines
 - `edge`: Microsoft Edge TTS, existing pyVideoTrans provider ID **0**. Example Burmese female voice: `my-MM-NilarNeural` (male: `my-MM-ThihaNeural`). Edge speech generation itself is CPU/network, but transcription can still need a GPU.
@@ -25,7 +25,7 @@ An independent private Kaggle kernel `cyawzin/pyvideotrans-telegram-dub` receive
 
 Kaggle script downloads the video from signed URL, clones pinned pyVideoTrans main source, provisions Python 3.10 via `uv` and installs the declared dependencies, and launches `tools/kaggle_video_dub_job.py` with the selected Edge/Vox provider.
 
-**Important:** pyVideoTrans `uv sync` can be heavyweight and is not yet proven on Kaggle's current environment. Do not flip the `READY=false` source gate before a full CPU compatibility test and at least one real dubbed MP4 smoke test. This avoids burning GPU quota on predictable dependency errors.
+**Important:** pyVideoTrans `uv sync` can be heavyweight and is not yet proven on Kaggle's current environment. Do not enable `pyvt_config` before a full CPU compatibility test and one controlled MP4 end-to-end test. This avoids burning GPU quota on predictable dependency errors.
 
 ## Safe preflight
 
@@ -42,3 +42,7 @@ The cron checks `pyvt_preflight`, submits a private CPU kernel, installs Python 
 - Production bot remains `vite-react-template` with the original bindings kept intact.
 
 References: https://core.telegram.org/bots/api and https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernels.md.
+
+### Private activation switch
+
+The Worker creates `pyvt_config` only when a `/dub` request or poll needs it. If no row exists, video GPU submissions are disabled. After CPU preflight and a controlled successful video integration test, the administrator can deliberately enable `pyvt_config.enabled=1` using Cloudflare D1 (never via Telegram). This keeps existing users from accidentally consuming GPU quota on untested video builds.
