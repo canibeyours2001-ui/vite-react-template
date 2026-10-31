@@ -17,7 +17,7 @@ Official reference: https://mvsep.com/en/full_api
 
 1. Send a clear 3–15 sec reference audio/voice recording to your authorized Telegram bot.
 2. Reply directly to that recording using:
-   `/savevoice 1 Narrator | exact words spoken in the recording`
+   `/savevoice 1 Narrator | words spoken in the recording (optional)`
 3. Repeat with slots 1, 2, 3, 4, and 5 and any short labels you choose.
 4. Run `/voices` to see the saved names.
 
