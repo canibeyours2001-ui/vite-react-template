@@ -7,8 +7,6 @@ type Db={prepare(query:string):{bind(...v:(string|number)[]):{run():Promise<{met
 export type VoxEnv = {
   MEMORY_DB:Db; TELEGRAM_BOT_TOKEN:string; VOX_WORKER_KEY?:string
 }
-type Job={id:number;chat_id:string;text:string;status:string;created_at:number;updated_at:number;message_id:number;error_message:string|null}
-const VALID=/^[1-9][0-9]*$/
 const STATUS=new Set(['submitted','running','downloading','failed','submit-uncertain'])
 async function init(db:Db){
  await db.prepare('CREATE TABLE IF NOT EXISTS vox_kaggle_jobs ('+
@@ -16,14 +14,6 @@ async function init(db:Db){
   "text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', error_message TEXT,"+
   "created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()),"+
   "UNIQUE(chat_id,message_id))").bind().run()
-}
-async function telegram(env:VoxEnv,chat_id:string,text:string){
- const r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendMessage',{
-  method:'POST',headers:{'content-type':'application/json'},
-  body:JSON.stringify({chat_id,text:text.slice(0,3900)}),signal:AbortSignal.timeout(16000)
- })
- const d=await r.json() as {ok?:boolean}
- if(!r.ok||!d.ok)throw new Error('Telegram send failed')
 }
 export async function handleVoxTelegram(
  env:VoxEnv,chat:string,messageId:number,text:string,
