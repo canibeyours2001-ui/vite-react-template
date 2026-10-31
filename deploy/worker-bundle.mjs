@@ -3563,19 +3563,26 @@ async function tell(env2, chat, message) {
 async function kaggle(env2, action, body, timeoutMs = 25e3) {
   if (!env2.KAGGLE_API_TOKEN) throw Error("Kaggle API token is not configured");
   if (!["list", "push", "status", "output"].includes(action)) throw Error("Unknown Kaggle action");
-  const r = await fetch(BASE + action, {
-    method: "POST",
+  const query = new URLSearchParams();
+  for (const key of ["user", "pageSize", "userName", "kernelSlug", "versionLabel"]) {
+    const value = body[key];
+    if (typeof value === "string" || typeof value === "number") query.set(key, String(value));
+  }
+  const isPush = action === "push";
+  const url = BASE + action + (isPush ? "" : "?" + query.toString());
+  const response = await fetch(url, {
+    method: isPush ? "POST" : "GET",
     headers: {
-      "Authorization": "Bearer " + env2.KAGGLE_API_TOKEN,
-      "Content-Type": "application/json",
-      "Accept": "application/json"
+      Authorization: "Bearer " + env2.KAGGLE_API_TOKEN,
+      Accept: "application/json",
+      ...isPush ? { "Content-Type": "application/json" } : {}
     },
-    body: JSON.stringify(body),
+    ...isPush ? { body: JSON.stringify(body) } : {},
     signal: AbortSignal.timeout(timeoutMs)
   });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok || typeof data.code === "number" && data.code >= 400) {
-    throw Error("Kaggle " + action + " HTTP " + r.status);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || typeof data.code === "number" && data.code >= 400 || isPush && Boolean(data.error)) {
+    throw Error("Kaggle " + action + " HTTP " + response.status);
   }
   return data;
 }
