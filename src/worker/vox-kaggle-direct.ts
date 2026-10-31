@@ -188,7 +188,7 @@ async function readTextDocument(env:VoxEnv,file:VoxTelegramDocument):Promise<str
  if(!res.ok || Number(res.headers.get('content-length')||0)>65536)throw Error('Text download failed')
  const buf=await res.arrayBuffer()
  if(buf.byteLength>65536)throw Error('Text file too large')
- const txt=new TextDecoder('utf-8',{fatal:true}).decode(buf).replace(/^\uFEFF/,'').trim()
+ const txt=new TextDecoder('utf-8',{fatal:true,ignoreBOM:false}).decode(buf).replace(/^\uFEFF/,'').trim()
  if(txt.includes('\0'))throw Error('Invalid text document')
  return txt
 }
