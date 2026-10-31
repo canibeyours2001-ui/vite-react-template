@@ -18,7 +18,7 @@ type Media={file_id:string;file_size?:number;file_name?:string;mime_type?:string
 type Message={message_id:number;video?:Media;document?:Media;
  reply_to_message?:{video?:Media;document?:Media}}
 type Job={id:number;chat_id:string;file_id:string;file_ext:string;source_lang:string;target_lang:string;
- engine:string;voice:string;status:string;version_number:number|null;created_at:number;error_message:string|null}
+ engine:string;voice:string;voice_slot:number;status:string;version_number:number|null;created_at:number;error_message:string|null}
 const KERNEL='cyawzin/pyvideotrans-telegram-dub'
 const OWNER='cyawzin'
 const SLUG='pyvideotrans-telegram-dub'
@@ -40,6 +40,7 @@ async function isReady(env:VideoEnv):Promise<boolean>{
 const HELP='Video translation + dubbing (private Kaggle jobs):\n'+
  '/dub edge en my — dub English video into Burmese using Microsoft Edge TTS (Nilar).\n'+
  '/dub vox en my — dub with VoxCPM2 on Kaggle T4 GPU.\n'+
+ '/dub vox en my 1 — reuse your saved VoxCPM2 voice slot 1.\n'+
  '/dub_status — latest dubbing job status.\n'+
  'Attach a video <=20MB with /dub ... as its caption, or reply to a video with the command.\n'+
  'This beta is not enabled until Kaggle runtime testing confirms the video pipeline.'
@@ -52,7 +53,7 @@ async function init(db:DB){
   "id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT NOT NULL,message_id INTEGER NOT NULL,"+
   "file_id TEXT NOT NULL,file_ext TEXT NOT NULL,file_size INTEGER NOT NULL,"+
   "source_lang TEXT NOT NULL,target_lang TEXT NOT NULL,engine TEXT NOT NULL,voice TEXT NOT NULL,"+
-  "status TEXT NOT NULL DEFAULT 'queued',version_number INTEGER,error_message TEXT,"+
+  "status TEXT NOT NULL DEFAULT 'queued',version_number INTEGER,error_message TEXT,voice_slot INTEGER NOT NULL DEFAULT 0,"+
   "created_at INTEGER NOT NULL DEFAULT (unixepoch()),updated_at INTEGER NOT NULL DEFAULT (unixepoch()),"+
   "UNIQUE(chat_id,message_id))"
  ).bind().run()
@@ -90,7 +91,15 @@ export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:stri
   const parsed=text.trim().match(/^\/dub(?:@[a-zA-Z0-9_]+)?\s+(edge|vox)\s+([a-z]{2,3})\s+([a-z]{2,3})(?:\s+([a-zA-Z-]{4,80}))?$/i)
   if(!parsed){await send(HELP);return true}
   const engine=parsed[1].toLowerCase(),sourceLang=parsed[2].toLowerCase(),targetLang=parsed[3].toLowerCase()
-  const voice=parsed[4]||(engine==='edge'?defaultVoices[targetLang]:'Narrator')
+  const rawVoice=parsed[4]
+  const slot=engine==='vox'&&rawVoice&&/^[1-5]$/.test(rawVoice)?Number(rawVoice):0
+  if(engine==='vox'&&rawVoice&&!slot){await send('For VoxCPM2 use a saved slot 1–5, e.g. /dub vox en my 1. Omit it for default voice.');return true}
+  if(slot){
+   const found=await env.MEMORY_DB.prepare('SELECT slot FROM vox_saved_voices WHERE chat_id=? AND slot=? LIMIT 1')
+    .bind(chat,slot).all<{slot:number}>()
+   if(!found.results.length){await send('VoxCPM2 voice slot '+slot+' is empty. Use /voxvoices.');return true}
+  }
+  const voice=engine==='vox'?'Narrator':rawVoice||defaultVoices[targetLang]
   if(engine==='edge'&&!voice){await send('Choose an Edge voice for this language, e.g. /dub edge en my my-MM-NilarNeural');return true}
   if(sourceLang===targetLang){await send('Source and target language are identical. Choose distinct codes or use /vox for speech only.');return true}
   const media=selectMedia(msg)
@@ -105,8 +114,8 @@ export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:stri
   ).bind(chat).all<{total:number}>()
   if((existing.results[0]?.total||0)>=1){await send('One video dubbing job is already active for your account. Check /dub_status.');return true}
   await env.MEMORY_DB.prepare(
-   'INSERT OR IGNORE INTO pyvt_kaggle_jobs(chat_id,message_id,file_id,file_ext,file_size,source_lang,target_lang,engine,voice) VALUES(?,?,?,?,?,?,?,?,?)'
-  ).bind(chat,msg.message_id,media.file_id,ext,media.file_size,sourceLang,targetLang,engine,voice).run()
+   'INSERT OR IGNORE INTO pyvt_kaggle_jobs(chat_id,message_id,file_id,file_ext,file_size,source_lang,target_lang,engine,voice,voice_slot) VALUES(?,?,?,?,?,?,?,?,?,?)'
+  ).bind(chat,msg.message_id,media.file_id,ext,media.file_size,sourceLang,targetLang,engine,voice,slot).run()
   const result=await env.MEMORY_DB.prepare(
    'SELECT id FROM pyvt_kaggle_jobs WHERE chat_id=? AND message_id=?'
   ).bind(chat,msg.message_id).all<{id:number}>()
@@ -171,12 +180,12 @@ export async function pyvtSignedFile(env:VideoEnv,request:Request):Promise<Respo
    'cache-control':'private, no-store','x-content-type-options':'nosniff'}
  })
 }
-function renderKernel(job:Job,inputUrl:string):string{
+function renderKernel(job:Job,inputUrl:string,voiceB64:string):string{
  const task={url:inputUrl,source:job.source_lang,target:job.target_lang,
-  provider:job.engine,voice:job.voice,ext:job.file_ext}
+  provider:job.engine,voice:job.voice,ext:job.file_ext,voice_ref_b64:voiceB64}
  // Generated script embeds an expiring URL only, never a Telegram token or Kaggle credential.
  return [
- 'import json, os, sys, subprocess, pathlib, shutil',
+ 'import json, os, sys, subprocess, pathlib, shutil, base64',
  "TASK=json.loads("+JSON.stringify(JSON.stringify(task))+")",
  "ROOT=pathlib.Path('/kaggle/temp/pyvideotrans-job')",
  "ROOT.mkdir(parents=True,exist_ok=True)",
@@ -202,6 +211,14 @@ function renderKernel(job:Job,inputUrl:string):string{
   "'--target-language-code',TASK['target'],'--translate-type','0','--whisper-model','small',"+
   "'--recogn-type','0','--temp-output',str(ROOT/'results'),'--final-output','/kaggle/working/pyvideotrans_result.mp4','--voice-autorate']",
  "if TASK['provider']=='voxcpm2': command.append('--cuda')",
+ "if TASK.get('voice_ref_b64'):",
+ "    blob=base64.b64decode(TASK['voice_ref_b64'],validate=True)",
+ "    if len(blob)<1500 or len(blob)>180000: raise ValueError('Bad saved voice reference')",
+ "    refmp3=ROOT/'voice-reference.mp3'",
+ "    refwav=ROOT/'voice-reference.wav'",
+ "    refmp3.write_bytes(blob)",
+ "    subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(refmp3),'-ac','1','-ar','48000',str(refwav)],check=True,timeout=40)",
+ "    command.extend(['--reference-wav',str(refwav)])",
  "subprocess.run(command,check=True,cwd=str(repo),timeout=3200)",
  "assert pathlib.Path('/kaggle/working/pyvideotrans_result.mp4').stat().st_size>4096",
  "print('PYVIDEOTRANS_VIDEO_READY')"
@@ -330,7 +347,7 @@ export async function pollPyvt(env:VideoEnv):Promise<void>{
  if(!env.KAGGLE_API_TOKEN||!env.MEMORY_DB||!await isReady(env))return
  await init(env.MEMORY_DB)
  const active=await env.MEMORY_DB.prepare(
-  "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,status,version_number,created_at,error_message "+
+  "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,voice_slot,status,version_number,created_at,error_message "+
   "FROM pyvt_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain') ORDER BY id LIMIT 1"
  ).bind().all<Job>()
  const job=active.results[0]
@@ -381,17 +398,24 @@ export async function pollPyvt(env:VideoEnv):Promise<void>{
  ).bind().run()
  if(!locked.meta.changes)return
  const first=await env.MEMORY_DB.prepare(
-  "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,status,version_number,created_at,error_message "+
+  "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,voice_slot,status,version_number,created_at,error_message "+
   "FROM pyvt_kaggle_jobs WHERE status='submitting' ORDER BY id LIMIT 1"
  ).bind().all<Job>()
  const next=first.results[0]
  if(!next)return
  const expires=Math.floor(Date.now()/1000)+43200
  try{
+  let voiceB64=''
+  if(next.voice_slot){
+   const sample=await env.MEMORY_DB.prepare('SELECT audio_b64 FROM vox_saved_voices WHERE chat_id=? AND slot=?')
+    .bind(next.chat_id,next.voice_slot).all<{audio_b64:string}>()
+   voiceB64=sample.results[0]?.audio_b64||''
+   if(!voiceB64)throw Error('Saved voice slot unavailable')
+  }
   const sign=await signature(env.TELEGRAM_WEBHOOK_SECRET,next.id,expires)
   const response=await kaggle(env,'push',{
    slug:KERNEL,newTitle:'pyVideoTrans Telegram Edge or VoxCPM2',
-   text:renderKernel(next,fileURL(next.id,expires,sign)),
+   text:renderKernel(next,fileURL(next.id,expires,sign),voiceB64),
    language:'python',kernelType:'script',isPrivate:true,enableGpu:next.engine==='vox',
    enableInternet:true,machineShape:'NvidiaTeslaT4',sessionTimeoutSeconds:3600,
    datasetDataSources:[],competitionDataSources:[],kernelDataSources:[],modelDataSources:[]
