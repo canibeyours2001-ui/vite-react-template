@@ -31,7 +31,7 @@ type Session={state:string;slot:number|null;custom_file_id:string|null;custom_re
 type Job={id:number;chat_id:string;telegram_file_id:string;ref_text:string;lang:string;speech_text:string}
 const LIMIT=6*1024*1024
 const LANGUAGES=new Set(['Auto','English','Chinese','Japanese','Korean','German','French','Russian','Portuguese','Spanish','Italian'])
-const help='Voice cloning:\n/savevoice 1 Narrator | exact reference transcript (as a reply to a voice recording)\n/voices — show your 5 saved slots\n/clone — choose a saved voice or upload custom\n/clonelang English — set speech language\n/cancel — stop\nOnly use your own voice or voices you have permission to clone.'
+const help='Voice cloning:\n/savevoice 1 Narrator | exact reference transcript (as a reply to a voice recording)\n/voices — show your 5 saved slots\n/clone — choose a saved voice or upload custom\n/tts_status — live status of latest generation\n/clonelang English — set speech language\n/cancel — stop\nOnly use your own voice or voices you have permission to clone.'
 function usableFile(file?:RefFile):file is RefFile{
   if(!file?.file_id || (file.file_size||0)>LIMIT)return false
   const ext=(file.file_name||'').toLowerCase()
@@ -97,7 +97,7 @@ export async function handleVoiceMessage(env:VoiceEnv,msg:VoiceMessage,chat:stri
   const cmd=(commandRaw||'').split('@')[0].toLowerCase()
   // Never treat help/AI requests as speech text, even inside an active clone wizard.
   if (['/ask','/help','/commands'].includes(cmd)) return false
-  const recognized=['/savevoice','/voices','/clone','/clone_help','/cancel','/clonelang'].includes(cmd)
+  const recognized=['/savevoice','/voices','/clone','/clone_help','/tts_status','/cancel','/clonelang'].includes(cmd)
   let current:Session|null=null
   if(!recognized&&!inboundFile(msg)&&!content.trim())return false
   try {
@@ -106,6 +106,24 @@ export async function handleVoiceMessage(env:VoiceEnv,msg:VoiceMessage,chat:stri
     if(!recognized&&!current)return false
     if(cmd==='/clone_help'){await say(env,chat,help);return true}
     if(cmd==='/cancel'){await clearSession(env.MEMORY_DB,chat);await say(env,chat,'Voice cloning cancelled.');return true}
+    if(cmd==='/tts_status'){
+      const rows=await env.MEMORY_DB.prepare(
+        'SELECT j.id,j.status,t.hash FROM qwen_clone_jobs j LEFT JOIN mvsep_tts_tracking t ON t.job_id=j.id WHERE j.chat_id=? ORDER BY j.id DESC LIMIT 1'
+      ).bind(chat).all<{id:number;status:string;hash:string|null}>()
+      const last=rows.results[0]
+      if(!last){await say(env,chat,'No Qwen3-TTS jobs found. Use /clone to begin.');return true}
+      if(last.hash&&['waiting','processing','distributing','merging'].includes(last.status)){
+        try{
+          const state=await mvsepGet(last.hash)
+          await say(env,chat,voiceState(state)+'\nJob: '+last.id)
+        }catch{
+          await say(env,chat,'Qwen3-TTS job #'+last.id+' last known status: '+last.status)
+        }
+      }else{
+        await say(env,chat,'Qwen3-TTS job #'+last.id+': '+last.status)
+      }
+      return true
+    }
     if(cmd==='/voices'){
       const data=await profiles(env.MEMORY_DB,chat)
       await say(env,chat,'Saved voice profiles:\n'+Array.from({length:5},(_,i)=>{
