@@ -221,7 +221,7 @@ app.post('/telegram/webhook', async (c) => {
   const allowed = await isAllowedTelegramUser(c.env,String(chatId),sender,msg.chat.type)
   const privateChat = (!msg.chat.type || msg.chat.type === 'private') &&
     String(chatId) === sender
-  if (!privateChat || (!allowed && !/^\\/whoami(?:@[A-Za-z0-9_]+)?$/i.test(text)))
+  if (!privateChat || (!allowed && !/^\/whoami(?:@[A-Za-z0-9_]+)?$/i.test(text)))
     return c.json({ok:true})
 
   const processMessage = async () => {
