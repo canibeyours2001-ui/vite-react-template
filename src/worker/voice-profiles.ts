@@ -300,6 +300,20 @@ export async function voiceAssistantContext(env:VoiceEnv,chat:string):Promise<st
         'SELECT id,status FROM qwen_clone_jobs WHERE chat_id=? ORDER BY id DESC LIMIT 1'
       ).bind(chat).all<{id:number;status:string}>()
     ])
+    let latestWanStatus='unavailable'
+    let latestMvsepStatus='unavailable'
+    try{
+      const records=await env.MEMORY_DB.prepare(
+        'SELECT status FROM wan_video_jobs WHERE chat_id=? ORDER BY created_at DESC LIMIT 1'
+      ).bind(chat).all<{status:string}>()
+      latestWanStatus=records.results[0]?.status||'none'
+    }catch{ /* WAN job table optional during initial setup */ }
+    try{
+      const records=await env.MEMORY_DB.prepare(
+        'SELECT status FROM mvsep_live_jobs WHERE chat_id=? ORDER BY created_at DESC LIMIT 1'
+      ).bind(chat).all<{status:string}>()
+      latestMvsepStatus=records.results[0]?.status||'none'
+    }catch{ /* MVSEP table optional until first separation */ }
     const safeName=(name:string)=>name.replace(/[\r\n<>]/g,' ').slice(0,48)
     return JSON.stringify({
       saved_voice_slots:Array.from({length:5},(_,i)=>({
@@ -311,6 +325,8 @@ export async function voiceAssistantContext(env:VoiceEnv,chat:string):Promise<st
       current_voice_slot:active?.slot||null,
       chosen_language:active?.lang||'English',
       latest_voice_job:job.results[0]||null,
+      latest_wan_job_status:latestWanStatus,
+      latest_mvsep_job_status:latestMvsepStatus,
       qwen_backend_configured:apiConfigured(env),
       mvsep_token_configured:Boolean((env as VoiceEnv & { MVSEP_API_TOKEN?:string }).MVSEP_API_TOKEN),
       last_updated:'live database snapshot'
