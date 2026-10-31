@@ -1,6 +1,6 @@
 /** Private Telegram inline menu for pyVideoTrans language, dubbing engine and voice. */
 type DB={prepare(query:string):{bind(...v:(string|number)[]):{
- run():Promise<{meta:{changes:number}}>;all<T>():Promise<{results:T[]>}
+ run():Promise<{meta:{changes:number}}>;all<T>():Promise<{results:T[]}>
 }}}
 export type DubMenuEnv={MEMORY_DB:DB;TELEGRAM_BOT_TOKEN:string}
 export type DubCallback={id:string;data?:string;from:{id:number};
