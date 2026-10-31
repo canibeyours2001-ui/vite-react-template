@@ -4578,6 +4578,96 @@ async function pyvtEdgeSmoke(env2) {
     }
   }
 }
+async function pyvtVideoSmoke(env2) {
+  if (!env2.MEMORY_DB || !env2.KAGGLE_API_TOKEN) return;
+  const db = env2.MEMORY_DB, name = "pyvideotrans-edge-video-smoke";
+  await db.prepare(
+    "CREATE TABLE IF NOT EXISTS pyvt_video_smoke (id INTEGER PRIMARY KEY CHECK(id=1),status TEXT NOT NULL,version INTEGER,detail TEXT NOT NULL DEFAULT '',updated_at INTEGER NOT NULL DEFAULT (unixepoch()))"
+  ).bind().run();
+  const rows = await db.prepare("SELECT status,version FROM pyvt_video_smoke WHERE id=1").bind().all();
+  const job = rows.results[0];
+  if (!job) return;
+  if (job.status === "requested") {
+    const lock = await db.prepare(
+      "UPDATE pyvt_video_smoke SET status='submitting',updated_at=unixepoch() WHERE id=1 AND status='requested'"
+    ).bind().run();
+    if (!lock.meta.changes) return;
+    const script = [
+      "import sys,subprocess,pathlib",
+      "root=pathlib.Path('/kaggle/temp/pyvt-edge-video')",
+      "subprocess.run([sys.executable,'-m','pip','install','-q','uv'],check=True,timeout=250)",
+      "subprocess.run(['git','clone','--quiet','--depth','1','https://github.com/canibeyours2001-ui/pyvideotrans.git',str(root)],check=True,timeout=150)",
+      "subprocess.run(['uv','python','install','3.10'],check=True,timeout=300)",
+      "subprocess.run(['uv','sync','--python','3.10','--no-dev','--project',str(root)],check=True,timeout=2100)",
+      "p=str(root/'.venv/bin/python')",
+      "audio=pathlib.Path('/kaggle/temp/pyvt-synthetic-en.mp3')",
+      "speech='Hello friends. We are testing how a video can be translated and dubbed. This is a short example using the pyVideoTrans application.'",
+      "subprocess.run([p,'-c','import asyncio,edge_tts,sys; asyncio.run(edge_tts.Communicate(sys.argv[1],\\'en-US-AriaNeural\\').save(sys.argv[2]))',speech,str(audio)],check=True,timeout=120)",
+      "source=pathlib.Path('/kaggle/temp/pyvt-source.mp4')",
+      "subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-f','lavfi','-i','color=c=blue:s=640x360:r=25:d=18','-i',str(audio),'-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest',str(source)],check=True,timeout=130)",
+      "assert source.stat().st_size>10000",
+      "args=[p,str(root/'tools/kaggle_video_dub_job.py'),'--task','vtv','--input',str(source),'--tts','edge','--voice-role','my-MM-NilarNeural','--source-language-code','en','--target-language-code','my','--recogn-type','0','--whisper-model','tiny','--translate-type','0','--temp-output','/kaggle/temp/pyvt-video-results','--final-output','/kaggle/working/pyvideotrans_result.mp4','--timeout-seconds','1600']",
+      "subprocess.run(args,check=True,cwd=str(root),timeout=1750)",
+      "out=pathlib.Path('/kaggle/working/pyvideotrans_result.mp4')",
+      "assert out.is_file() and out.stat().st_size>15000",
+      "print('PYVT_VIDEO_OK',out.stat().st_size,flush=True)"
+    ].join("\n");
+    try {
+      const pushed = await kaggle(env2, "push", {
+        slug: OWNER + "/" + name,
+        newTitle: name,
+        text: script,
+        language: "python",
+        kernelType: "script",
+        isPrivate: true,
+        enableGpu: false,
+        enableInternet: true,
+        sessionTimeoutSeconds: 3600,
+        datasetDataSources: [],
+        competitionDataSources: [],
+        kernelDataSources: [],
+        modelDataSources: []
+      });
+      const version2 = Number(pushed.versionNumber || pushed.version_number || 0);
+      if (!Number.isSafeInteger(version2) || version2 < 1) throw Error("No Kaggle version");
+      await db.prepare(
+        "UPDATE pyvt_video_smoke SET status='submitted',version=?,updated_at=unixepoch() WHERE id=1"
+      ).bind(version2).run();
+    } catch (e) {
+      await db.prepare(
+        "UPDATE pyvt_video_smoke SET status='submit-uncertain',detail=?,updated_at=unixepoch() WHERE id=1"
+      ).bind("Kaggle submission uncertain; inspect before retrying").run();
+    }
+    return;
+  }
+  if ((job.status === "submitted" || job.status === "running") && job.version) {
+    try {
+      const st = await kaggle(env2, "status", { userName: OWNER, kernelSlug: name, versionLabel: "v" + job.version });
+      const status = String(st.status || st.state || "").toUpperCase();
+      if (status.includes("COMPLETE") || status.includes("SUCCESS")) {
+        const output = await kaggle(env2, "output", { userName: OWNER, kernelSlug: name, versionLabel: "v" + job.version });
+        const log = String(output.log || "");
+        const matched = log.match(/PYVT_VIDEO_OK\s+(\d+)/);
+        const files = output.files || output.outputFiles;
+        const found = Array.isArray(files) && files.some((f) => f && typeof f === "object" && String(f.fileName || f.file_name) === "pyvideotrans_result.mp4");
+        const ok = Boolean(matched) && found;
+        await db.prepare(
+          "UPDATE pyvt_video_smoke SET status=?,detail=?,updated_at=unixepoch() WHERE id=1"
+        ).bind(ok ? "done" : "failed", ok ? "pyVideoTrans translated+dubbed MP4 bytes=" + matched?.[1] : "No PYVT_VIDEO_OK marker or MP4 found; review Kaggle private notebook logs").run();
+      } else if (status.includes("ERROR") || status.includes("FAIL") || status.includes("CANCEL")) {
+        await db.prepare(
+          "UPDATE pyvt_video_smoke SET status='failed',detail=?,updated_at=unixepoch() WHERE id=1"
+        ).bind(String(st.failureMessage || status).slice(0, 290)).run();
+      } else await db.prepare(
+        "UPDATE pyvt_video_smoke SET status='running',updated_at=unixepoch() WHERE id=1"
+      ).bind().run();
+    } catch (e) {
+      await db.prepare(
+        "UPDATE pyvt_video_smoke SET detail=?,updated_at=unixepoch() WHERE id=1"
+      ).bind(e instanceof Error ? e.message.slice(0, 230) : "unknown").run();
+    }
+  }
+}
 async function pollPyvt(env2) {
   if (!env2.KAGGLE_API_TOKEN || !env2.MEMORY_DB || !await isReady(env2)) return;
   await init(env2.MEMORY_DB);
@@ -5456,7 +5546,7 @@ const index = {
     } catch (error) {
       console.error("Telegram webhook registration check failed:", error instanceof Error ? error.name : "unknown");
     }
-    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2), checkKaggleConnection(env2), pollVoxKaggle(env2), probeKaggleReadMethods(env2), pollPyvt(env2), pyvtPreflight(env2), pyvtEdgeSmoke(env2)]);
+    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2), checkKaggleConnection(env2), pollVoxKaggle(env2), probeKaggleReadMethods(env2), pollPyvt(env2), pyvtPreflight(env2), pyvtEdgeSmoke(env2), pyvtVideoSmoke(env2)]);
     for (const r of results) {
       if (r.status === "rejected") console.error("Scheduled processing failed", String(r.reason).slice(0, 160));
     }
