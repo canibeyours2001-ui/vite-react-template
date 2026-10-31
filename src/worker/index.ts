@@ -632,6 +632,8 @@ app.post('/telegram/webhook', async (c) => {
           '/allow USER_ID — owner: grant access\n' +
           '/deny USER_ID — owner: revoke access\n' +
           '/tts_status — check latest Qwen3-TTS generation\n' +
+          '/tts_long — compose long Qwen speech from plain text messages\n' +
+          '/tts_done — finish composing, then review and confirm\n' +
           '/vox TEXT — Kaggle VoxCPM2 Burmese speech (up to 8,000 characters)\n' +
           '/vox — attach or reply to a UTF-8 .txt script for long narration\n' +
           '/vox_status — Kaggle VoxCPM2 job status\n' +
@@ -682,7 +684,7 @@ app.post('/telegram/webhook', async (c) => {
               '/whoami — show your Telegram numeric user ID.',
               '/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.',
               '/ask QUESTION — ask this AI for help; normal messages also reach the AI.',
-              '/clone — interactive Qwen3-TTS voice cloning via MVSEP: choose one of five saved slots or a custom voice, then text, then confirm.',
+              '/clone — interactive Qwen3-TTS voice cloning via MVSEP: choose a saved or custom voice, then send plain speech text (Telegram 4,096 characters per message) and confirm. For longer text send /tts_long, several plain text messages, and /tts_done before confirming; no .txt file input. MVSEP sets the actual maximum.',
               '/voices — list stored voice slots.',
               '/savevoice N Label — reply to a 3–15 second reference recording; no transcript required.',
               '/clonelang English — choose supported language (English, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian or Auto).',
@@ -930,6 +932,8 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
         {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
         {command:'tts_status',description:'Check Qwen3-TTS generation status'},
+        {command:'tts_long',description:'Start plain-text long speech composition'},
+        {command:'tts_done',description:'Finish long speech and confirm'},
         {command:'voices',description:'View your five saved voices'},
         {command:'savevoice',description:'Save reference voice to slot 1 to 5'},
         {command:'clonelang',description:'Set voice generation language'},
