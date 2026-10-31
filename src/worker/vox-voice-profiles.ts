@@ -4,7 +4,7 @@
  * The user's original Kaggle studio and MVSEP voice profiles are untouched.
  */
 type DB={prepare(sql:string):{bind(...params:(string|number)[]):{
- run():Promise<{meta:{changes:number}}>;all<T>():Promise<{results:T[]>}
+ run():Promise<{meta:{changes:number}}>;all<T>():Promise<{results:T[]}>
 }}}
 export type VoiceEnv={MEMORY_DB:DB;TELEGRAM_BOT_TOKEN:string}
 export type VoxCallback={id:string;data?:string;from:{id:number};message?:{chat:{id:number};message_id:number}}
