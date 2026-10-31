@@ -1,16 +1,18 @@
-name: Validate Hono audio integration
+name: Validate and bundle Hono MVSEP integration
 on:
   pull_request:
   push:
     branches:
       - feature/mvsep-live-qwen-voice-clone
 permissions:
-  contents: read
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -18,3 +20,17 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit -p tsconfig.worker.json
       - run: npm run build
+      - name: Preserve compiled Worker for safe direct Cloudflare deployment
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/mvsep-live-qwen-voice-clone'
+        run: |
+          mkdir -p deploy
+          cp dist/vite_react_template/index.js deploy/worker-bundle.mjs
+          git add -f deploy/worker-bundle.mjs
+          if git diff --cached --quiet; then
+            echo "Worker bundle unchanged"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Build MVSEP Worker bundle [skip ci]"
+            git push
+          fi
