@@ -79,10 +79,9 @@ export async function checkKaggleConnection(env:VoxEnv):Promise<void>{
    'https://www.kaggle.com/api/v1/kernels/list'
   ].entries()){
    try{
-    const response=await fetch(url,{
-     method:'POST',
-     headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Accept:'application/json'},
-     body:JSON.stringify({user:OWNER,pageSize:1}),
+    const response=await fetch(url+'?user='+OWNER+'&pageSize=1',{
+     method:'GET',
+     headers:{Authorization:'Bearer '+token,Accept:'application/json'},
      signal:AbortSignal.timeout(12000),
     })
     const body=await response.json().catch(()=>({})) as Record<string,unknown>
