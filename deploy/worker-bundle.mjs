@@ -3094,7 +3094,7 @@ async function init$1(db) {
   await db.prepare("CREATE TABLE IF NOT EXISTS mvsep_tts_tracking (job_id INTEGER PRIMARY KEY, hash TEXT UNIQUE NOT NULL, status_message_id INTEGER, last_label TEXT NOT NULL DEFAULT '', checked_at INTEGER NOT NULL DEFAULT 0)").bind().run();
   await db.prepare("CREATE TABLE IF NOT EXISTS qwen_clone_sessions (chat_id TEXT PRIMARY KEY, state TEXT NOT NULL, slot INTEGER, custom_file_id TEXT, custom_ref_text TEXT, lang TEXT NOT NULL DEFAULT 'English', updated_at INTEGER NOT NULL DEFAULT (unixepoch()))").bind().run();
   await db.prepare("CREATE TABLE IF NOT EXISTS qwen_clone_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, source_message_id INTEGER NOT NULL, telegram_file_id TEXT NOT NULL, ref_text TEXT NOT NULL, speech_text TEXT NOT NULL, lang TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()), UNIQUE(chat_id,source_message_id))").bind().run();
-  await db.prepare("CREATE TABLE IF NOT EXISTS qwen_clone_long_text (chat_id TEXT PRIMARY KEY, text TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL DEFAULT (unixepoch()))").bind().run();
+  await db.prepare("CREATE TABLE IF NOT EXISTS qwen_clone_long_parts (chat_id TEXT NOT NULL, source_message_id INTEGER NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()), PRIMARY KEY(chat_id,source_message_id))").bind().run();
 }
 async function profiles(db, chat) {
   const data = await db.prepare("SELECT slot,name,telegram_file_id,ref_text FROM qwen_voice_profiles WHERE chat_id=? ORDER BY slot").bind(chat).all();
@@ -3109,7 +3109,7 @@ async function setSession(db, chat, st, slot, file, ref2, lang) {
 }
 async function clearSession(db, chat) {
   await db.prepare("DELETE FROM qwen_clone_sessions WHERE chat_id=?").bind(chat).run();
-  await db.prepare("DELETE FROM qwen_clone_long_text WHERE chat_id=?").bind(chat).run();
+  await db.prepare("DELETE FROM qwen_clone_long_parts WHERE chat_id=?").bind(chat).run();
 }
 function voiceButtons(data) {
   const buttons = Array.from({ length: 5 }, (_, i) => {
@@ -3203,7 +3203,7 @@ async function handleVoiceMessage(env2, msg, chat, content) {
     }
     if (cmd === "/clone") {
       const data = await profiles(env2.MEMORY_DB, chat);
-      await env2.MEMORY_DB.prepare("DELETE FROM qwen_clone_long_text WHERE chat_id=?").bind(chat).run();
+      await env2.MEMORY_DB.prepare("DELETE FROM qwen_clone_long_parts WHERE chat_id=?").bind(chat).run();
       await setSession(env2.MEMORY_DB, chat, "select", null, null, null, current?.lang || "English");
       await say(env2, chat, "Choose a saved voice or upload a custom recording:", voiceButtons(data));
       return true;
@@ -3226,7 +3226,7 @@ async function handleVoiceMessage(env2, msg, chat, content) {
     }
     if (cmd === "/tts_long" && ["target_text", "custom_transcript"].includes(current.state)) {
       await env2.MEMORY_DB.prepare(
-        "INSERT INTO qwen_clone_long_text(chat_id,text) VALUES(?,'') ON CONFLICT(chat_id) DO UPDATE SET text='',updated_at=unixepoch()"
+        "DELETE FROM qwen_clone_long_parts WHERE chat_id=?"
       ).bind(chat).run();
       await setSession(env2.MEMORY_DB, chat, "collect_text", current.slot, current.custom_file_id, current.custom_ref_text, current.lang);
       await say(env2, chat, "Long speech mode started. Send your script as several PLAIN TEXT messages (each up to 4,096 characters). I will combine them in order. Send /tts_done when finished. Total bot safeguard: 128 KiB of UTF-8 text. MVSEP determines its actual maximum. /cancel stops.");
@@ -3242,25 +3242,25 @@ async function handleVoiceMessage(env2, msg, chat, content) {
         return true;
       }
       const updated = await env2.MEMORY_DB.prepare(
-        "UPDATE qwen_clone_long_text SET text=CASE WHEN text='' THEN ? ELSE text||char(10)||? END, updated_at=unixepoch() WHERE chat_id=? AND length(CAST(text AS BLOB))+length(CAST(? AS BLOB))+1<=?"
-      ).bind(text, text, chat, text, MAX_TTS_TEXT_BYTES).run();
+        "INSERT OR IGNORE INTO qwen_clone_long_parts(chat_id,source_message_id,text) SELECT ?,?,? WHERE (SELECT COALESCE(SUM(length(CAST(text AS BLOB))+1),0) FROM qwen_clone_long_parts WHERE chat_id=?)+length(CAST(? AS BLOB))<=?"
+      ).bind(chat, msg.message_id, text, chat, text, MAX_TTS_TEXT_BYTES).run();
       if (updated.meta.changes !== 1) {
-        await say(env2, chat, "This script would exceed the 128 KiB bot safeguard. Send /tts_done to finish what you have, or /cancel to restart.");
+        await say(env2, chat, "Text message already received or 128 KiB safety limit reached. Send /tts_done to finish, or /cancel to restart.");
         return true;
       }
       const row = (await env2.MEMORY_DB.prepare(
-        "SELECT length(CAST(text AS BLOB)) AS bytes FROM qwen_clone_long_text WHERE chat_id=?"
+        "SELECT COALESCE(SUM(length(CAST(text AS BLOB))+1),0) AS bytes,COUNT(*) AS parts FROM qwen_clone_long_parts WHERE chat_id=?"
       ).bind(chat).all()).results[0];
-      await say(env2, chat, "Text added (" + (row?.bytes || 0) + " UTF-8 bytes total). Send more text, or /tts_done to review and confirm MVSEP generation.");
+      await say(env2, chat, "Part " + (row?.parts || 0) + " saved (" + (row?.bytes || 0) + " UTF-8 bytes total). Send more plain text, or /tts_done to review and confirm MVSEP generation.");
       return true;
     }
     if (["target_text", "custom_transcript"].includes(current.state) || current.state === "collect_text" && cmd === "/tts_done") {
       let speechText = text;
       if (current.state === "collect_text") {
-        const row = (await env2.MEMORY_DB.prepare(
-          "SELECT text FROM qwen_clone_long_text WHERE chat_id=?"
-        ).bind(chat).all()).results[0];
-        speechText = row?.text.trim() || "";
+        const parts = (await env2.MEMORY_DB.prepare(
+          "SELECT text FROM qwen_clone_long_parts WHERE chat_id=? ORDER BY source_message_id ASC"
+        ).bind(chat).all()).results;
+        speechText = parts.map((x) => x.text).join("\n").trim();
       } else if (cmd === "/tts_done") {
         await say(env2, chat, "To build a longer script, send /tts_long first; otherwise just send your plain speech text.");
         return true;
