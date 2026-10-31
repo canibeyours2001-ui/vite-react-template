@@ -1,0 +1,44 @@
+# Telegram → Cloudflare → private Kaggle pyVideoTrans video dubbing
+
+**Status: staged / compatibility testing. `/dub` is intentionally disabled until the Kaggle Python 3.10 runtime succeeds.** The existing VoxCPM2 text-only API, MVSEP, WAN and Telegram allowlist are not modified.
+
+## Engines
+- `edge`: Microsoft Edge TTS, existing pyVideoTrans provider ID **0**. Example Burmese female voice: `my-MM-NilarNeural` (male: `my-MM-ThihaNeural`). Edge speech generation itself is CPU/network, but transcription can still need a GPU.
+- `vox`: native VoxCPM2 in pyVideoTrans provider ID **38**, on Kaggle GPU. This is different from the existing Gradio provider ID 15.
+- The source pyVideoTrans CLI and provider implementation are merged into `canibeyours2001-ui/pyvideotrans` main.
+
+## Planned Telegram commands
+```text
+/dub_help
+/dub edge en my
+/dub vox en my
+/dub_status
+```
+Attach a video with a `/dub ...` caption, or reply to an existing video. The first beta is limited to **20 MB input**, matching Telegram Bot API's `getFile` limit, and **49 MB output** for `sendVideo`. It uses pyVideoTrans `--task vtv` to transcribe, translate with its free Google translation provider (ID 0), dub and assemble. Translation might fail due to upstream changes and provider rate limits; there are no quality guarantees for Burmese. Use only personal, non-commercial media consistent with the service terms.
+
+## Signed video transport; no R2 or OCI
+
+Cloudflare's existing Access public exception on `/telegram/webhook` allows **GET** with an HMAC SHA-256 token for a particular queued video ID and 12-hour expiry. The Worker verifies the signature and D1 job status, then fetches the video with its existing private Telegram bot secret and streams it to Kaggle. Kaggle's **private notebook** receives an expiring media URL only: no bot token, Cloudflare key or Kaggle token is embedded in notebook source. Telegram POST webhook validation remains unchanged. Invalid/expired signatures return 404. Do not remove the existing Access protection from other routes.
+
+## Kaggle dispatch
+An independent private Kaggle kernel `cyawzin/pyvideotrans-telegram-dub` receives only one queued job at a time. Cloudflare invokes the official Kaggle API `POST /v1/kernels/push`, polls `GET /v1/kernels/status` and `GET /v1/kernels/output`, then sends the final MP4 through Telegram. Ambiguous submissions and uncertain deliveries are never automatically retried.
+
+Kaggle script downloads the video from signed URL, clones pinned pyVideoTrans main source, provisions Python 3.10 via `uv` and installs the declared dependencies, and launches `tools/kaggle_video_dub_job.py` with the selected Edge/Vox provider.
+
+**Important:** pyVideoTrans `uv sync` can be heavyweight and is not yet proven on Kaggle's current environment. Do not flip the `READY=false` source gate before a full CPU compatibility test and at least one real dubbed MP4 smoke test. This avoids burning GPU quota on predictable dependency errors.
+
+## Safe preflight
+
+There is a separate CPU-only private kernel `cyawzin/pyvideotrans-compatibility-check` which is triggered **once** when D1 contains:
+```sql
+INSERT INTO pyvt_preflight(id,status) VALUES(1,'requested')
+ON CONFLICT(id) DO UPDATE SET status='requested',version=NULL,detail='',updated_at=unixepoch();
+```
+The cron checks `pyvt_preflight`, submits a private CPU kernel, installs Python 3.10 and pyVideoTrans deps, tests `python cli.py --list providers`, and records status/version. This preflight doesn't use video, API media, GPU or Telegram messages. It is opt-in and not automatically resubmitted if uncertain.
+
+## Code locations
+- Cloudflare: `src/worker/pyvt-kaggle.ts`, integrated in `src/worker/index.ts`.
+- pyVideoTrans: `videotrans/tts/_voxcpm2kaggle.py`, `tools/kaggle_video_dub_job.py`.
+- Production bot remains `vite-react-template` with the original bindings kept intact.
+
+References: https://core.telegram.org/bots/api and https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernels.md.
