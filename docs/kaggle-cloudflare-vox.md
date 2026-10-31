@@ -46,3 +46,18 @@ Changed **only the separate Telegram batch worker's** model download directory f
 Expected improvement is mainly in Kaggle **post-generation output finalization**, not a guaranteed speedup in model inference or queue time. For genuinely low-latency repeated TTS, Kaggle's per-request Save & Run All batch model is intrinsically cold-started; a persistent, warm GPU session or paid inference endpoint would be a different architecture.
 
 Do not modify the original `cyawzin/voxcpm2-full-working` studio.
+
+## Long-form narration update (October 31, 2026)
+
+The original `/vox` handler capped the request at **450 characters**, not 480 words. It now supports **up to 8,000 characters** per job using passage-level generation in one Kaggle execution.
+
+Supported Telegram input:
+- `/vox မင်္ဂလာပါ။ ...` for text within Telegram's normal message limit.
+- Send a **UTF-8 .txt document** with caption `/vox`, or reply to a previously sent `.txt` file with `/vox`. The file must be <=64 KiB, and the script itself <=8,000 characters.
+- `/vox_status` checks the current Kaggle job.
+
+Each job splits at Burmese and international sentence punctuation/newlines, with a maximum of 240 characters per generation chunk; it generates the chunks sequentially with the same loaded model, joins them with 180-ms silences, then writes **one 112-kbps MP3** to `/kaggle/working/vox_generated.mp3`. The original model checkpoint remains in temporary `/kaggle/temp` to avoid huge saved notebook outputs.
+
+A single long job can take considerably longer than short speech, consumes more Kaggle GPU quota, and may exhibit timbre changes between chunks because the current batch script does not provide a fixed reference voice. The `/vox` command is not unlimited; the 8,000-character and Kaggle session limits are intentional safety bounds. Your original working Kaggle studio remains unchanged.
+
+No automatic GPU test is submitted by the deployment; the next user-initiated `/vox` invocation tests the longer path.
