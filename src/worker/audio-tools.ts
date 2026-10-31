@@ -241,3 +241,35 @@ export async function pollAudioJobs(env: AudioEnv): Promise<void> {
   }
 }
 
+
+/**
+ * Check whether the account's MVSEP token is accepted without creating a paid
+ * audio job. Poll at most once per six hours and persist only boolean status.
+ */
+export async function checkMvsepAccount(env: AudioEnv): Promise<void> {
+  if (!env.MEMORY_DB || !env.MVSEP_API_TOKEN) return
+  const db=env.MEMORY_DB
+  await db.prepare(
+    "CREATE TABLE IF NOT EXISTS mvsep_connection_health ("+
+    "id INTEGER PRIMARY KEY CHECK(id=1), checked_at INTEGER NOT NULL, "+
+    "ok INTEGER NOT NULL, http_status INTEGER NOT NULL)"
+  ).bind().run()
+  const rows=await db.prepare(
+    'SELECT checked_at FROM mvsep_connection_health WHERE id=1'
+  ).bind().all<{checked_at:number}>()
+  if(rows.results[0] && rows.results[0].checked_at > Math.floor(Date.now()/1000)-21600)return
+  try{
+    const response=await fetch(BASE+'/app/user?api_token='+encodeURIComponent(env.MVSEP_API_TOKEN),
+      {signal:AbortSignal.timeout(15000),headers:{'cache-control':'no-store'}})
+    const payload=await response.json() as {success?:boolean}
+    await db.prepare(
+      'INSERT INTO mvsep_connection_health(id,checked_at,ok,http_status) VALUES (1,unixepoch(),?,?) '+
+      'ON CONFLICT(id) DO UPDATE SET checked_at=unixepoch(),ok=excluded.ok,http_status=excluded.http_status'
+    ).bind(response.ok&&payload.success===true?1:0,response.status).run()
+  }catch{
+    await db.prepare(
+      'INSERT INTO mvsep_connection_health(id,checked_at,ok,http_status) VALUES (1,unixepoch(),0,0) '+
+      'ON CONFLICT(id) DO UPDATE SET checked_at=unixepoch(),ok=0,http_status=0'
+    ).bind().run()
+  }
+}
