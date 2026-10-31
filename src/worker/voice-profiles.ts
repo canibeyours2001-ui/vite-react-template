@@ -314,8 +314,9 @@ async function download(env:VoiceEnv,id:string):Promise<Blob>{
  * an uncertain paid request automatically.
  */
 const MVSEP_API='https://sg.mvsep.com/api'
+class MvsepSubmissionRejected extends Error {}
 type MvsepResponse={
-  success?:boolean;status?:string;
+  success?:boolean;status?:string;error?:string;message?:string;
   data?:{hash?:string;link?:string;message?:string;current_order?:number;queue_count?:number;
     finished_chunks?:number;all_chunks?:number;files?:unknown}
 }
@@ -374,8 +375,14 @@ async function mvsepCreate(env:VoiceEnv,job:Job,blob:Blob):Promise<string>{
   const r=await fetch(MVSEP_API+'/separation/create',{method:'POST',body:f,
     signal:AbortSignal.timeout(90000)})
   const j=await r.json() as MvsepResponse
-  if(!r.ok||!j.success||!j.data?.hash)
-    throw new Error('MVSEP rejected submission: '+String(j.data?.message||r.status).slice(0,200))
+  if(!r.ok||!j.success||!j.data?.hash){
+    const reason=String(j.data?.message||j.message||j.error||('HTTP '+r.status)).slice(0,240)
+    // A definitive 4xx/explicit rejection with no task hash did not create a paid job.
+    // Timeouts and unclear server failures still remain submit-uncertain.
+    if(!j.data?.hash && ((r.status>=400&&r.status<500)||j.success===false))
+      throw new MvsepSubmissionRejected(reason)
+    throw new Error('MVSEP task acceptance uncertain: '+reason)
+  }
   return j.data.hash
 }
 async function statusMessage(env:VoiceEnv,chat:string,id:number,text:string){
@@ -473,11 +480,17 @@ export async function processQwenVoiceJobs(env:VoiceEnv):Promise<void>{
     ).bind(job.id).run()
     await statusMessage(env,job.chat_id,id,'Qwen3-TTS submitted to MVSEP.\nJob: '+job.id+'\nTracking automatically every minute.')
   }catch(e){
-    console.error('MVSEP TTS submission uncertain:',e instanceof Error?e.message.slice(0,140):'unknown')
+    const rejected=e instanceof MvsepSubmissionRejected
+    console.error(rejected?'MVSEP TTS input rejected:':'MVSEP TTS submission uncertain:',
+      e instanceof Error?e.message.slice(0,140):'unknown')
     await env.MEMORY_DB.prepare(
-      "UPDATE qwen_clone_jobs SET status='submit-uncertain',updated_at=unixepoch() WHERE id=?"
-    ).bind(job.id).run()
-    await statusMessage(env,job.chat_id,id,'Qwen3-TTS submission failed or timed out. No automatic resubmission, to avoid duplicate charges. Check MVSEP history.').catch(()=>undefined)
+      "UPDATE qwen_clone_jobs SET status=?,updated_at=unixepoch() WHERE id=?"
+    ).bind(rejected?'rejected':'submit-uncertain',job.id).run()
+    await statusMessage(env,job.chat_id,id,rejected
+      ?'MVSEP did not accept this request: '+(e as Error).message.slice(0,200)+
+        '\nMVSEP determines the supported text length. Try a shorter speech passage with /clone.'
+      :'Qwen3-TTS submission failed or timed out. No automatic resubmission, to avoid duplicate charges. Check MVSEP history.'
+    ).catch(()=>undefined)
   }
 }
 
