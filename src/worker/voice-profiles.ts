@@ -1,4 +1,6 @@
 
+import { isAllowedTelegramUser } from './telegram-access'
+
 /**
  * Five reusable Qwen3-TTS Base voice references per authorized Telegram chat.
  *
@@ -25,7 +27,7 @@ export type VoiceMessage = {
   document?:RefFile
   reply_to_message?:{audio?:RefFile;voice?:RefFile;document?:RefFile}
 }
-export type VoiceCallback = { id:string; data?:string; from:{id:number}; message?:{chat:{id:number};message_id:number} }
+export type VoiceCallback = { id:string; data?:string; from:{id:number}; message?:{chat:{id:number;type?:string};message_id:number} }
 type Profile={slot:number;name:string;telegram_file_id:string;ref_text:string}
 type Session={state:string;slot:number|null;custom_file_id:string|null;custom_ref_text:string|null;lang:string}
 type Job={id:number;chat_id:string;telegram_file_id:string;ref_text:string;lang:string;speech_text:string}
@@ -199,7 +201,8 @@ export async function handleVoiceMessage(env:VoiceEnv,msg:VoiceMessage,chat:stri
 export async function handleVoiceCallback(env:VoiceEnv,cb:VoiceCallback):Promise<void>{
   const chat=String(cb.message?.chat.id||'')
   try {
-    if(!chat||chat!==env.TELEGRAM_CHAT_ID||!cb.data?.startsWith('qw:'))return
+    if(!cb.data?.startsWith('qw:') ||
+       !await isAllowedTelegramUser(env,chat,String(cb.from.id),cb.message?.chat.type))return
     await init(env.MEMORY_DB)
     const data=cb.data
     const current=await session(env.MEMORY_DB,chat)
@@ -235,7 +238,8 @@ export async function handleVoiceCallback(env:VoiceEnv,cb:VoiceCallback):Promise
     }
   }catch(e){
     console.error('Qwen callback failure',e instanceof Error?e.message.slice(0,120):'unknown')
-    if(chat===env.TELEGRAM_CHAT_ID)await say(env,chat,'That selection expired or failed. Use /clone to start again.').catch(()=>undefined)
+    if(await isAllowedTelegramUser(env,chat,String(cb.from.id),cb.message?.chat.type))
+      await say(env,chat,'That selection expired or failed. Use /clone to start again.').catch(()=>undefined)
   }finally{
     await tg(env,'answerCallbackQuery',{callback_query_id:cb.id}).catch(()=>undefined)
   }
