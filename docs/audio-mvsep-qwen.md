@@ -76,3 +76,16 @@ IMPORTANT: Qwen inference will respond **not configured** until `QWEN_TTS_API_BA
 Use only voices you own or have permission to clone. Reference transcripts and saved voice labels are private chat metadata inside D1; avoid uploading secret audio to public services.
 
 For delivery, a Modal-compatible endpoint must accept `POST /v1/clone` multipart fields `ref_audio`, `ref_text`, `text`, `language`, and return WAV audio. It must decode OGG/Opus Telegram voice messages as well as WAV/MP3/FLAC or require WAV uploads.
+
+## AI chat assistant and conversational command help
+
+The existing Cloudflare Workers AI chatbot is retained; it continues to keep the most recent **20** Telegram user/assistant messages in D1, with old messages cleaned up after 7 days.
+The assistant now receives **sanitized, text-only live context** for the five voice slots, the current /clone wizard stage, last Qwen clone job, last WAN video job, and last MVSEP job. It receives **no audio bytes, reference transcripts, Telegram file IDs, or API credentials** through this context.
+
+- Send `/help` or `/commands` for an exact command menu.
+- Send `/ask How do I clone using voice 2?` for context-sensitive AI instructions.
+- Ordinary text outside an active /clone wizard also goes to AI.
+- Inside a voice selection workflow, use `/ask ...` to ask questions without accidentally treating the question as speech text.
+- Telegram's native slash-command menu is configured when the Worker updates its existing webhook subscriptions to include `callback_query` for inline voice-profile picker buttons.
+
+The AI is an **advisor**, not an unguarded tool executor. It never launches paid GPU work just because the user mentioned it in conversation. GPU requests require the explicit **Generate audio** confirmation. The bot does not have access to separate ChatGPT conversations or to pre-existing Telegram chat history that it never stored.
