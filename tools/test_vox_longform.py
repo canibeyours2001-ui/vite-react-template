@@ -32,5 +32,15 @@ for sample in cases:
     assert sum(len(part) for part in chunks) > 0
 assert "/kaggle/temp/VoxCPM2" in script
 assert "/kaggle/working/vox_generated.mp3" in script
+assert "/kaggle/working/vox_voice_sample.mp3" in script
+assert "reference_wav_path" in script
+assert "voice_ref_b64" in script
+assert "base64.b64decode" in script
+assert "if TASK.get('voice_ref_b64')" in script
+# Verify code compiles both with and without a reference clip.
+with_reference = json.dumps(json.dumps({
+    "text": "မင်္ဂလာပါ။", "voice_ref_b64": "SUQzU0FNUExF"
+}), ensure_ascii=False)
+ast.parse(script.replace("__VOX_TASK_LITERAL__", with_reference))
 assert "ffmpeg" in script
 print("PASS: embedded Kaggle Python syntax, long-form chunking, 240-char chunks, MP3 output")
