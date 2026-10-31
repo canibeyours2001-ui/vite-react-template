@@ -56,3 +56,23 @@ The source branch does not automatically prove the Cloudflare production Worker 
 Verify the deployed Worker has the MVSEP routes before testing and keep all preexisting WAN commands intact.
 
 There is no `/clone` generation on Telegram yet: `/clone_help` explains the GPU prerequisite and `/clone` safely refuses to spend on an unconfigured service.
+
+## Five reusable voice profiles and custom cloning
+
+A separate Telegram conversational flow now supports five named slots using D1 metadata and Telegram file IDs:
+
+1. Send a **3–15-second** clear reference voice/audio recording to the authorized Telegram bot.
+2. **Reply to that message** with `/savevoice 1 Narrator | the exact words spoken in the recording`.
+3. Repeat with slots **1–5** and labels of your choice.
+4. Send `/voices` to list saved profiles, or `/clone` to display Telegram inline buttons for each saved voice and **Upload custom voice**.
+5. When using a saved profile, type the target speech text. For custom voice, upload recording, provide its exact reference transcript, then enter desired speech text.
+6. Confirm the **Generate audio** button. No inference starts until confirmed.
+7. A scheduled Worker checks one explicitly confirmed job at a time and returns a WAV through Telegram once the Qwen GPU backend is configured.
+
+`/clone_help`, `/clonelang English`, and `/cancel` are also supported. Available language names: Auto, English, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian. **Burmese is experimental/unsupported** by the official model.
+
+IMPORTANT: Qwen inference will respond **not configured** until `QWEN_TTS_API_BASE` and `QWEN_TTS_API_KEY` are available. Voice selection and saving reference metadata do not require any GPU. The reference audio is **not stored in D1 or R2**: the bot records the Telegram `file_id` and fetches the recording when generating speech. This is convenient but relies on Telegram file availability. A permanent storage enhancement should use private R2 objects for durability.
+
+Use only voices you own or have permission to clone. Reference transcripts and saved voice labels are private chat metadata inside D1; avoid uploading secret audio to public services.
+
+For delivery, a Modal-compatible endpoint must accept `POST /v1/clone` multipart fields `ref_audio`, `ref_text`, `text`, `language`, and return WAV audio. It must decode OGG/Opus Telegram voice messages as well as WAV/MP3/FLAC or require WAV uploads.
