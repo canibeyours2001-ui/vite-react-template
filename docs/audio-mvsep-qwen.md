@@ -73,3 +73,14 @@ Only clone voices you own or have permission to use. MVSEP jobs may consume cred
 Previous Cloudflare deployment version before the MVSEP rollout:
 `d3656c5e-7f68-4d9d-80d7-ab599da4ec11`.
 Record new deployment versions after each upgrade. GitHub is the source of truth for further changes.
+
+## Telegram owner allowlist
+
+The Worker is restricted to **private chats**. The original `TELEGRAM_CHAT_ID` Cloudflare secret is the permanent owner. Owner alone can manage the additional entries stored in the `telegram_allowed_users` D1 table. Only sender IDs matching their private chat ID are accepted; inline voice-cloning callbacks perform the same check.
+
+- `/whoami`: show your numeric Telegram user ID (also accessible before authorization)
+- `/allowed`: owner-only, list additional authorized IDs
+- `/allow 123456789`: owner-only, authorize that user ID
+- `/deny 123456789`: owner-only, revoke that user ID
+
+Unauthorized users receive no access to saved voice data, AI chat, MVSEP audio, or WAN video. Group chats are not authorized. Do not put the owner ID or additional users' IDs into source control: entries live in the private D1 database. New accounts can message `/whoami` privately to obtain their ID for the owner. Owner access remains available even if the D1 allowlist lookup fails.
