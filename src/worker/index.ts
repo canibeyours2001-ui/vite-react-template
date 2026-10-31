@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { handleAudioTelegram, pollAudioJobs, mvsepStatus, checkMvsepAccount } from './audio-tools'
 import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAssistantContext } from './voice-profiles'
 import { isAllowedTelegramUser, handleAccessCommand, isAccessCommand } from './telegram-access'
-import {handleVoxTelegram,checkKaggleConnection,pollVoxKaggle} from './vox-kaggle-direct'
+import {handleVoxTelegram,checkKaggleConnection,pollVoxKaggle,probeKaggleReadMethods} from './vox-kaggle-direct'
 
 type AIClient = {
   run: (
@@ -949,7 +949,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }
