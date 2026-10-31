@@ -3553,6 +3553,9 @@ async function storeVoxReference(env2, jobId, chat, url) {
     if (!(bytes[0] === 73 && bytes[1] === 68 && bytes[2] === 51 || bytes[0] === 255 && (bytes[1] & 224) === 224)) return false;
     await setupVoxVoices(env2.MEMORY_DB);
     await env2.MEMORY_DB.prepare(
+      "DELETE FROM vox_voice_samples WHERE created_at < unixepoch()-604800"
+    ).bind().run();
+    await env2.MEMORY_DB.prepare(
       "INSERT OR REPLACE INTO vox_voice_samples(job_id,chat_id,audio_b64) VALUES(?,?,?)"
     ).bind(jobId, chat, toB64(bytes)).run();
     return true;
