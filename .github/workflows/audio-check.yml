@@ -24,14 +24,26 @@ jobs:
       - name: Preserve compiled Worker for safe direct Cloudflare deployment
         if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/pyvt-kaggle-telegram')
         run: |
-          mkdir -p deploy
-          cp dist/vite_react_template/index.js deploy/worker-bundle.mjs
-          git add -f deploy/worker-bundle.mjs
-          if git diff --cached --quiet; then
-            echo "Worker bundle unchanged"
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "Build MVSEP Worker bundle [skip ci]"
-            git push origin HEAD:refs/heads/feature/pyvt-kaggle-telegram
-          fi
+          cp dist/vite_react_template/index.js /tmp/pyvt-worker-bundle.mjs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch origin feature/pyvt-kaggle-telegram
+            git checkout -B feature/pyvt-kaggle-telegram origin/feature/pyvt-kaggle-telegram
+            mkdir -p deploy
+            cp /tmp/pyvt-worker-bundle.mjs deploy/worker-bundle.mjs
+            git add -f deploy/worker-bundle.mjs
+            if git diff --cached --quiet; then
+              echo "Worker bundle unchanged"
+              break
+            fi
+            git commit -m "Build pyVideoTrans Worker bundle [skip ci]"
+            if git push origin HEAD:refs/heads/feature/pyvt-kaggle-telegram; then
+              echo "Published compiled bundle"
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "Could not push compiled bundle after 3 attempts"
+              exit 1
+            fi
+          done
