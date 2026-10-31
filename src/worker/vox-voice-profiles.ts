@@ -33,6 +33,10 @@ export async function storeVoxReference(env:VoiceEnv,jobId:number,chat:string,ur
   if(!((bytes[0]===73&&bytes[1]===68&&bytes[2]===51)||
     (bytes[0]===255&&(bytes[1]&224)===224)))return false
   await setupVoxVoices(env.MEMORY_DB)
+  // Unsaved previews expire after seven days; saved profiles are separate and never pruned here.
+  await env.MEMORY_DB.prepare(
+   'DELETE FROM vox_voice_samples WHERE created_at < unixepoch()-604800'
+  ).bind().run()
   await env.MEMORY_DB.prepare(
    "INSERT OR REPLACE INTO vox_voice_samples(job_id,chat_id,audio_b64) VALUES(?,?,?)"
   ).bind(jobId,chat,toB64(bytes)).run()
