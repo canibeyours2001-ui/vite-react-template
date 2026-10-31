@@ -4492,6 +4492,92 @@ async function pyvtPreflight(env2) {
     }
   }
 }
+async function pyvtEdgeSmoke(env2) {
+  if (!env2.MEMORY_DB || !env2.KAGGLE_API_TOKEN) return;
+  const db = env2.MEMORY_DB;
+  await db.prepare(
+    "CREATE TABLE IF NOT EXISTS pyvt_edge_smoke (id INTEGER PRIMARY KEY CHECK(id=1),status TEXT NOT NULL,version INTEGER,detail TEXT NOT NULL DEFAULT '',updated_at INTEGER NOT NULL DEFAULT (unixepoch()))"
+  ).bind().run();
+  const rows = await db.prepare("SELECT status,version FROM pyvt_edge_smoke WHERE id=1").bind().all();
+  const job = rows.results[0];
+  if (!job) return;
+  const name = "pyvideotrans-edge-tts-smoke";
+  if (job.status === "requested") {
+    const lock = await db.prepare(
+      "UPDATE pyvt_edge_smoke SET status='submitting',updated_at=unixepoch() WHERE id=1 AND status='requested'"
+    ).bind().run();
+    if (!lock.meta.changes) return;
+    const code = [
+      "import pathlib,sys,subprocess",
+      "root=pathlib.Path('/kaggle/temp/pyvt-edge-smoke')",
+      "subprocess.run([sys.executable,'-m','pip','install','-q','uv'],check=True,timeout=250)",
+      "subprocess.run(['git','clone','--quiet','--depth','1','https://github.com/canibeyours2001-ui/pyvideotrans.git',str(root)],check=True,timeout=150)",
+      "subprocess.run(['uv','python','install','3.10'],check=True,timeout=300)",
+      "subprocess.run(['uv','sync','--python','3.10','--no-dev','--project',str(root)],check=True,timeout=2100)",
+      "file=pathlib.Path('/kaggle/temp/test-en.srt')",
+      "file.write_text('1\\n00:00:00,000 --> 00:00:03,000\\nHello, this is a voice dubbing test.\\n',encoding='utf-8')",
+      "args=[str(root/'.venv/bin/python'),str(root/'tools/kaggle_video_dub_job.py'),'--task','tts','--input',str(file),'--tts','edge','--voice-role','en-US-AriaNeural','--target-language-code','en','--temp-output','/kaggle/temp/pyvt-speech-results','--final-output','/kaggle/working/pyvideotrans_result.wav','--timeout-seconds','900']",
+      "subprocess.run(args,check=True,cwd=str(root),timeout=1000)",
+      "out=pathlib.Path('/kaggle/working/pyvideotrans_result.wav')",
+      "assert out.is_file() and out.stat().st_size>4096, 'Result audio missing'",
+      "print('PYVT_EDGE_TTS_OK',out.stat().st_size,flush=True)"
+    ].join("\n");
+    try {
+      const r = await kaggle(env2, "push", {
+        slug: OWNER + "/" + name,
+        newTitle: name,
+        text: code,
+        language: "python",
+        kernelType: "script",
+        isPrivate: true,
+        enableGpu: false,
+        enableInternet: true,
+        sessionTimeoutSeconds: 3600,
+        datasetDataSources: [],
+        competitionDataSources: [],
+        kernelDataSources: [],
+        modelDataSources: []
+      });
+      const version2 = Number(r.versionNumber || r.version_number || 0);
+      if (!Number.isSafeInteger(version2) || version2 < 1) throw Error("No version in push response");
+      await db.prepare(
+        "UPDATE pyvt_edge_smoke SET status='submitted',version=?,updated_at=unixepoch() WHERE id=1"
+      ).bind(version2).run();
+    } catch (e) {
+      console.error("Edge TTS smoke submission uncertain", e instanceof Error ? e.name : "unknown");
+      await db.prepare(
+        "UPDATE pyvt_edge_smoke SET status='submit-uncertain',detail=?,updated_at=unixepoch() WHERE id=1"
+      ).bind("Kaggle push status uncertain").run();
+    }
+    return;
+  }
+  if ((job.status === "submitted" || job.status === "running") && job.version) {
+    try {
+      const st = await kaggle(env2, "status", { userName: OWNER, kernelSlug: name, versionLabel: "v" + job.version });
+      const status = String(st.status || st.state || "").toUpperCase();
+      if (status.includes("COMPLETE") || status.includes("SUCCESS")) {
+        const output = await kaggle(env2, "output", { userName: OWNER, kernelSlug: name, versionLabel: "v" + job.version });
+        const log = String(output.log || "");
+        const found = log.match(/PYVT_EDGE_TTS_OK\s+(\d+)/);
+        const files = output.files || output.outputFiles;
+        const wavPresent = Array.isArray(files) && files.some((x) => x && typeof x === "object" && String(x.fileName || x.file_name) === "pyvideotrans_result.wav");
+        const ok = Boolean(found) && wavPresent;
+        await db.prepare(
+          "UPDATE pyvt_edge_smoke SET status=?,detail=?,updated_at=unixepoch() WHERE id=1"
+        ).bind(ok ? "done" : "failed", ok ? "Edge TTS generated actual WAV bytes=" + found?.[1] : "Kaggle finished without verified WAV/marker; inspect private notebook logs").run();
+      } else if (status.includes("ERROR") || status.includes("FAIL") || status.includes("CANCEL")) {
+        await db.prepare(
+          "UPDATE pyvt_edge_smoke SET status='failed',detail=?,updated_at=unixepoch() WHERE id=1"
+        ).bind(String(st.failureMessage || status).slice(0, 280)).run();
+      } else {
+        await db.prepare("UPDATE pyvt_edge_smoke SET status='running',updated_at=unixepoch() WHERE id=1").bind().run();
+      }
+    } catch (e) {
+      const err = e instanceof Error ? e.message.slice(0, 220) : "unknown";
+      await db.prepare("UPDATE pyvt_edge_smoke SET detail=?,updated_at=unixepoch() WHERE id=1").bind(err).run();
+    }
+  }
+}
 async function pollPyvt(env2) {
   if (!env2.KAGGLE_API_TOKEN || !env2.MEMORY_DB || !await isReady(env2)) return;
   await init(env2.MEMORY_DB);
@@ -5370,7 +5456,7 @@ const index = {
     } catch (error) {
       console.error("Telegram webhook registration check failed:", error instanceof Error ? error.name : "unknown");
     }
-    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2), checkKaggleConnection(env2), pollVoxKaggle(env2), probeKaggleReadMethods(env2), pollPyvt(env2), pyvtPreflight(env2)]);
+    const results = await Promise.allSettled([processQueuedMotion(env2), pollAudioJobs(env2), processQwenVoiceJobs(env2), checkMvsepAccount(env2), checkKaggleConnection(env2), pollVoxKaggle(env2), probeKaggleReadMethods(env2), pollPyvt(env2), pyvtPreflight(env2), pyvtEdgeSmoke(env2)]);
     for (const r of results) {
       if (r.status === "rejected") console.error("Scheduled processing failed", String(r.reason).slice(0, 160));
     }
