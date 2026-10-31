@@ -107,6 +107,53 @@ export async function checkKaggleConnection(env:VoxEnv):Promise<void>{
   'primary_status=excluded.primary_status,secondary_status=excluded.secondary_status'
  ).bind(tokenKind,primary,secondary).run()
 }
+
+/** Read-only compatibility probe against the user's existing public notebook. */
+export async function probeKaggleReadMethods(env:VoxEnv):Promise<void>{
+ if(!env.KAGGLE_API_TOKEN||!env.MEMORY_DB)return
+ await env.MEMORY_DB.prepare(
+ 'CREATE TABLE IF NOT EXISTS vox_kaggle_rpc_probe ('+
+ 'id INTEGER PRIMARY KEY CHECK(id=1),checked_at INTEGER NOT NULL,'+
+ 'get_status INTEGER NOT NULL,post_status INTEGER NOT NULL,'+
+ 'get_output INTEGER NOT NULL,post_output INTEGER NOT NULL,'+
+ 'status_shape TEXT NOT NULL,output_shape TEXT NOT NULL)'
+ ).bind().run()
+ const existing=await env.MEMORY_DB.prepare(
+ 'SELECT checked_at FROM vox_kaggle_rpc_probe WHERE id=1'
+ ).bind().all<{checked_at:number}>()
+ if(existing.results[0])return
+ const args={userName:OWNER,kernelSlug:'voxcpm2-full-working'}
+ const shape=(body:Record<string,unknown>)=>Object.keys(body||{}).filter(x=>
+  ['status','failureMessage','files','nextPageToken','log','url','code','message','error'].includes(x)
+ ).join(',')
+ const probe=async(action:'status'|'output',method:'GET'|'POST')=>{
+  const base='https://api.kaggle.com/v1/kernels/'+action
+  const query='?userName='+OWNER+'&kernelSlug=voxcpm2-full-working'
+  try{
+   const r=await fetch(base+(method==='GET'?query:''),{
+    method,headers:{
+     Authorization:'Bearer '+env.KAGGLE_API_TOKEN,
+     Accept:'application/json',
+     ...(method==='POST'?{'Content-Type':'application/json'}:{})
+    },
+    ...(method==='POST'?{body:JSON.stringify(args)}:{}),
+    redirect:'manual',signal:AbortSignal.timeout(12000)
+   })
+   let data:Record<string,unknown>={}
+   if((r.headers.get('content-type')||'').includes('json'))
+    data=await r.json().catch(()=>({})) as Record<string,unknown>
+   else await r.body?.cancel()
+   return {status:r.status,shape:shape(data)}
+  }catch{return {status:0,shape:'network-failure'}}
+ }
+ const [a,b,c,d]=await Promise.all([
+  probe('status','GET'),probe('status','POST'),probe('output','GET'),probe('output','POST')
+ ])
+ await env.MEMORY_DB.prepare(
+ 'INSERT INTO vox_kaggle_rpc_probe(id,checked_at,get_status,post_status,get_output,post_output,status_shape,output_shape) VALUES(1,unixepoch(),?,?,?,?,?,?)'
+ ).bind(a.status,b.status,c.status,d.status,a.shape||b.shape,c.shape||d.shape).run()
+}
+
 async function verified(env:VoxEnv):Promise<boolean>{
  if(!env.KAGGLE_API_TOKEN)return false
  await init(env.MEMORY_DB)
