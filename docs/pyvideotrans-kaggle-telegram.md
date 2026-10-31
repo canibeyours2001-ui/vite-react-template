@@ -12,6 +12,7 @@
 /dub_help
 /dub edge en my
 /dub vox en my
+/dub vox en my 1    # reuse private saved VoxCPM2 voice profile slot 1
 /dub_status
 ```
 Attach a video with a `/dub ...` caption, or reply to an existing video. The first beta is limited to **20 MB input**, matching Telegram Bot API's `getFile` limit, and **49 MB output** for `sendVideo`. It uses pyVideoTrans `--task vtv` to transcribe, translate with its free Google translation provider (ID 0), dub and assemble. Translation might fail due to upstream changes and provider rate limits; there are no quality guarantees for Burmese. Use only personal, non-commercial media consistent with the service terms.
@@ -46,3 +47,5 @@ References: https://core.telegram.org/bots/api and https://github.com/Kaggle/kag
 ### Private activation switch
 
 The Worker creates `pyvt_config` only when a `/dub` request or poll needs it. If no row exists, video GPU submissions are disabled. After CPU preflight and a controlled successful video integration test, the administrator can deliberately enable `pyvt_config.enabled=1` using Cloudflare D1 (never via Telegram). This keeps existing users from accidentally consuming GPU quota on untested video builds.
+
+The optional numeric 1–5 in `/dub vox ...` reuses the Telegram user's saved VoxCPM2 reference sample. The sample is embedded only into the private Kaggle job source (never into a public file URL); that job decodes it to a WAV and supplies `--reference-wav` to native VoxCPM2 to improve timbre consistency over subtitle segments. Edge TTS takes a Microsoft voice name instead of a numbered slot.
