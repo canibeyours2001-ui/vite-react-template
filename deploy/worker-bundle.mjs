@@ -4447,9 +4447,37 @@ async function pyvtPreflight(env2) {
     } catch (e) {
       const reason = e instanceof Error ? e.message.slice(0, 160) : "unknown";
       console.error("pyVideoTrans preflight poll failed", e instanceof Error ? e.name : "unknown");
+      let evidence = "";
+      if (reason.includes("HTTP 403")) {
+        try {
+          const headers = { Authorization: "Bearer " + env2.KAGGLE_API_TOKEN, Accept: "application/json" };
+          const requests = [
+            "https://api.kaggle.com/v1/kernels/list?user=" + OWNER + "&pageSize=80",
+            "https://api.kaggle.com/v1/kernels/status?userName=" + OWNER + "&kernelSlug=pyvideotrans-compatibility-check"
+          ];
+          const checked = await Promise.all(requests.map(async (url) => {
+            const r = await fetch(url, { headers, signal: AbortSignal.timeout(12e3) });
+            const body = await r.json().catch(() => null);
+            if (Array.isArray(body)) {
+              const matching = body.filter((item) => typeof item === "object" && item !== null && JSON.stringify(item).toLowerCase().includes("pyvideotrans")).slice(0, 3);
+              const safe = matching.map((item) => {
+                const x = item;
+                return String(x.ref || x.slug || x.title || x.kernelRef || "unknown").slice(0, 100);
+              });
+              return "list " + r.status + " count=" + body.length + " matching=" + safe.join("|");
+            }
+            const data = body && typeof body === "object" ? body : {};
+            const reasonText = String(data.message || data.error || "").replace(/[\\r\\n]/g, " ").slice(0, 90);
+            return (url.includes("/status?") ? "status " : "list ") + r.status + " " + reasonText;
+          }));
+          evidence = checked.join("; ");
+        } catch {
+          evidence = "metadata probe unavailable";
+        }
+      }
       await db.prepare(
         "UPDATE pyvt_preflight SET detail=?,updated_at=unixepoch() WHERE id=1 AND status IN ('submitted','running')"
-      ).bind("Status API: " + reason).run();
+      ).bind(("Status API: " + reason + "; " + evidence).slice(0, 460)).run();
     }
   }
 }
