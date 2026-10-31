@@ -59,24 +59,54 @@ async function kaggle(env:VoxEnv,action:string,body:Record<string,unknown>,timeo
 export async function checkKaggleConnection(env:VoxEnv):Promise<void>{
  if(!env.MEMORY_DB)return
  await init(env.MEMORY_DB)
- const row=await env.MEMORY_DB.prepare('SELECT checked_at FROM vox_kaggle_health WHERE id=1')
-   .bind().all<{checked_at:number}>()
- if(row.results[0]?.checked_at && row.results[0].checked_at > Math.floor(Date.now()/1000)-21600)return
- let ok=0,http=0
- try{
-  if(env.KAGGLE_API_TOKEN){
-   // Read only; verify account's notebook API before allowing a GPU job.
-   await kaggle(env,'list',{user:OWNER,pageSize:1})
-   ok=1;http=200
+ await env.MEMORY_DB.prepare(
+  'CREATE TABLE IF NOT EXISTS vox_kaggle_probe ('+
+  'id INTEGER PRIMARY KEY CHECK(id=1),checked_at INTEGER NOT NULL,'+
+  'token_kind TEXT NOT NULL,primary_status INTEGER NOT NULL,secondary_status INTEGER NOT NULL)'
+ ).bind().run()
+ const row=await env.MEMORY_DB.prepare('SELECT checked_at,ok FROM vox_kaggle_health WHERE id=1')
+   .bind().all<{checked_at:number;ok:number}>()
+ const last=row.results[0]
+ const age=last?.ok===1?21600:60
+ if(last?.checked_at && last.checked_at > Math.floor(Date.now()/1000)-age)return
+ const token=env.KAGGLE_API_TOKEN||''
+ const tokenKind=token.startsWith('KGAT_')?'personal-token':
+   token.startsWith('{')?'legacy-json':token.length?'unknown-format':'missing'
+ let primary=0,secondary=0,ok=0
+ if(token){
+  for(const [index,url] of [
+   'https://api.kaggle.com/v1/kernels/list',
+   'https://www.kaggle.com/api/v1/kernels/list'
+  ].entries()){
+   try{
+    const response=await fetch(url,{
+     method:'POST',
+     headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Accept:'application/json'},
+     body:JSON.stringify({user:OWNER,pageSize:1}),
+     signal:AbortSignal.timeout(12000),
+    })
+    const body=await response.json().catch(()=>({})) as Record<string,unknown>
+    const status=response.status
+    if(index===0)primary=status
+    else secondary=status
+    if(response.ok && !body.error && !(typeof body.code==='number'&&body.code>=400)){
+     ok=1
+     break
+    }
+   }catch(e){
+    console.error('Kaggle probe network failure',index,e instanceof Error?e.name:'unknown')
+   }
   }
- }catch(e){
-  console.error('Kaggle account check failed',e instanceof Error?e.message.slice(0,80):'unknown')
-  http=401
  }
  await env.MEMORY_DB.prepare(
   'INSERT INTO vox_kaggle_health(id,checked_at,ok,http_status) VALUES(1,unixepoch(),?,?) '+
   'ON CONFLICT(id) DO UPDATE SET checked_at=unixepoch(),ok=excluded.ok,http_status=excluded.http_status'
- ).bind(ok,http).run()
+ ).bind(ok,primary||secondary).run()
+ await env.MEMORY_DB.prepare(
+  'INSERT INTO vox_kaggle_probe(id,checked_at,token_kind,primary_status,secondary_status) VALUES(1,unixepoch(),?,?,?) '+
+  'ON CONFLICT(id) DO UPDATE SET checked_at=unixepoch(),token_kind=excluded.token_kind,'+
+  'primary_status=excluded.primary_status,secondary_status=excluded.secondary_status'
+ ).bind(tokenKind,primary,secondary).run()
 }
 async function verified(env:VoxEnv):Promise<boolean>{
  if(!env.KAGGLE_API_TOKEN)return false
