@@ -249,6 +249,72 @@ async function sendVideo(env:VideoEnv,job:Job,url:string):Promise<void>{
  const resp=await sent.json() as {ok?:boolean}
  if(!sent.ok||!resp.ok)throw Error('Telegram sendVideo failed')
 }
+
+/** One-off, CPU-only Kaggle compatibility test for pyVideoTrans Python 3.10.
+ *  Never runs unless requested explicitly via private D1 control table.
+ *  No video, speech content, Kaggle GPU, or Telegram messages are used.
+ */
+export async function pyvtPreflight(env:VideoEnv):Promise<void>{
+ if(!env.KAGGLE_API_TOKEN||!env.MEMORY_DB)return
+ const db=env.MEMORY_DB
+ await db.prepare('CREATE TABLE IF NOT EXISTS pyvt_preflight ('+
+   "id INTEGER PRIMARY KEY CHECK(id=1),status TEXT NOT NULL,version INTEGER,"+
+   "detail TEXT NOT NULL DEFAULT '',updated_at INTEGER NOT NULL DEFAULT (unixepoch()))"
+ ).bind().run()
+ const result=await db.prepare('SELECT status,version FROM pyvt_preflight WHERE id=1')
+  .bind().all<{status:string;version:number|null}>()
+ const job=result.results[0]
+ if(!job)return
+ if(job.status==='requested'){
+  const claim=await db.prepare("UPDATE pyvt_preflight SET status='submitting',updated_at=unixepoch() WHERE id=1 AND status='requested'").bind().run()
+  if(!claim.meta.changes)return
+  const python=[
+    'import subprocess,sys,pathlib',
+    "subprocess.run([sys.executable,'-m','pip','install','-q','uv'],check=True,timeout=250)",
+    "root=pathlib.Path('/kaggle/temp/pyvt-check')",
+    "subprocess.run(['git','clone','--quiet','--depth','1','--branch','feature/kaggle-edge-voxcpm2-dubbing','https://github.com/canibeyours2001-ui/pyvideotrans.git',str(root)],check=True,timeout=150)",
+    "subprocess.run(['uv','python','install','3.10'],check=True,timeout=300)",
+    "subprocess.run(['uv','sync','--python','3.10','--no-dev','--project',str(root)],check=True,timeout=2100)",
+    "p=subprocess.run([str(root/'.venv/bin/python'),str(root/'cli.py'),'--list','providers'],cwd=str(root),capture_output=True,text=True,timeout=120)",
+    "print('PYVT_PREFLIGHT_EXIT',p.returncode,'STDERR',p.stderr[-350:].replace('\\n',' '),flush=True)",
+    "assert p.returncode==0, 'pyVideoTrans CLI startup failed'",
+    "assert 'VoxCPM2' in p.stdout, 'VoxCPM2 provider missing'",
+    "assert 'Edge-TTS' in p.stdout, 'Edge provider missing'",
+    "print('PYVT_PREFLIGHT_OK',flush=True)"
+  ].join('\n')
+  try{
+   const pushed=await kaggle(env,'push',{
+    slug:'cyawzin/pyvideotrans-compatibility-check',
+    newTitle:'Private pyVideoTrans Python 3.10 environment check',
+    text:python,language:'python',kernelType:'script',isPrivate:true,
+    enableGpu:false,enableInternet:true,sessionTimeoutSeconds:3600,
+    datasetDataSources:[],competitionDataSources:[],kernelDataSources:[],modelDataSources:[]
+   })
+   const v=Number(pushed.versionNumber||pushed.version_number||0)
+   if(!Number.isSafeInteger(v)||v<1)throw Error('Kaggle returned no version')
+   await db.prepare("UPDATE pyvt_preflight SET status='submitted',version=?,updated_at=unixepoch() WHERE id=1")
+    .bind(v).run()
+  }catch(e){
+   console.error('pyVideoTrans compatibility test submit uncertain',e instanceof Error?e.name:'unknown')
+   await db.prepare("UPDATE pyvt_preflight SET status='submit-uncertain',detail='Kaggle submission not confirmed',updated_at=unixepoch() WHERE id=1").bind().run()
+  }
+  return
+ }
+ if((job.status==='submitted'||job.status==='running')&&job.version){
+  try{
+   const response=await kaggle(env,'status',{
+    userName:OWNER,kernelSlug:'pyvideotrans-compatibility-check',versionLabel:'v'+job.version
+   })
+   const state=String(response.status||response.state||'').toUpperCase()
+   let status='running',detail=''
+   if(state.includes('COMPLETE')||state.includes('SUCCESS')){status='done';detail='Kaggle CPU environment completed; inspect full script log for CLI assert'}
+   else if(state.includes('ERROR')||state.includes('FAIL')||state.includes('CANCEL')){status='failed';detail=String(response.failureMessage||state).slice(0,240)}
+   await db.prepare("UPDATE pyvt_preflight SET status=?,detail=?,updated_at=unixepoch() WHERE id=1 AND status IN ('submitted','running')")
+     .bind(status,detail).run()
+  }catch(e){console.error('pyVideoTrans preflight poll failed',e instanceof Error?e.name:'unknown')}
+ }
+}
+
 export async function pollPyvt(env:VideoEnv):Promise<void>{
  if(!READY||!env.KAGGLE_API_TOKEN||!env.MEMORY_DB)return
  await init(env.MEMORY_DB)
