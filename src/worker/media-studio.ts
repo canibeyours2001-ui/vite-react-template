@@ -50,7 +50,9 @@ async function media(env,chatId,url,type='document',extra={}) {
   if(b.size>48*1024*1024)throw Error('Result exceeds Telegram bot upload size; use the provider link');
   const form=new FormData();
   form.set('chat_id',String(chatId));
-  form.set(type,new File([b],type==='audio'?'result.mp3':'result.'+(b.type.includes('png')?'png':'jpg'),{type:b.type||'application/octet-stream'}));
+  const suffix=(new URL(url).pathname.match(/\.([a-z0-9]{2,5})$/i)||[])[1]?.toLowerCase();
+  const ext=['mp3','wav','flac','m4a','png','jpg','jpeg','webp','mp4','zip','ogg'].includes(suffix)?suffix:(b.type.includes('png')?'png':b.type.includes('jpeg')?'jpg':'bin');
+  form.set(type,new File([b],'result.'+ext,{type:b.type||'application/octet-stream'}));
   return tg(env,type==='audio'?'sendAudio':type==='photo'?'sendPhoto':'sendDocument',form);
 }
 async function session(env,id) {
@@ -310,7 +312,7 @@ async function deliverResult(env,j,urls) {
   if(!unique.length)throw Error('No supported output URLs in provider result');
   let sent=0;
   for(const u of unique.slice(0,8)) {
-    try {await media(env,j.chat_id,u,/\.(mp3|wav|m4a|flac)(\?|$)/i.test(u)?'audio':'document',{cookie:j.client_slot==null?null:'client_id='+imageIds(env)[j.client_slot]});sent++;}
+    try {await media(env,j.chat_id,u,/\.(mp3|m4a)(\?|$)/i.test(u)?'audio':'document',{cookie:j.client_slot==null?null:'client_id='+imageIds(env)[j.client_slot]});sent++;}
     catch(err) {if(sent===0)throw err;await message(env,j.chat_id,'Additional output: '+truncate(u,500));}
   }
   if(!sent)throw Error('Could not send result');
