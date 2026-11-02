@@ -395,9 +395,10 @@ async function handleMessage(env,m) {
     const model=IMAGE_MODELS.find(x=>x.id===s.model);
     if(!model)throw Error('Choose an image model first');
     const started=Date.now();
-    const params={prompt:text,seed:Math.floor(Math.random()*1000000)};
+    const params={prompt:text};
     if(model.output==='base64')params.steps=model.steps;
     else {
+      params.seed=Math.floor(Math.random()*1000000);
       params.num_steps=model.steps;
       if(s.width&&s.height){params.width=s.width;params.height=s.height;}
     }
