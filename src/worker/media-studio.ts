@@ -1,5 +1,6 @@
 // @ts-nocheck
 import {providerReceipt,duration,aiFooter} from './usage-receipts'
+import {UPGEN_MODELS,UPGEN_ASPECTS} from './imageup-generation'
 // CYAW Media Studio: existing Hono/Telegram integration, no second webhook.
 
 // Use a stable regional host for creation. Old SG-host jobs may still be visible only on DE/DE2.
@@ -51,7 +52,7 @@ async function media(env,chatId,url,type='document',extra={}) {
   const form=new FormData();
   form.set('chat_id',String(chatId));
   const suffix=(new URL(url).pathname.match(/\.([a-z0-9]{2,5})$/i)||[])[1]?.toLowerCase();
-  const ext=['mp3','wav','flac','m4a','png','jpg','jpeg','webp','mp4','zip','ogg'].includes(suffix)?suffix:(b.type.includes('png')?'png':b.type.includes('jpeg')?'jpg':'bin');
+  const ext=['mp3','wav','flac','m4a','png','jpg','jpeg','webp','mp4','zip','ogg'].includes(suffix)?suffix:(type==='audio'||b.type.includes('audio/mpeg')?'mp3':b.type.includes('png')?'png':b.type.includes('jpeg')?'jpg':'bin');
   form.set(type,new File([b],'result.'+ext,{type:b.type||'application/octet-stream'}));
   return tg(env,type==='audio'?'sendAudio':type==='photo'?'sendPhoto':'sendDocument',form);
 }
@@ -116,12 +117,13 @@ function optFields(algo) {
 }
 const home=keys([
  [btn('🎨 Generate image','provider:menu'),btn('🔎 Upscale','i:upscale')],
+ [btn('🖼 Image-upscaling.net Generator','upgen:menu'),btn('🎙 Image-site TTS','tts:menu')],
  [btn('🧽 Remove background','i:removebg'),btn('🖌 Re-Imagine','i:reimagine')],
  [btn('🗣 Voice / TTS','mv:voice:0'),btn('🎼 Audio generation','mv:audio:0')],
  [btn('🎚 Separate / Enhance','mv:separate:0'),btn('🧰 All MVSEP models','mv:all:0')],
  [btn('📋 My jobs','jobs'),btn('ℹ️ Help','help')]
 ]);
-const HELP='CYAW Media Studio\n\n/studio — Generate or edit an image\n/mvvoice — MVSEP TTS / voice design / cloning\n/mvaudio — MVSEP music and sounds\n/mvseparate — MVSEP vocal/music separation\n/mvsep — All live MVSEP tools\n/imagetts — Image-upscaling.net TTS\n/studiomodels — Show live model counts\n/studiojobs — Recent jobs\n/studio_cancel — Reset current menu\n\nSelect a tool, model and parameters, then send your text or media. Files must be uploaded only when the bot requests them. All jobs are private to authorized users. Quotas and credits belong to the providers.';
+const HELP='CYAW Media Studio\n\n/studio — Generate or edit an image\n/imageup — image-upscaling.net image generator and styles\n/mvvoice — MVSEP TTS / voice design / cloning\n/mvaudio — MVSEP music and sounds\n/mvseparate — MVSEP vocal/music separation\n/mvsep — All live MVSEP tools\n/imagetts — Image-upscaling.net TTS\n/studiomodels — Show live model counts\n/studiojobs — Recent jobs\n/studio_cancel — Reset current menu\n\nSelect a tool, model and parameters, then send your text or media. Files must be uploaded only when the bot requests them. All jobs are private to authorized users. Quotas and credits belong to the providers.';
 async function showCatalog(env,chat,scope,page=0) {
   const all=await catalog(scope), per=8, p=Math.max(0,Math.min(page,Math.ceil(all.length/per)-1));
   const cur=all.slice(p*per,p*per+per);
@@ -139,8 +141,36 @@ async function imageConfig() {
   return r.json();
 }
 async function imageMenu(env,chat) {return message(env,chat,'Choose an image tool:',home)}
+async function imageUpMenu(env,chat){
+ const rows=UPGEN_MODELS.map((model,i)=>[btn(model.name+' · €'+(model.priceCents/100).toFixed(2)+(model.refs?' · edit':''),'upgen:model:'+i)]);
+ rows.push([btn('🏠 Home','home')]);
+ return message(env,chat,'🖼 image-upscaling.net generation\n\nDaily free quota applies; expensive models may require a supporter balance. Choose a model:',keys(rows));
+}
+async function imageUpAspect(env,chat,s){
+ const rows=[];
+ for(let i=0;i<UPGEN_ASPECTS.length;i+=3)rows.push(UPGEN_ASPECTS.slice(i,i+3).map((x,j)=>btn(x,'upgen:ratio:'+(i+j))));
+ rows.push([btn('🏠 Home','home')]);
+ return message(env,chat,s.model+' — choose aspect ratio:',keys(rows));
+}
+const SITE_TTS_VOICES={
+ a:['af_heart','am_michael','af_bella','af_sarah','am_adam','am_echo','af_nicole','af_sky'],
+ b:['bf_emma','bf_isabella','bm_george','bm_lewis'],
+ j:['jf_alpha','jf_gongitsune','jm_kumo'],
+ z:['zf_xiaobei','zf_xiaoxiao','zm_yunxi','zm_yunyang'],
+ e:['ef_dora','em_alex'],f:['ff_siwis'],i:['if_sara','im_nicola'],p:['pf_dora','pm_alex']
+};
+function siteTtsLanguage(){return keys([
+ [btn('American English','tts:lang:a'),btn('British English','tts:lang:b')],
+ [btn('Japanese','tts:lang:j'),btn('Mandarin','tts:lang:z')],
+ [btn('Spanish','tts:lang:e'),btn('French','tts:lang:f')],
+ [btn('Italian','tts:lang:i'),btn('Portuguese','tts:lang:p')],
+ [btn('🏠 Home','home')]
+]);}
+async function siteTtsMenu(env,chat){await setSession(env,chat,{step:'tts_lang',kind:'tts'});return message(env,chat,'🎙 Image-upscaling.net TTS — choose language. Free daily quota applies; this produces speech, not music.',siteTtsLanguage());}
+
 const imageProviders=keys([
  [btn('🆓 OVHcloud SDXL','provider:ovh'),btn('🌟 ModelScope Qwen','provider:modelscope')],
+ [btn('🖼 Image-upscaling.net','upgen:menu')],
  [btn('🤗 Hugging Face FLUX','provider:hf'),btn('🆓 HF ZeroGPU Qwen','provider:hfzero')],
  [btn('☁️ Cloudflare Workers AI','i:generate')],
  [btn('🏠 Home','home')]
@@ -329,18 +359,22 @@ async function submitTts(env,chat,s,text) {
   const active=await env.MEMORY_DB.prepare("SELECT id FROM studio_jobs WHERE provider='image' AND kind='tts' AND client_slot=? AND status='running' LIMIT 1").bind(slot).all();
   if(active.results?.length)throw Error('One TTS job is already running for this image-provider account.');
   const before=await upstream(env,'tts_get_data',slot);
-  const seen=Array.isArray(before)?before.map(x=>x.result).filter(Boolean):[];
+  const seen=Array.isArray(before)?before.map(x=>String(x.req_id??x.result??'')).filter(Boolean):[];
   const out=await upstream(env,'tts_submit',slot,{method:'POST',body:JSON.stringify({text,voice:s.voice||'am_michael',speed:s.speed||1}),headers:{'Content-Type':'application/json'}});
   if(typeof out==='object'&&out.success===false)throw Error('Provider rejected TTS request');
   const id=crypto.randomUUID();
   const progress=await tg(env,'sendMessage',{chat_id:chat,text:'⏳ TTS submitted\nJob '+id.slice(0,8)+'\nI will deliver the audio automatically.'});
-  await putJob(env,{id,chat,provider:'image',kind:'tts',external:JSON.stringify({seen,result:out}),slot,progress:progress.message_id});
+  await putJob(env,{id,chat,provider:'image',kind:'tts',external:JSON.stringify({seen,result:out,text,voice:s.voice||'am_michael',speed:Number(s.speed)||1}),slot,progress:progress.message_id});
   await setSession(env,chat,{step:'home'});
   return;
 }
 async function sendRecent(env,chat) {
   const r=await env.MEMORY_DB.prepare('SELECT id,kind,status,last_error FROM studio_jobs WHERE chat_id=? ORDER BY created_at DESC LIMIT 8').bind(String(chat)).all();
   const list=(r.results||[]).map(x=>x.id.slice(0,8)+' • '+truncate(x.kind,24)+' • '+x.status+(x.last_error?' • '+truncate(x.last_error,80):''));
+  try{
+    const more=await env.MEMORY_DB.prepare('SELECT id,model,status,error FROM imageup_generation_jobs WHERE chat_id=? ORDER BY created_at DESC LIMIT 4').bind(String(chat)).all();
+    for(const j of more.results||[])list.push(j.id.slice(0,8)+' • '+j.model+' • '+j.status+(j.error?' • '+truncate(j.error,70):''));
+  }catch{}
   return message(env,chat,list.length?'Your latest jobs:\n'+list.join('\n'):'No jobs yet.',keys([[btn('🔁 Refresh','jobs'),btn('🏠 Home','home')]]));
 }
 async function deliverResult(env,j,urls) {
@@ -408,7 +442,15 @@ async function pollJob(env,j){
     else if(j.kind==='tts'){
       const previous=parseJSON(j.external_id,{});
       const seen=new Set(previous.seen||[]);
-      hit=status.find(x=>x.result && !seen.has(x.result));
+      // Provider's TTS status is account-wide. Match our exact text/voice and
+      // ignore requests that existed before submission; never send a stranger's audio.
+      hit=status.find(x=>x.result&&
+        (!previous.text||String(x.text||'')===previous.text)&&
+        (!previous.voice||String(x.voice||'')===previous.voice)&&
+        (!previous.speed||Math.abs(Number(x.speed||1)-Number(previous.speed))<0.01)&&
+        !seen.has(String(x.req_id??x.result??'')));
+      if(hit && !previous.text)hit=undefined; // Legacy unspecific jobs need manual review.
+
     }
     else hit=status.find(x=>x.original_filename===j.external_id||x.filename===j.external_id);
     if(!hit){await progress(env,j,'⏳ '+j.kind+' · waiting for provider');return;}
@@ -433,7 +475,7 @@ async function handleMessage(env,m) {
   const text=m.text||m.caption||'',command=text.trim().split(/\s+/)[0].split('@')[0].toLowerCase();
   if(command==='/studiohelp')return message(env,chat,HELP,home);
   if(command==='/studio_cancel'){await setSession(env,chat,{step:'home'});return message(env,chat,'Cancelled current selection.',home);}
-  if(command==='/studiojobs')return sendRecent(env,chat);
+  if(command==='/studiojobs'||command==='/imageup_status')return sendRecent(env,chat);
   if(command==='/usage'){
     const current=await Promise.all([aiFooter(env.MEMORY_DB,String(chat)),providerReceipt(env,'mvsep'),
       providerReceipt(env,'image',slotFor(env,chat))]);
@@ -442,6 +484,7 @@ async function handleMessage(env,m) {
   }
   if(command==='/upscale')return pickImage(env,chat,'upscale');
   if(command==='/genimage')return pickImage(env,chat,'generate');
+  if(command==='/imageup')return imageUpMenu(env,chat);
   if(command==='/studio'||command==='/image')return imageMenu(env,chat);
   if(command==='/removebg')return pickImage(env,chat,'removebg');
   if(command==='/reimagine')return pickImage(env,chat,'reimagine');
@@ -453,11 +496,15 @@ async function handleMessage(env,m) {
     const a=await catalog('all'),im=await imageConfig();
     return message(env,chat,'Live catalogs: '+a.length+' MVSEP models, '+Object.keys(im).length+' upscalers, '+IMAGE_MODELS.length+' text-to-image models.\nUse /mvsep or /image.',home);
   }
-  if(command==='/imagetts'){await setSession(env,chat,{step:'tts_voice',kind:'tts'});return message(env,chat,'Enter a voice ID (e.g. am_michael). The provider does not publish a voice-list API.');}
+  if(command==='/imagetts')return siteTtsMenu(env,chat);
   const s=await session(env,chat);
   if(s.step==='home')return message(env,chat,'Choose an action:',home);
   if(s.step==='tts_voice'){s.voice=truncate(text.trim(),60);if(!/^[a-zA-Z0-9_-]{2,60}$/.test(s.voice))return message(env,chat,'Invalid voice code. Try am_michael.');s.step='tts_speed';await setSession(env,chat,s);return message(env,chat,'Choose speech speed:',keys([[btn('0.8x','speed:0.8'),btn('1.0x','speed:1'),btn('1.2x','speed:1.2')]]));}
-  if(s.step==='tts_text') {if(!text||text.length>60000)return message(env,chat,'Send between 1 and 60,000 characters.');return submitTts(env,chat,s,text);}
+  if(s.step==='tts_text') {
+    if(!text||text.length>60000)return message(env,chat,'Send between 1 and 60,000 characters.');
+    s.text=text;s.step='tts_confirm';await setSession(env,chat,s);
+    return message(env,chat,'🎙 '+(s.voice||'am_michael')+' · '+(s.speed||1)+'× speed\n\nText: '+truncate(text,700)+'\n\nUse the site’s free daily quota or available balance?',keys([[btn('✅ Generate speech','tts:submit'),btn('Cancel','home')]]));
+  }
   if(s.step==='prompt'&&s.kind==='generate'){
     if(!text||text.length>2048)return message(env,chat,'Send a prompt of 1–2048 characters.');
     if(!env.AI)throw Error('Workers AI is not enabled');
@@ -487,6 +534,21 @@ async function handleMessage(env,m) {
     form.set('photo',new File([bytes],'generated.'+(type==='image/jpeg'?'jpg':'png'),{type}));
     await tg(env,'sendPhoto',form);await setSession(env,chat,{step:'home'});return;
   }
+  if(s.step==='upgen_file' && (m.photo?.length||m.document)){
+    const file=m.photo?.at(-1)||m.document;
+    if(!file||!file.file_id||file.mime_type&&!/^image\/(png|jpeg|webp)/.test(file.mime_type))throw Error('Send a supported JPEG, PNG or WebP reference photo');
+    s.references=[...(s.references||[]),{file_id:file.file_id,mime_type:file.mime_type||'image/jpeg',file_size:file.file_size, file_name:file.file_name}].slice(0,2);
+    s.step='upgen_prompt';await setSession(env,chat,s);
+    return message(env,chat,'✅ Reference image '+s.references.length+' saved. '+(s.references.length<2?'You may send a second reference photo, or ':'')+'Send your image editing prompt. I will offer to improve it before generation.');
+  }
+  if(s.step==='upgen_prompt' && (m.photo?.length||m.document)){
+    if((s.references||[]).length>=2)throw Error('Maximum two reference images');
+    const file=m.photo?.at(-1)||m.document;
+    if(!file?.file_id||file.mime_type&&!/^image\/(png|jpeg|webp)/.test(file.mime_type))throw Error('Send a supported image');
+    s.references=[...(s.references||[]),{file_id:file.file_id,mime_type:file.mime_type||'image/jpeg',file_size:file.file_size,file_name:file.file_name}];
+    await setSession(env,chat,s);
+    return message(env,chat,'✅ Second reference saved. Now send your editing prompt.');
+  }
   if(s.step==='style'){if(!text||text.length>90)return message(env,chat,'Enter a style name under 90 characters.');s.style=text.trim();s.step='file';await setSession(env,chat,s);return message(env,chat,'Style: '+s.style+'\nNow send an image.');}
   if(s.step==='upscale_prompt'){if(command!=='/skip')s.guidance=text;s.step=s.hasFx?'face':'file';await setSession(env,chat,s);if(s.hasFx)return message(env,chat,'Enhance faces?',keys([[btn('Yes','face:yes'),btn('No','face:no')]]));if(s.savedMedia){const b=await getTelegramFile(env,s.savedMedia);return uploadImage(env,chat,s,b);}return message(env,chat,'Send an image to upscale.');}
   if(s.step==='field_text')return advanceField(env,chat,text,command==='/skip');
@@ -515,6 +577,40 @@ async function handleCallback(env,q) {
   if(d==='home') {await setSession(env,chat,{step:'home'});return message(env,chat,'Welcome to CYAW Media Studio',home);}
   if(d==='help')return message(env,chat,HELP,home);
   if(d==='jobs')return sendRecent(env,chat);
+  if(d==='upgen:menu')return imageUpMenu(env,chat);
+  if(d.startsWith('upgen:model:')){
+    const i=Number(d.slice('upgen:model:'.length)),model=UPGEN_MODELS[i];if(!model)throw Error('Invalid image model');
+    const s={kind:'imageup-gen',step:'upgen_aspect',model:model.id,refs:model.refs,references:[]};await setSession(env,chat,s);
+    return imageUpAspect(env,chat,s);
+  }
+  if(d.startsWith('upgen:ratio:')){
+    const s=await session(env,chat),ratio=UPGEN_ASPECTS[Number(d.slice('upgen:ratio:'.length))];
+    if(s.kind!=='imageup-gen'||!UPGEN_MODELS.some(m=>m.id===s.model)||!ratio)throw Error('Choose a generation model first');
+    s.aspect=ratio;s.step=s.refs?'upgen_file':'upgen_prompt';await setSession(env,chat,s);
+    return message(env,chat,s.model+' '+ratio+' selected. '+(s.refs?'Send a reference image. You can attach up to two photos.':'Send your image-generation prompt. You can ask AI to improve it before generating.'));
+  }
+  if(d==='tts:menu')return siteTtsMenu(env,chat);
+  if(d.startsWith('tts:lang:')){
+    const lang=d.slice('tts:lang:'.length),voices=SITE_TTS_VOICES[lang];if(!voices)throw Error('Unsupported TTS language');
+    const s={step:'tts_voice',kind:'tts',language:lang};await setSession(env,chat,s);
+    const rows=[];for(let i=0;i<voices.length;i+=2)rows.push(voices.slice(i,i+2).map(v=>btn(v,'tts:voice:'+v)));
+    return message(env,chat,'Choose a speech voice:',keys(rows));
+  }
+  if(d.startsWith('tts:voice:')){
+    const voice=d.slice('tts:voice:'.length),s=await session(env,chat);
+    if(s.kind!=='tts'||!Object.values(SITE_TTS_VOICES).flat().includes(voice))throw Error('Choose a supported TTS voice');
+    s.voice=voice;s.step='tts_speed';await setSession(env,chat,s);
+    return message(env,chat,'Speed for '+voice+':',keys([[btn('0.8×','speed:0.8'),btn('1.0×','speed:1'),btn('1.2×','speed:1.2')]]));
+  }
+  if(d==='tts:submit'){
+    const s=await session(env,chat);
+    if(s.kind!=='tts'||s.step!=='tts_confirm'||!s.text?.trim())throw Error('Enter speech text and confirm first');
+    const lock=await env.MEMORY_DB.prepare('UPDATE studio_sessions SET state=?,updated_at=? WHERE chat_id=? AND state=?').bind(JSON.stringify({...s,step:'tts_submitting'}),epoch(),String(chat),JSON.stringify(s)).run();
+    if(!lock.meta?.changes)return message(env,chat,'Already submitted.');
+    // On uncertain network failures, keep the submitting state to prevent a
+    // second quota-consuming call. The user may intentionally cancel/reset.
+    return await submitTts(env,chat,s,s.text);
+  }
   if(d==='provider:menu')return message(env,chat,'🎨 Choose image generation provider. OVHcloud SDXL needs no key and is currently free; Hugging Face uses inference credits and ModelScope uses grains.',imageProviders);
   if(d.startsWith('provider:')){
     const provider=d.slice('provider:'.length);
@@ -572,11 +668,13 @@ async function handleCallback(env,q) {
   if(d.startsWith('speed:')){const s=await session(env,chat);s.speed=Number(d.slice(6));s.step='tts_text';await setSession(env,chat,s);return message(env,chat,'Send text to speak. Maximum 60,000 characters.');}
 }
 
-const STUDIO_COMMANDS=new Set(['/studio','/image','/genimage','/upscale','/removebg','/reimagine','/mvvoice','/mvaudio','/mvseparate','/mvsep','/mvall','/studiomodels','/studiojobs','/usage','/studiohelp','/studio_cancel','/imagetts']);
+const STUDIO_COMMANDS=new Set(['/imageup_status','/imageup','/studio','/image','/genimage','/upscale','/removebg','/reimagine','/mvvoice','/mvaudio','/mvseparate','/mvsep','/mvall','/studiomodels','/studiojobs','/usage','/studiohelp','/studio_cancel','/imagetts']);
 export const mediaStudioCommands=[
   {command:'usage',description:'Credits, quotas and AI requests'},
   {command:'studio',description:'Image and audio creation hub'},
   {command:'genimage',description:'Generate image with Workers AI'},
+  {command:'imageup',description:'Image-upscaling.net text-to-image and editing'},
+  {command:'imageup_status',description:'Check image-upscaling.net jobs'},
   {command:'upscale',description:'Choose upscaling model and size'},
   {command:'removebg',description:'Remove an image background'},
   {command:'reimagine',description:'Apply artistic style to an image'},
@@ -656,4 +754,11 @@ export async function startNaturalAudio(env,chat,text){
  if(invalid)throw Error('Missing sound-generation field: '+invalid.label);
  await setSession(env,chat,{step:'confirm',kind:'mvsep',scope:'audio',model:a.render_id,modelName:a.name,widget:a.audio_widget,fields,values,format:1});
  return message(env,chat,'🎼 I selected Stable Audio Open Gen 1.0.\n\nPrompt: '+truncate(text,1100)+'\nLength: 10 seconds · WAV 16-bit\n\nGenerate? MVSEP credits may apply.',keys([[btn('✅ Generate audio','mvsubmit'),btn('Cancel','home')]]));
+}
+
+export async function startNaturalImageSiteTts(env,chat,text){
+ if(!text||text.length>60000)throw Error('TTS text must contain 1–60000 characters');
+ const state={step:'tts_confirm',kind:'tts',voice:'am_michael',speed:1,text};
+ await setSession(env,chat,state);
+ return message(env,chat,'🎙 image-upscaling.net TTS\nVoice: am_michael · Speed: 1.0×\n\nText: '+truncate(text,900)+'\n\nConfirm generation using your image-provider daily free quota or balance. To change the voice, use /imagetts.',keys([[btn('✅ Generate speech','tts:submit'),btn('Cancel','home')]]));
 }

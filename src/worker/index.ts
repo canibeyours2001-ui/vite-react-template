@@ -4,6 +4,7 @@ import {streamAIToTelegram} from './stream-telegram-ai'
 import {pollModelScopeImages,modelScopeCommand} from './modelscope-image'
 import {pollExternalImages,checkImageProviders} from './external-image'
 import {pollZeroImages,zeroStatus} from './hf-zerogpu'
+import {pollImageUp} from './imageup-generation'
 import {pollWanAuto} from './wan-auto'
 import { handleMediaStudioMessage, handleMediaStudioCallback, pollMediaStudio, mediaStudioCommands } from './media-studio'
 import { Hono } from 'hono'
@@ -977,6 +978,8 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'hfzero',description:'Generate image using free ZeroGPU time'},
         {command:'hfzerostatus',description:'Check HF ZeroGPU image status'},
         {command:'imageproviders',description:'Check image-provider connections'},
+        {command:'imageup',description:'Image-upscaling.net image generation'},
+        {command:'imageup_status',description:'Check image-upscaling.net image jobs'},
         {command:'msstatus',description:'Check ModelScope image job'},
         {command:'help',description:'Show all available commands'},
         {command:'ask',description:'Ask the AI for commands and guidance'},
@@ -1035,6 +1038,8 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'hfzero',description:'Generate image using free ZeroGPU time'},
         {command:'hfzerostatus',description:'Check HF ZeroGPU image status'},
         {command:'imageproviders',description:'Check image-provider connections'},
+        {command:'imageup',description:'Image-upscaling.net image generation'},
+        {command:'imageup_status',description:'Check image-upscaling.net image jobs'},
         {command:'msstatus',description:'Check ModelScope image job'},
         {command:'help',description:'Show all available commands'},
         {command:'ask',description:'Ask the AI for commands and guidance'},
@@ -1080,7 +1085,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollImageUp(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }

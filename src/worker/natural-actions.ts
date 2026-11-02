@@ -5,14 +5,15 @@ import {getAiModel} from './ai-models'
 import {queueModelScopeImage} from './modelscope-image'
 import {queueExternalImage} from './external-image'
 import {queueZeroImage} from './hf-zerogpu'
-import {handleMediaStudioMessage,startNaturalVoice,startNaturalAudio,startNaturalEdit} from './media-studio'
+import {queueImageUp,type UpgenConfig} from './imageup-generation'
+import {handleMediaStudioMessage,startNaturalVoice,startNaturalAudio,startNaturalEdit,startNaturalImageSiteTts} from './media-studio'
 
 type Media={file_id:string;file_size?:number;mime_type?:string;file_name?:string}
 type Msg={chat:{id:number};from?:{id:number};message_id:number;text?:string;caption?:string;photo?:Media[];document?:Media;video?:Media;audio?:Media;voice?:Media}
 type DB={prepare:(sql:string)=>{bind:(...values:(number|string)[])=>{run:()=>Promise<{meta:{changes:number}}>;all:<T>()=>Promise<{results:T[]}>}}}
 type Env={MEMORY_DB:DB;TELEGRAM_BOT_TOKEN:string;AI:{run:(model:string,input:{messages:Array<{role:'system'|'user'|'assistant';content:string}>;max_tokens:number;temperature?:number;stream?:boolean})=>Promise<unknown>};MODAL_WAN_API_BASE?:string;MODAL_WAN_API_KEY?:string;MVSEP_API_TOKEN?:string;IMAGE_CLIENT_IDS?:string}
 type Intent='image_gen'|'video_gen'|'video_image'|'voice_tts'|'voice_design'|'upscale'|'removebg'|'reimagine'|'audio_gen'|'separate'|'dub'|'motion'|'usage'|'chat'
-type Draft={intent:Intent;prompt:string;best?:string;chosen?:string;stage:string;messageId:number;file?:Media;created:number;info?:string}
+type Draft={intent:Intent;prompt:string;best?:string;chosen?:string;stage:string;messageId:number;file?:Media;created:number;info?:string;upgen?:UpgenConfig}
 const MAX_AGE=30*60;
 const clip=(s:string,n=1500)=>s.slice(0,n)
 const btn=(label:string,data:string)=>({text:label,callback_data:'na:'+data})
@@ -105,6 +106,11 @@ export async function reviewDirectPrompt(env:Env,msg:Msg):Promise<boolean>{
   await newDraft(env,String(msg.chat.id),{intent:'image_gen',prompt,stage:'review',messageId:msg.message_id,created:Date.now(),info:provider})
   return true
  }
+ if(t.startsWith('/imageup ')){
+  const prompt=t.slice('/imageup '.length).trim();if(!prompt)return false;
+  await newDraft(env,String(msg.chat.id),{intent:'image_gen',prompt,stage:'review',messageId:msg.message_id,created:Date.now(),info:'imageup',upgen:{model:'Z-Image-Turbo',aspect:'1:1'}});
+  return true;
+ }
  if(t.startsWith('/msimage ')){
   const prompt=t.slice('/msimage '.length).trim()
   if(!prompt)return false
@@ -122,11 +128,17 @@ export async function reviewDirectPrompt(env:Env,msg:Msg):Promise<boolean>{
  if(t.startsWith('/')||!t)return false
  const r=await env.MEMORY_DB.prepare('SELECT state FROM studio_sessions WHERE chat_id=?').bind(String(msg.chat.id)).all<{state:string}>()
  if(!r.results[0])return false
- let s:{step?:string;kind?:string;imageProvider?:string}={}
+ let s:{step?:string;kind?:string;imageProvider?:string;model?:string;aspect?:string;references?:Media[]}={}
  try{s=JSON.parse(r.results[0].state)}catch{return false}
+ if(s.kind==='imageup-gen'&&s.step==='upgen_prompt'){
+  await newDraft(env,String(msg.chat.id),{intent:'image_gen',prompt:t,stage:'review',messageId:msg.message_id,created:Date.now(),info:'imageup',upgen:{model:s.model||'Z-Image-Turbo',aspect:s.aspect||'1:1',references:s.references||[]}});
+  await env.MEMORY_DB.prepare('UPDATE studio_sessions SET state=?,updated_at=unixepoch() WHERE chat_id=?').bind(JSON.stringify({step:'home'}),String(msg.chat.id)).run();
+  return true;
+ }
  if(s.kind!=='generate'||!['prompt','provider_prompt'].includes(s.step||''))return false
  const provider=s.step==='provider_prompt'&&['ovh','hf','hfzero','modelscope'].includes(s.imageProvider||'')?s.imageProvider:'selected_studio_model'
  await newDraft(env,String(msg.chat.id),{intent:'image_gen',prompt:t,stage:'review',messageId:msg.message_id,created:Date.now(),info:provider})
+ if(s.step==='provider_prompt')await env.MEMORY_DB.prepare('UPDATE studio_sessions SET state=?,updated_at=unixepoch() WHERE chat_id=?').bind(JSON.stringify({step:'home'}),String(msg.chat.id)).run();
  return true
 }
 export async function handleNaturalMessage(env:Env,msg:Msg):Promise<boolean>{
@@ -160,14 +172,16 @@ export async function handleNaturalMessage(env:Env,msg:Msg):Promise<boolean>{
  if(intent==='usage') {await handleMediaStudioMessage(env,{chat:msg.chat,from:msg.from,text:'/usage',message_id:msg.message_id});return true}
  if(intent==='image_gen'||intent==='video_gen'||intent==='video_image'){
    const prompt=clip(plainPrompt(t),2048)
-   await newDraft(env,chat,{intent,prompt,stage:intent==='video_image'&&!fileImage?'await_media':'review',messageId:msg.message_id,file:fileImage,created:Date.now(),info:intent==='image_gen'?(/modelscope/i.test(t)?'modelscope':/hugging\s*face|\bhf\b/i.test(t)?'hf':'ovh'):undefined});return true
+   await newDraft(env,chat,{intent,prompt,stage:intent==='video_image'&&!fileImage?'await_media':'review',messageId:msg.message_id,file:fileImage,created:Date.now(),info:intent==='image_gen'?(/image.upscal/i.test(t)?'imageup':/modelscope/i.test(t)?'modelscope':/hugging\s*face|\bhf\b/i.test(t)?'hf':'ovh'):undefined});return true
  }
  if(intent==='audio_gen'){
    await startNaturalAudio(env,chat,clip(plainPrompt(t),1600));return true
  }
  if(intent==='voice_tts'||intent==='voice_design'){
-   const script=t.replace(/^(?:please\s+)?(?:narrate|read aloud|say|speak|text.to.speech|tts|generate (?:a )?voiceover)(?:\s+this)?\s*[:\-]?\s*/i,'').trim()
+   const requestText=/image.upscal/i.test(t)?t.replace(/^(?:please\s+)?(?:use\s+)?image[\s-]*upscal(?:ing)?\.net\s*(?:(?:tts|to)\s+)?(?:narrate|read|speak|say|text.to.speech)?\s*[:\-]?\s*/i,'').trim():t
+   const script=requestText.replace(/^(?:please\s+)?(?:narrate|read aloud|say|speak|text.to.speech|tts|generate (?:a )?voiceover)(?:\s+this)?\s*[:\-]?\s*/i,'').trim()
    if(script.length<8||script===t&&script.length<25){await tell(env,chat,'🗣 Send the exact text you want spoken. I will choose an MVSEP TTS model and show you a confirmation before generating.');return true}
+   if(intent==='voice_tts'&&/image.upscal/i.test(t)){await startNaturalImageSiteTts(env,chat,clip(script,3500));return true}
    await startNaturalVoice(env,chat,clip(script,3500),intent==='voice_design'?'design':'custom');return true
  }
  if(intent==='upscale'||intent==='removebg'||intent==='reimagine'){
@@ -280,7 +294,7 @@ export async function handleNaturalCallback(env:Env,cb:{id:string;data?:string;m
   if(choice==='better'&&!draft.best){await tell(env,chat,'Please select Improve prompt first.');return}
   const chosen=choice==='better'?draft.best!:draft.prompt
   if(!await swap(env,chat,raw,{...draft,chosen,stage:'confirm'}))return
-  await tell(env,chat,'Review the '+(draft.intent==='image_gen'?'image':'video')+' request:\n\n'+clip(chosen,1300)+'\n\nGenerate now? '+(draft.intent==='image_gen'?(draft.info==='modelscope'?'ModelScope grain credits may apply.':draft.info==='hfzero'?'Hugging Face ZeroGPU daily minutes apply.':draft.info==='hf'?'Hugging Face inference credits may apply.':draft.info==='ovh'?'OVHcloud free anonymous SDXL; subject to rate limits.':'Workers AI inference quota applies.'):'Modal GPU charges may apply.'),kb([[btn('✅ Generate now','generate'),btn('✏️ Edit','edit')],[btn('Cancel','cancel')]]))
+  await tell(env,chat,'Review the '+(draft.intent==='image_gen'?'image':'video')+' request:\n\n'+clip(chosen,1300)+'\n\nGenerate now? '+(draft.intent==='image_gen'?(draft.info==='modelscope'?'ModelScope grain credits may apply.':draft.info==='imageup'?'Image-upscaling.net free quota or balance applies.':draft.info==='hfzero'?'Hugging Face ZeroGPU daily minutes apply.':draft.info==='hf'?'Hugging Face inference credits may apply.':draft.info==='ovh'?'OVHcloud free anonymous SDXL; subject to rate limits.':'Workers AI inference quota applies.'):'Modal GPU charges may apply.'),kb([[btn('✅ Generate now','generate'),btn('✏️ Edit','edit')],[btn('Cancel','cancel')]]))
   return
  }
  if(choice==='generate'){
@@ -300,7 +314,8 @@ export async function pollNaturalActions(env:Env){
   const running={...d,stage:'running'}
   if(!await swap(env,row.chat_id,row.state,running))continue
   try{
-   if(d.intent==='image_gen'&&d.info==='hfzero')await queueZeroImage(env,row.chat_id,d.messageId,d.chosen||d.prompt)
+   if(d.intent==='image_gen'&&d.info==='imageup')await queueImageUp(env,row.chat_id,d.messageId,d.chosen||d.prompt,d.upgen||{model:'Z-Image-Turbo',aspect:'1:1'})
+   else if(d.intent==='image_gen'&&d.info==='hfzero')await queueZeroImage(env,row.chat_id,d.messageId,d.chosen||d.prompt)
    else if(d.intent==='image_gen'&&d.info==='modelscope')await queueModelScopeImage(env,row.chat_id,d.messageId,d.chosen||d.prompt)
    else if(d.intent==='image_gen'&&(d.info==='ovh'||d.info==='hf'))await queueExternalImage(env,row.chat_id,d.messageId,d.chosen||d.prompt,d.info)
    else if(d.intent==='image_gen')await imageNow(env,row.chat_id,d)
