@@ -361,10 +361,15 @@ async function submitTts(env,chat,s,text) {
   const before=await upstream(env,'tts_get_data',slot);
   const seen=Array.isArray(before)?before.map(x=>String(x.req_id??x.result??'')).filter(Boolean):[];
   const out=await upstream(env,'tts_submit',slot,{method:'POST',body:JSON.stringify({text,voice:s.voice||'am_michael',speed:s.speed||1}),headers:{'Content-Type':'application/json'}});
-  if(typeof out==='object'&&out.success===false)throw Error('Provider rejected TTS request');
+  if(out&&typeof out==='object'&&out.success===false)throw Error('Provider rejected TTS request');
+  // This API returns the numeric req_id as the submit response. Persist that ID
+  // for exact matching; account-wide result lists must never be matched by text alone.
+  const reqId=(typeof out==='number'||typeof out==='string')?String(out).trim():
+    (out&&typeof out==='object'?String(out.req_id??out.id??''):'');
+  if(!/^\d{8,18}$/.test(reqId))throw Error('TTS submission response did not include a valid request ID. Check the provider account before retrying.');
   const id=crypto.randomUUID();
   const progress=await tg(env,'sendMessage',{chat_id:chat,text:'⏳ TTS submitted\nJob '+id.slice(0,8)+'\nI will deliver the audio automatically.'});
-  await putJob(env,{id,chat,provider:'image',kind:'tts',external:JSON.stringify({seen,result:out,text,voice:s.voice||'am_michael',speed:Number(s.speed)||1}),slot,progress:progress.message_id});
+  await putJob(env,{id,chat,provider:'image',kind:'tts',external:JSON.stringify({seen,reqId,result:out,text,voice:s.voice||'am_michael',speed:Number(s.speed)||1}),slot,progress:progress.message_id});
   await setSession(env,chat,{step:'home'});
   return;
 }
@@ -442,18 +447,32 @@ async function pollJob(env,j){
     else if(j.kind==='tts'){
       const previous=parseJSON(j.external_id,{});
       const seen=new Set(previous.seen||[]);
-      // Provider's TTS status is account-wide. Match our exact text/voice and
-      // ignore requests that existed before submission; never send a stranger's audio.
-      hit=status.find(x=>x.result&&
-        (!previous.text||String(x.text||'')===previous.text)&&
-        (!previous.voice||String(x.voice||'')===previous.voice)&&
-        (!previous.speed||Math.abs(Number(x.speed||1)-Number(previous.speed))<0.01)&&
-        !seen.has(String(x.req_id??x.result??'')));
-      if(hit && !previous.text)hit=undefined; // Legacy unspecific jobs need manual review.
+      // tts_submit returns a numeric req_id; tts_get_data returns that same ID
+      // alongside status, result URL, and metadata. Match the ID FIRST so that
+      // whitespace normalization or provider-side text changes cannot strand jobs.
+      // The endpoint is account-wide: never match an unrelated request by URL.
+      const reqId=String(previous.reqId??previous.request_id??previous.result??'').trim();
+      if(/^\d{8,18}$/.test(reqId)){
+        hit=status.find(x=>x&&String(x.req_id??'')===reqId);
+      }else{
+        // Fallback only for older requests lacking a useful submission ID.
+        hit=status.find(x=>x&&x.result&&previous.text&&
+          String(x.text??'')===String(previous.text)&&
+          String(x.voice??'')===String(previous.voice??'')&&
+          Math.abs(Number(x.speed??1)-Number(previous.speed??1))<0.01&&
+          !seen.has(String(x.req_id??x.result??'')));
+      }
 
     }
     else hit=status.find(x=>x.original_filename===j.external_id||x.filename===j.external_id);
     if(!hit){await progress(env,j,'⏳ '+j.kind+' · waiting for provider');return;}
+    if(j.kind==='tts'&&/^(failed|error|cancelled|canceled)$/i.test(String(hit.status??''))){
+      const reason='Provider TTS status: '+truncate(hit.status,60);
+      await editJob(env,j.id,'failed',reason);
+      await progress(env,j,'❌ TTS · '+reason);
+      await message(env,j.chat_id,'⚠️ Your image-upscaling.net TTS job failed: '+reason+'\nNo duplicate generation was submitted.');
+      return;
+    }
     const done=j.kind==='reimagine'?hit.is_completed:(j.kind==='tts'?!!hit.result:!!hit.completed);
     if(!done){await progress(env,j,'⏳ '+j.kind+' · processing');return;}
     const url=hit.result||hit.image_url;
