@@ -1,0 +1,472 @@
+// @ts-nocheck
+import {providerReceipt,duration,aiFooter} from './usage-receipts'
+// CYAW Media Studio: existing Hono/Telegram integration, no second webhook.
+
+const MV = 'https://sg.mvsep.com/api';
+const UP = 'https://image-upscaling.net';
+const IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
+const LIMIT = 10_000_000;
+const epoch = () => Math.floor(Date.now()/1000);
+async function progress(env,j,text){
+  if(!j.progress_message_id || j.last_status===text)return;
+  const r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/editMessageText',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({chat_id:j.chat_id,message_id:j.progress_message_id,text:text.slice(0,3900)})
+  });
+  if(r.ok) await env.MEMORY_DB.prepare('UPDATE studio_jobs SET last_status=? WHERE id=?').bind(text,j.id).run();
+}
+const truncate = (s,n=70) => String(s ?? '').slice(0,n);
+const keys = rows => ({inline_keyboard:rows});
+const btn = (label,data) => ({text:truncate(label,56),callback_data:'st:'+data});
+const parseJSON = (v, fallback={}) => {try {return JSON.parse(v)}catch{return fallback}};
+const safeHost = (url,domain) => {
+  try { const u = new URL(url); return u.protocol === 'https:' && (u.hostname === domain || u.hostname.endsWith('.'+domain)); }
+  catch {return false}
+};
+const imageIds = env => (env.IMAGE_CLIENT_IDS || '').split(',').map(x=>x.trim()).filter(x=>/^[A-Za-z0-9]{32}$/.test(x));
+async function tg(env,method,data) {
+  if (!env.TELEGRAM_BOT_TOKEN) throw Error('Telegram token is not configured');
+  const response=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/'+method,{
+    method:'POST', body:data instanceof FormData?data:JSON.stringify(data),
+    headers:data instanceof FormData?{}:{'Content-Type':'application/json'}
+  });
+  const out=await response.json();
+  if(!response.ok||!out.ok)throw Error('Telegram '+method+' failed: '+truncate(out.description,160));
+  return out.result;
+}
+const message = (env,id,text,keyboard) => tg(env,'sendMessage',{chat_id:id,text:truncate(text,4000),reply_markup:keyboard,disable_web_page_preview:true});
+async function media(env,chatId,url,type='document',extra={}) {
+  // Forward verified provider-origin media as a file; never send provider keys to Telegram.
+  if(!safeHost(url,'mvsep.com')&&!safeHost(url,'image-upscaling.net'))throw Error('Untrusted media URL');
+  const r=await fetch(url,{headers:extra.cookie?{Cookie:extra.cookie}:{}});
+  if(!r.ok)throw Error('Download failed ('+r.status+')');
+  const b=await r.blob();
+  if(b.size>48*1024*1024)throw Error('Result exceeds Telegram bot upload size; use the provider link');
+  const form=new FormData();
+  form.set('chat_id',String(chatId));
+  form.set(type,new File([b],type==='audio'?'result.mp3':'result.'+(b.type.includes('png')?'png':'jpg'),{type:b.type||'application/octet-stream'}));
+  return tg(env,type==='audio'?'sendAudio':type==='photo'?'sendPhoto':'sendDocument',form);
+}
+async function session(env,id) {
+  const row=await env.MEMORY_DB.prepare('SELECT state FROM studio_sessions WHERE chat_id=?').bind(String(id)).first();
+  return row?parseJSON(row.state,{step:'home'}):{step:'home'};
+}
+async function setSession(env,id,s) {
+  await env.MEMORY_DB.prepare('INSERT INTO studio_sessions(chat_id,state,updated_at) VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at')
+    .bind(String(id),JSON.stringify(s),epoch()).run();
+}
+async function putJob(env,j) {
+  await env.MEMORY_DB.prepare('INSERT INTO studio_jobs(id,chat_id,provider,kind,external_id,client_slot,status,created_at,updated_at,progress_message_id) VALUES(?,?,?,?,?,?,?,?,?,?)')
+    .bind(j.id,String(j.chat),j.provider,j.kind,j.external,j.slot??null,'running',epoch(),epoch(),j.progress??null).run();
+}
+async function editJob(env,id,status,err=null) {
+  await env.MEMORY_DB.prepare('UPDATE studio_jobs SET status=?,updated_at=?,last_error=? WHERE id=?').bind(status,epoch(),err,id).run();
+}
+async function accountInfo(env,slot) {
+  const id=imageIds(env)[slot]; if(!id)throw Error('Image client identifiers not configured');
+  const r=await fetch(UP+'/get_account_info',{headers:{Cookie:'client_id='+id}});
+  if(!r.ok)throw Error('Image service account query failed');
+  return r.json();
+}
+function slotFor(env,chat) {
+  const n=imageIds(env).length; if(!n)throw Error('Image client IDs are not configured');
+  return Number(BigInt(String(chat).replace(/\D/g,'')||'0')%BigInt(n));
+}
+async function upstream(env,path,slot,opts={}) {
+  const id=imageIds(env)[slot]; if(!id)throw Error('Client ID not configured');
+  const r=await fetch(UP+'/'+path,{...opts,headers:{...(opts.headers||{}),Cookie:'client_id='+id}});
+  if(!r.ok)throw Error('Image service HTTP '+r.status);
+  const t=await r.text();
+  return parseJSON(t,t);
+}
+async function catalog(scope='all') {
+  const u=MV+'/app/algorithms?scopes=single_upload,no_upload,matchering_upload';
+  const res=await fetch(u,{cf:{cacheTtl:600,cacheEverything:true}});
+  if(!res.ok)throw Error('MVSEP catalog HTTP '+res.status);
+  const list=await res.json();
+  const data=Array.isArray(list)?list:(list.data||[]);
+  const filtered=data.filter(a=>a.is_active!==0 && a.audio_widget && a.render_id);
+  if(scope==='voice')return filtered.filter(a=>/tts|vibevoice|bark|speech|voice clon/i.test(a.name));
+  if(scope==='audio')return filtered.filter(a=>a.audio_widget==='no_upload'&&!/tts|vibevoice|bark|speech|voice clon/i.test(a.name));
+  if(scope==='separate')return filtered.filter(a=>a.audio_widget==='single_upload'&&!/tts|vibevoice|bark|speech|voice clon/i.test(a.name));
+  return filtered;
+}
+function optFields(algo) {
+  return (algo.algorithm_fields||[]).map(f=>({name:f.name,label:f.text||f.name,options:parseJSON(f.options||'{}',{})}))
+    .sort((a,b)=>Number(a.name.replace(/\D/g,''))-Number(b.name.replace(/\D/g,'')));
+}
+const home=keys([
+ [btn('🎨 Generate image','i:generate'),btn('🔎 Upscale','i:upscale')],
+ [btn('🧽 Remove background','i:removebg'),btn('🖌 Re-Imagine','i:reimagine')],
+ [btn('🗣 Voice / TTS','mv:voice:0'),btn('🎼 Audio generation','mv:audio:0')],
+ [btn('🎚 Separate / Enhance','mv:separate:0'),btn('🧰 All MVSEP models','mv:all:0')],
+ [btn('📋 My jobs','jobs'),btn('ℹ️ Help','help')]
+]);
+const HELP='CYAW Media Studio\n\n/studio — Generate or edit an image\n/mvvoice — MVSEP TTS / voice design / cloning\n/mvaudio — MVSEP music and sounds\n/mvseparate — MVSEP vocal/music separation\n/mvsep — All live MVSEP tools\n/imagetts — Image-upscaling.net TTS\n/studiomodels — Show live model counts\n/studiojobs — Recent jobs\n/studio_cancel — Reset current menu\n\nSelect a tool, model and parameters, then send your text or media. Files must be uploaded only when the bot requests them. All jobs are private to authorized users. Quotas and credits belong to the providers.';
+async function showCatalog(env,chat,scope,page=0) {
+  const all=await catalog(scope), per=8, p=Math.max(0,Math.min(page,Math.ceil(all.length/per)-1));
+  const cur=all.slice(p*per,p*per+per);
+  const rows=cur.map(a=>[btn(a.name,'model:'+a.render_id+':'+scope)]);
+  const nav=[];
+  if(p>0)nav.push(btn('⬅ Previous','mv:'+scope+':'+(p-1)));
+  if((p+1)*per<all.length)nav.push(btn('Next ➡','mv:'+scope+':'+(p+1)));
+  if(nav.length)rows.push(nav);
+  rows.push([btn('🏠 Home','home')]);
+  return message(env,chat,'MVSEP '+scope.toUpperCase()+' | '+all.length+' live models | page '+(p+1)+'\nSelect a model:',keys(rows));
+}
+async function imageConfig() {
+  const r=await fetch(UP+'/get_upscalers_config',{cf:{cacheTtl:900,cacheEverything:true}});
+  if(!r.ok)throw Error('Image model catalog unavailable');
+  return r.json();
+}
+async function imageMenu(env,chat) {return message(env,chat,'Choose an image tool:',home)}
+async function pickImage(env,chat,kind) {
+  if(kind==='generate') {
+    await setSession(env,chat,{step:'prompt',kind:'generate',model:IMAGE_MODEL,steps:4});
+    return message(env,chat,'🎨 Text-to-image using Cloudflare FLUX.1 schnell. Send your image description. Steps: 4 (fixed default).',keys([[btn('🏠 Home','home')]]));
+  }
+  if(kind==='upscale') {
+    const config=await imageConfig();
+    const rows=Object.entries(config).map(([name,v])=>[btn(name+(v.premium?' • Premium':''),'upmodel:'+name)]);
+    rows.push([btn('🏠 Home','home')]);
+    await setSession(env,chat,{step:'upmodel',kind});
+    return message(env,chat,'Choose an upscaling model. Models and supported scales come from the live API:',keys(rows));
+  }
+  if(kind==='removebg'){
+    await setSession(env,chat,{step:'file',kind});
+    return message(env,chat,'Send a photo or image document to remove the background.');
+  }
+  if(kind==='reimagine'){
+    await setSession(env,chat,{step:'style',kind});
+    return message(env,chat,'Send a style, e.g. Oil_Painting. Then send a photo. (The provider does not publish a complete style catalog in its API docs.)');
+  }
+}
+async function startScale(env,chat,model) {
+  const c=await imageConfig();
+  if(!c[model])throw Error('Model no longer exists');
+  const rows=Object.entries(c[model].scales||{}).map(([val,v])=>[btn(v.display_name||val,'scale:'+val)]);
+  rows.push([btn('🏠 Home','home')]);
+  await setSession(env,chat,{step:'scale',kind:'upscale',model,face:false,hasFx:!!c[model].fx,hasPrompt:!!c[model].prompt});
+  return message(env,chat,'Model: '+model+'\n'+truncate(c[model].help,300)+'\nChoose scale:',keys(rows));
+}
+async function finishScale(env,chat,val) {
+  const s=await session(env,chat), c=await imageConfig();
+  if(!c[s.model]||!c[s.model].scales?.[val])throw Error('Invalid scale for model');
+  s.scale=val;
+  if(s.hasPrompt){s.step='upscale_prompt';await setSession(env,chat,s);return message(env,chat,'Optional model guidance: send a text description or /skip');}
+  if(s.hasFx){s.step='face';await setSession(env,chat,s);return message(env,chat,'Enhance faces?',keys([[btn('✅ Yes','face:yes'),btn('No','face:no')]]));}
+  s.step='file';await setSession(env,chat,s);return message(env,chat,'Send the image to upscale.');
+}
+async function mvModel(env,chat,id,scope) {
+  const all=await catalog('all'), a=all.find(x=>String(x.render_id)===String(id));
+  if(!a)throw Error('Model not available in live MVSEP catalog');
+  const fields=optFields(a);
+  const s={step:'field',kind:'mvsep',scope,model:a.render_id,modelName:a.name,widget:a.audio_widget,fields,values:{},fieldIndex:0,format:0};
+  await setSession(env,chat,s);
+  await message(env,chat,'Selected: '+a.name+'\nInput: '+a.audio_widget+'\n'+fields.length+' configurable parameters.');
+  return nextField(env,chat,s);
+}
+async function nextField(env,chat,s) {
+  if(s.fieldIndex>=s.fields.length){
+    s.step='format';await setSession(env,chat,s);
+    const rows=[[btn('MP3 (320 kbps)','fmt:0'),btn('WAV 16-bit','fmt:1')],[btn('FLAC 16-bit','fmt:2'),btn('M4A','fmt:3')],[btn('WAV 32-bit','fmt:4'),btn('FLAC 24-bit','fmt:5')]];
+    return message(env,chat,'Choose output format:',keys(rows));
+  }
+  const f=s.fields[s.fieldIndex], arr=Object.entries(f.options||{});
+  if(arr.length) {
+    s.step='field_choice';s.optionPage=0;await setSession(env,chat,s);
+    return showOptions(env,chat,s);
+  }
+  s.step='field_text';await setSession(env,chat,s);
+  return message(env,chat,'Parameter '+(s.fieldIndex+1)+'/'+s.fields.length+': '+f.label+'\nSend text, or /skip for optional fields. For text prompts, supply the words you want generated.',keys([[btn('Skip','opt:skip')]]));
+}
+async function showOptions(env,chat,s){
+  const f=s.fields[s.fieldIndex], opts=Object.entries(f.options||{}), page=s.optionPage||0;
+  const rows=opts.slice(page*8,page*8+8).map(([val,title],i)=>[btn(title,'opt:'+String(page*8+i))]);
+  const n=[];if(page>0)n.push(btn('⬅','opage:'+(page-1)));
+  if((page+1)*8<opts.length)n.push(btn('➡','opage:'+(page+1)));
+  if(n.length)rows.push(n);
+  rows.push([btn('Use provider default','opt:skip')]);
+  return message(env,chat,'Parameter '+(s.fieldIndex+1)+'/'+s.fields.length+': '+f.label+'\nChoose a supported option:',keys(rows));
+}
+async function advanceField(env,chat,value,skip=false) {
+  const s=await session(env,chat),f=s.fields?.[s.fieldIndex];
+  if(!f)throw Error('No current field');
+  if(!skip)s.values[f.name]=String(value);
+  s.fieldIndex++;
+  await setSession(env,chat,s);
+  return nextField(env,chat,s);
+}
+async function readyMv(env,chat,fmt) {
+  const s=await session(env,chat);s.format=Number(fmt);
+  if(s.widget==='no_upload'){
+    s.step='confirm';await setSession(env,chat,s);
+    return message(env,chat,'Ready: '+s.modelName+'\nNo input file needed.\nSubmitting may consume MVSEP credits.',keys([[btn('✅ Generate','mvsubmit'),btn('Cancel','home')]]));
+  }
+  s.step='file';await setSession(env,chat,s);
+  return message(env,chat,'Send your '+(s.widget==='matchering_upload'?'target audio file (then reference audio)':'reference/input audio file')+' as audio, voice or document. (Telegram upload limits apply.)');
+}
+async function getTelegramFile(env,media) {
+  if(!media?.file_id)throw Error('No Telegram file attached');
+  if(media.file_size>LIMIT)throw Error('File too large; maximum supported by this bot is 10 MB');
+  const f=await tg(env,'getFile',{file_id:media.file_id});
+  const u='https://api.telegram.org/file/bot'+env.TELEGRAM_BOT_TOKEN+'/'+f.file_path;
+  const r=await fetch(u);
+  if(!r.ok)throw Error('Failed to download Telegram file');
+  const b=await r.blob();
+  if(b.size>LIMIT)throw Error('File exceeds 10 MB');
+  return new File([b],truncate(media.file_name||'input',120),{type:media.mime_type||b.type||'application/octet-stream'});
+}
+async function submitMv(env,chat,s,file,reference) {
+  if(!env.MVSEP_API_TOKEN)throw Error('MVSEP token is not configured');
+  const form=new FormData();
+  form.set('api_token',env.MVSEP_API_TOKEN);
+  form.set('sep_type',String(s.model));
+  form.set('output_format',String(s.format??0));
+  form.set('is_demo','false');
+  for(const [k,v] of Object.entries(s.values||{}))form.set(k,String(v));
+  if(file)form.set(s.widget==='matchering_upload'?'target_audiofile':'audiofile',file);
+  if(reference)form.set('reference_audiofile',reference);
+  const r=await fetch(MV+'/separation/create',{method:'POST',body:form});
+  const out=await r.json();
+  if(!r.ok||!out.success||!out.data?.hash)throw Error('MVSEP: '+truncate(out.data?.message||out.message||'submission failed',200));
+  const id=crypto.randomUUID();
+  const progress=await tg(env,'sendMessage',{chat_id:chat,text:'⏳ '+s.modelName+' · accepted by MVSEP\nJob '+id.slice(0,8)+'\nI will update this message and send the files automatically.'});
+  await putJob(env,{id,chat,provider:'mvsep',kind:s.modelName,external:out.data.hash,progress:progress.message_id});
+  await setSession(env,chat,{step:'home'});
+  return;
+}
+async function uploadImage(env,chat,s,file) {
+  const slot=slotFor(env,chat);
+  const form=new FormData();
+  form.set('image',file);
+  let ep='',kind=s.kind;
+  if(kind==='upscale') {
+    ep='upscaling_upload';form.set('model',s.model);form.set('scale',s.scale);
+    if(s.face)form.set('fx','');if(s.guidance)form.set('prompt',s.guidance);
+    form.set('use_webp','true');
+  } else if(kind==='removebg')ep='removebg_upload';
+  else if(kind==='reimagine'){ep='reImagine_upload';form.set('style',s.style||'Oil_Painting');}
+  else throw Error('Invalid image operation');
+  // Respect quota and do not rotate client identity to evade limits.
+  const account=await accountInfo(env,slot);
+  if(account.has_free_quota_left===false && !(Number(account.balance)>0))
+    throw Error('No remaining image service quota for this client/IP. Add legitimate credits or try later.');
+  const out=await upstream(env,ep,slot,{method:'POST',body:form});
+  const external=typeof out==='string'?out:(out.req_id||out.filename||out.original_filename||'');
+  if(typeof external!=='string'||external.length>500||/[<>]/.test(external))throw Error('Invalid upload result from provider');
+  if(!external||/error|invalid|fail/i.test(String(external).slice(0,70)))throw Error('Image provider did not accept the upload: '+truncate(external,100));
+  const id=crypto.randomUUID();
+  const progress=await tg(env,'sendMessage',{chat_id:chat,text:'⏳ '+kind+' queued\nJob '+id.slice(0,8)+'\nI will update progress and deliver the result automatically.'});
+  await putJob(env,{id,chat,provider:'image',kind,external:String(external),slot,progress:progress.message_id});
+  await setSession(env,chat,{step:'home'});
+  return;
+}
+async function submitTts(env,chat,s,text) {
+  const slot=slotFor(env,chat);
+  const account=await accountInfo(env,slot);
+  if(account.has_free_quota_left===false && !(Number(account.balance)>0))throw Error('Image service daily quota exhausted.');
+  const active=await env.MEMORY_DB.prepare("SELECT id FROM studio_jobs WHERE provider='image' AND kind='tts' AND client_slot=? AND status='running' LIMIT 1").bind(slot).all();
+  if(active.results?.length)throw Error('One TTS job is already running for this image-provider account.');
+  const before=await upstream(env,'tts_get_data',slot);
+  const seen=Array.isArray(before)?before.map(x=>x.result).filter(Boolean):[];
+  const out=await upstream(env,'tts_submit',slot,{method:'POST',body:JSON.stringify({text,voice:s.voice||'am_michael',speed:s.speed||1}),headers:{'Content-Type':'application/json'}});
+  if(typeof out==='object'&&out.success===false)throw Error('Provider rejected TTS request');
+  const id=crypto.randomUUID();
+  const progress=await tg(env,'sendMessage',{chat_id:chat,text:'⏳ TTS submitted\nJob '+id.slice(0,8)+'\nI will deliver the audio automatically.'});
+  await putJob(env,{id,chat,provider:'image',kind:'tts',external:JSON.stringify({seen,result:out}),slot,progress:progress.message_id});
+  await setSession(env,chat,{step:'home'});
+  return;
+}
+async function sendRecent(env,chat) {
+  const r=await env.MEMORY_DB.prepare('SELECT id,kind,status,last_error FROM studio_jobs WHERE chat_id=? ORDER BY created_at DESC LIMIT 8').bind(String(chat)).all();
+  const list=(r.results||[]).map(x=>x.id.slice(0,8)+' • '+truncate(x.kind,24)+' • '+x.status+(x.last_error?' • '+truncate(x.last_error,80):''));
+  return message(env,chat,list.length?'Your latest jobs:\n'+list.join('\n'):'No jobs yet.',keys([[btn('🔁 Refresh','jobs'),btn('🏠 Home','home')]]));
+}
+async function deliverResult(env,j,urls) {
+  const unique=[...new Set(urls)].filter(u=>safeHost(u,'mvsep.com')||safeHost(u,'image-upscaling.net'));
+  if(!unique.length)throw Error('No supported output URLs in provider result');
+  let sent=0;
+  for(const u of unique.slice(0,8)) {
+    try {await media(env,j.chat_id,u,/\.(mp3|wav|m4a|flac)(\?|$)/i.test(u)?'audio':'document',{cookie:j.client_slot==null?null:'client_id='+imageIds(env)[j.client_slot]});sent++;}
+    catch(err) {if(sent===0)throw err;await message(env,j.chat_id,'Additional output: '+truncate(u,500));}
+  }
+  if(!sent)throw Error('Could not send result');
+  return;
+}
+function resultUrls(v) {
+  const res=[];
+  function walk(x,depth=0){
+    if(depth>6||x==null)return;
+    if(typeof x==='string'){if(safeHost(x,'mvsep.com')||safeHost(x,'image-upscaling.net'))res.push(x);}
+    if(Array.isArray(x))for(const el of x)walk(el,depth+1);
+    else if(typeof x==='object')for(const [k,val] of Object.entries(x))if(/^(url|link|result|download|download_url|file|files|image_url|audio_url|path)$/i.test(k)||depth>0)walk(val,depth+1);
+  }
+  walk(v);return res;
+}
+function sentReceipt(j){return 'delivered · '+duration(epoch()-j.created_at)+' wall time'}
+async function pollJob(env,j){
+  try{
+    if(j.provider==='mvsep'){
+      const r=await fetch(MV+'/separation/get?hash='+encodeURIComponent(j.external_id));
+      if(!r.ok)throw Error('MVSEP status '+r.status);
+      const data=await r.json();
+      if(data.status==='failed'||data.status==='not_found'){await editJob(env,j.id,'failed',truncate(data.data?.message||data.status,240));await progress(env,j,'❌ '+j.kind+' · '+data.status);await message(env,j.chat_id,'❌ MVSEP '+j.kind+' failed: '+truncate(data.data?.message||data.status,150));return;}
+      if(data.status!=='done'){
+        const label='⏳ '+j.kind+' · '+(data.status||'processing')+
+          (data.data?.current_order!==undefined?'\nQueue position '+data.data.current_order:'')+
+          (data.data?.all_chunks?'\nProcessed '+data.data.finished_chunks+'/'+data.data.all_chunks+' chunks':'');
+        await progress(env,j,label);
+        return;
+      }
+      const urls=resultUrls(data.data?.files||data.data?.result||data.data||{});
+      if(!urls.length){await editJob(env,j.id,'failed','Completed without readable output URLs');return;}
+      await deliverResult(env,j,urls);await editJob(env,j.id,'done');await progress(env,j,'✅ '+j.kind+' · '+sentReceipt(j)+'\n'+await providerReceipt(env,'mvsep'));
+      return;
+    }
+    const slot=j.client_slot;
+    const ep=j.kind==='upscale'?'upscaling_get_status_v2':j.kind==='removebg'?'removebg_get_status_v2':j.kind==='reimagine'?'reImagine_get_status':'tts_get_data';
+    const status=await upstream(env,ep,slot);
+    if(!Array.isArray(status))throw Error('Invalid provider status');
+    let hit;
+    if(j.kind==='reimagine')hit=status.find(x=>x.req_id===j.external_id);
+    else if(j.kind==='tts'){
+      const previous=parseJSON(j.external_id,{});
+      const seen=new Set(previous.seen||[]);
+      hit=status.find(x=>x.result && !seen.has(x.result));
+    }
+    else hit=status.find(x=>x.original_filename===j.external_id||x.filename===j.external_id);
+    if(!hit){await progress(env,j,'⏳ '+j.kind+' · waiting for provider');return;}
+    const done=j.kind==='reimagine'?hit.is_completed:(j.kind==='tts'?!!hit.result:!!hit.completed);
+    if(!done){await progress(env,j,'⏳ '+j.kind+' · processing');return;}
+    const url=hit.result||hit.image_url;
+    if(!url)throw Error('Completed without output URL');
+    await deliverResult(env,j,[url]);await editJob(env,j.id,'done');await progress(env,j,'✅ '+j.kind+' · '+sentReceipt(j)+'\n'+await providerReceipt(env,'image',j.client_slot));
+  }catch(err){
+    const e=truncate(err.message||err,250);
+    // Remain retryable, except after 12 hours.
+    if(epoch()-j.created_at>43200){await editJob(env,j.id,'failed',e);await progress(env,j,'❌ '+j.kind+' expired: '+e);await message(env,j.chat_id,'⚠️ Job expired: '+j.id.slice(0,8)+'. '+e);}
+    else await env.MEMORY_DB.prepare('UPDATE studio_jobs SET last_error=?,updated_at=? WHERE id=?').bind(e,epoch(),j.id).run();
+  }
+}
+async function pollAll(env){
+  const q=await env.MEMORY_DB.prepare("SELECT * FROM studio_jobs WHERE status='running' ORDER BY created_at ASC LIMIT 12").all();
+  for(const j of q.results||[])await pollJob(env,j);
+}
+async function handleMessage(env,m) {
+  const chat=m.chat?.id,usr=m.from?.id;if(!chat||!usr)return;
+  const text=m.text||m.caption||'',command=text.trim().split(/\s+/)[0].split('@')[0].toLowerCase();
+  if(command==='/studiohelp')return message(env,chat,HELP,home);
+  if(command==='/studio_cancel'){await setSession(env,chat,{step:'home'});return message(env,chat,'Cancelled current selection.',home);}
+  if(command==='/studiojobs')return sendRecent(env,chat);
+  if(command==='/usage'){
+    const current=await Promise.all([aiFooter(env.MEMORY_DB,String(chat)),providerReceipt(env,'mvsep'),
+      providerReceipt(env,'image',slotFor(env,chat))]);
+    return message(env,chat,'📊 CYAW Studio usage\n\n'+current.join('\n')+
+      '\n⏱ Processing times are included in completed job receipts.\n💳 Modal actual costs: check the Modal billing dashboard.',home);
+  }
+  if(command==='/upscale')return pickImage(env,chat,'upscale');
+  if(command==='/genimage')return pickImage(env,chat,'generate');
+  if(command==='/studio'||command==='/image')return imageMenu(env,chat);
+  if(command==='/removebg')return pickImage(env,chat,'removebg');
+  if(command==='/reimagine')return pickImage(env,chat,'reimagine');
+  if(command==='/mvvoice')return showCatalog(env,chat,'voice');
+  if(command==='/mvaudio')return showCatalog(env,chat,'audio');
+  if(command==='/mvseparate')return showCatalog(env,chat,'separate');
+  if(command==='/mvsep')return showCatalog(env,chat,'all');
+  if(command==='/studiomodels'){
+    const a=await catalog('all'),im=await imageConfig();
+    return message(env,chat,'Live catalogs: '+a.length+' MVSEP models, '+Object.keys(im).length+' image upscalers.\nUse /mvsep or /image.',home);
+  }
+  if(command==='/imagetts'){await setSession(env,chat,{step:'tts_voice',kind:'tts'});return message(env,chat,'Enter a voice ID (e.g. am_michael). The provider does not publish a voice-list API.');}
+  const s=await session(env,chat);
+  if(s.step==='home')return message(env,chat,'Choose an action:',home);
+  if(s.step==='tts_voice'){s.voice=truncate(text.trim(),60);if(!/^[a-zA-Z0-9_-]{2,60}$/.test(s.voice))return message(env,chat,'Invalid voice code. Try am_michael.');s.step='tts_speed';await setSession(env,chat,s);return message(env,chat,'Choose speech speed:',keys([[btn('0.8x','speed:0.8'),btn('1.0x','speed:1'),btn('1.2x','speed:1.2')]]));}
+  if(s.step==='tts_text') {if(!text||text.length>60000)return message(env,chat,'Send between 1 and 60,000 characters.');return submitTts(env,chat,s,text);}
+  if(s.step==='prompt'&&s.kind==='generate'){
+    if(!text||text.length>2048)return message(env,chat,'Send a prompt of 1–2048 characters.');
+    if(!env.AI)throw Error('Workers AI is not enabled');
+    const data=await env.AI.run(IMAGE_MODEL,{prompt:text,steps:4,seed:Math.floor(Math.random()*1000000)});
+    const bytes=Uint8Array.from(atob(data.image),c=>c.charCodeAt(0));
+    const form=new FormData();form.set('chat_id',String(chat));form.set('photo',new File([bytes],'generated.jpg',{type:'image/jpeg'}));
+    await tg(env,'sendPhoto',form);await setSession(env,chat,{step:'home'});return message(env,chat,'Generated with FLUX.1 schnell. Choose another action:',home);
+  }
+  if(s.step==='style'){if(!text||text.length>90)return message(env,chat,'Enter a style name under 90 characters.');s.style=text.trim();s.step='file';await setSession(env,chat,s);return message(env,chat,'Style: '+s.style+'\nNow send an image.');}
+  if(s.step==='upscale_prompt'){if(command!=='/skip')s.guidance=text;s.step=s.hasFx?'face':'file';await setSession(env,chat,s);if(s.hasFx)return message(env,chat,'Enhance faces?',keys([[btn('Yes','face:yes'),btn('No','face:no')]]));return message(env,chat,'Send an image to upscale.');}
+  if(s.step==='field_text')return advanceField(env,chat,text,command==='/skip');
+  const file=m.photo?.at(-1)||m.document||m.audio||m.voice;
+  if(s.step==='file'&&file){
+    const b=await getTelegramFile(env,file);
+    if(s.kind==='mvsep'){
+      if(s.widget==='matchering_upload'){
+        s.step='file_reference';s.first_id=file.file_id;await setSession(env,chat,s);return message(env,chat,'Now send the reference audio file.');
+      }
+      return submitMv(env,chat,s,b);
+    }
+    return uploadImage(env,chat,s,b);
+  }
+  if(s.step==='file_reference'&&file){
+    const first=await getTelegramFile(env,{file_id:s.first_id});
+    const second=await getTelegramFile(env,file);
+    return submitMv(env,chat,s,first,second);
+  }
+  return message(env,chat,'Expected input: '+(s.step.startsWith('file')?'image/audio file':'text')+'. Use /cancel to reset.');
+}
+async function handleCallback(env,q) {
+  const chat=q.message?.chat?.id,usr=q.from?.id;if(!chat||!usr)return;
+  await tg(env,'answerCallbackQuery',{callback_query_id:q.id});
+  const d=String(q.data||'').replace(/^st:/,'');
+  if(d==='home') {await setSession(env,chat,{step:'home'});return message(env,chat,'Welcome to CYAW Media Studio',home);}
+  if(d==='help')return message(env,chat,HELP,home);
+  if(d==='jobs')return sendRecent(env,chat);
+  if(d.startsWith('i:'))return pickImage(env,chat,d.slice(2));
+  if(d.startsWith('upmodel:'))return startScale(env,chat,d.slice(8));
+  if(d.startsWith('scale:'))return finishScale(env,chat,d.slice(6));
+  if(d.startsWith('face:')){const s=await session(env,chat);s.face=d.endsWith('yes');s.step='file';await setSession(env,chat,s);return message(env,chat,'Send the image to upscale.');}
+  if(d.startsWith('mv:')){const [,scope,p]=d.split(':');return showCatalog(env,chat,scope,Number(p)||0);}
+  if(d.startsWith('model:')){const [,id,scope]=d.split(':');return mvModel(env,chat,id,scope);}
+  if(d.startsWith('opage:')){const s=await session(env,chat);s.optionPage=Number(d.split(':')[1]);await setSession(env,chat,s);return showOptions(env,chat,s);}
+  if(d.startsWith('opt:')){const s=await session(env,chat),index=Number(d.split(':')[1]);if(d==='opt:skip')return advanceField(env,chat,'',true);const opt=Object.entries(s.fields[s.fieldIndex].options||{})[index];if(!opt)throw Error('Option unavailable');return advanceField(env,chat,opt[0]);}
+  if(d.startsWith('fmt:'))return readyMv(env,chat,d.slice(4));
+  if(d==='mvsubmit'){const s=await session(env,chat);if(s.kind!=='mvsep'||s.widget!=='no_upload')throw Error('Select a model first');return submitMv(env,chat,s);}
+  if(d.startsWith('speed:')){const s=await session(env,chat);s.speed=Number(d.slice(6));s.step='tts_text';await setSession(env,chat,s);return message(env,chat,'Send text to speak. Maximum 60,000 characters.');}
+}
+
+const STUDIO_COMMANDS=new Set(['/studio','/image','/genimage','/upscale','/removebg','/reimagine','/mvvoice','/mvaudio','/mvseparate','/mvsep','/mvall','/studiomodels','/studiojobs','/usage','/studiohelp','/studio_cancel','/imagetts']);
+export const mediaStudioCommands=[
+  {command:'usage',description:'Credits, quotas and AI requests'},
+  {command:'studio',description:'Image and audio creation hub'},
+  {command:'genimage',description:'Generate image with Workers AI'},
+  {command:'upscale',description:'Choose upscaling model and size'},
+  {command:'removebg',description:'Remove an image background'},
+  {command:'reimagine',description:'Apply artistic style to an image'},
+  {command:'mvvoice',description:'Choose MVSEP speech/voice model'},
+  {command:'mvaudio',description:'Choose MVSEP music/sound model'},
+  {command:'mvseparate',description:'Choose MVSEP separation model'},
+  {command:'mvsep',description:'Browse all MVSEP models and options'},
+  {command:'imagetts',description:'Image provider text-to-speech'},
+  {command:'studiojobs',description:'View recent media studio jobs'}
+];
+export async function handleMediaStudioMessage(env,m) {
+  if(!env.MEMORY_DB)return false;
+  const chat=m.chat?.id;if(!chat)return false;
+  const text=(m.text||m.caption||'').trim(),cmd=text.split(/\s+/)[0].split('@')[0].toLowerCase();
+  let active=STUDIO_COMMANDS.has(cmd);
+  if(!active && !text.startsWith('/')){
+    const current=await session(env,chat);
+    active=!!current && current.step!=='home';
+  }
+  if(!active)return false;
+  try{await handleMessage(env,m);}
+  catch(err){console.error('Studio error',err?.name||'unknown');await message(env,chat,'⚠️ '+truncate(err?.message||'The provider rejected this request',270));}
+  return true;
+}
+export async function handleMediaStudioCallback(env,q){
+  try{await handleCallback(env,q);}
+  catch(err){
+    console.error('Studio callback error',err?.name||'unknown');
+    const id=q.message?.chat?.id;
+    if(id)await message(env,id,'⚠️ '+truncate(err?.message||'Choose another option',270));
+  }
+}
+export async function pollMediaStudio(env) {if(!env.MEMORY_DB||!env.TELEGRAM_BOT_TOKEN)return;await pollAll(env);}

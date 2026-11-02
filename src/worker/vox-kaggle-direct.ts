@@ -1,3 +1,4 @@
+import {duration} from './usage-receipts'
 /**
  * Cloudflare-only Kaggle VoxCPM2 batch orchestration.
  * Uses the same HTTP RPCs as Kaggle's official Python SDK (no OCI, no shell).
@@ -317,7 +318,9 @@ async function deliver(env:VoxEnv,job:Job,url:string,previewUrl:string|null){
  const hasPreview=previewUrl ? await storeVoxReference(env,job.id,job.chat_id,previewUrl) : false
  const data=new FormData()
  data.set('chat_id',job.chat_id)
- data.set('caption','Kaggle VoxCPM2 job #'+job.id)
+ const timing=await env.MEMORY_DB.prepare('SELECT created_at FROM vox_kaggle_jobs WHERE id=?').bind(job.id).all<{created_at:number}>()
+ const elapsed=duration(Math.floor(Date.now()/1000)-(timing.results[0]?.created_at||Math.floor(Date.now()/1000)))
+ data.set('caption','✅ Kaggle VoxCPM2 #'+job.id+' · '+elapsed+' wall time\nGPU quota: not exposed by Kaggle job API')
  data.set('audio',audio,'vox-'+job.id+'.mp3')
  if(hasPreview)data.set('reply_markup',JSON.stringify({inline_keyboard:[[{text:'⭐ Save this voice',callback_data:'vx:save:'+job.id}]]}))
  const out=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendAudio',{

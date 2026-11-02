@@ -1,3 +1,7 @@
+import {handleAiModelCommand,handleAiModelCallback,getAiModel} from './ai-models'
+import {streamAIToTelegram} from './stream-telegram-ai'
+import {pollWanAuto} from './wan-auto'
+import { handleMediaStudioMessage, handleMediaStudioCallback, pollMediaStudio, mediaStudioCommands } from './media-studio'
 import { Hono } from 'hono'
 import { handleAudioTelegram, pollAudioJobs, mvsepStatus, checkMvsepAccount } from './audio-tools'
 import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAssistantContext } from './voice-profiles'
@@ -27,6 +31,7 @@ type Bindings = {
   MODAL_MOTION_API_BASE?: string
   MODAL_MOTION_API_KEY?: string
   MVSEP_API_TOKEN?: string
+  IMAGE_CLIENT_IDS?: string
   KAGGLE_API_TOKEN?: string
   AI: AIClient
   MEMORY_DB: {
@@ -210,7 +215,11 @@ app.post('/telegram/webhook', async (c) => {
     const cb = update.callback_query
     const chat = String(cb.message?.chat.id ?? '')
     const sender = String(cb.from.id)
-    if (cb.data?.startsWith('qw:') &&
+    if(cb.data?.startsWith('am:') && await isAllowedTelegramUser(c.env,chat,sender,cb.message?.chat.type)){
+      c.executionCtx.waitUntil(handleAiModelCallback(c.env,chat,cb))
+    }else if(cb.data?.startsWith('st:') && await isAllowedTelegramUser(c.env,chat,sender,cb.message?.chat.type)){
+      c.executionCtx.waitUntil(handleMediaStudioCallback(c.env,cb))
+    }else if (cb.data?.startsWith('qw:') &&
         await isAllowedTelegramUser(c.env,chat,sender,cb.message?.chat.type)) {
       c.executionCtx.waitUntil(handleVoiceCallback(c.env,cb))
     }else if(cb.data?.startsWith('vx:') &&
@@ -284,6 +293,11 @@ app.post('/telegram/webhook', async (c) => {
     try {
       if (isAccessCommand(text) && await handleAccessCommand(c.env,sender,text,send)) return
       if (!allowed) return
+      if(/^\/aimodel(?:@[A-Za-z0-9_]+)?$/i.test(text)) {
+        await handleAiModelCommand(c.env,key)
+        return
+      }
+      if (await handleMediaStudioMessage(c.env,msg)) return
       if (await pyvtCommand(c.env,msg,key,text,send)) return
       if (await pyvtSelectedMedia(c.env,msg,key,send)) return
       if (await handleVoxTelegram(c.env,key,msg.message_id,text,send,msg)) return
@@ -295,7 +309,7 @@ app.post('/telegram/webhook', async (c) => {
         return
       }
       if (text === '/start') {
-        await send('Hello! I can remember our recent conversation. Send /forget to clear my memory.')
+        await send('Welcome to CYAW Media Studio.\n/studio opens image, voice and audio tools.\n/commands lists your other video, dubbing and AI capabilities.\n/forget clears chat memory.')
         return
       }
 
@@ -619,7 +633,7 @@ app.post('/telegram/webhook', async (c) => {
           if (!jobId) throw new Error('Missing job identifier')
           await db.prepare('UPDATE wan_video_jobs SET job_id = ?, status = ?, updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?')
             .bind(jobId,status,key,msg.message_id).run()
-          await send((isImageCommand ? 'Wan 2.2 image-to-video submitted.' : 'Wan 2.2 text-to-video submitted.') + '\nJob ID: ' + jobId + '\nUse /video_status to check progress.')
+          await send((isImageCommand ? 'Wan 2.2 image-to-video submitted.' : 'Wan 2.2 text-to-video submitted.') + '\nJob ID: ' + jobId + '\nProgress will be updated automatically, and your finished MP4 sent here.')
         } catch (error) {
           await db.prepare("UPDATE wan_video_jobs SET status = 'failed', updated_at = unixepoch() WHERE chat_id = ? AND telegram_message_id = ?").bind(key,msg.message_id).run()
           console.error('Modal job request failed',error instanceof Error ? error.message : 'unknown')
@@ -635,6 +649,18 @@ app.post('/telegram/webhook', async (c) => {
       if (/^\/(?:help|commands)(?:@\w+)?$/i.test(text)) {
         await send(
           'Available bot commands:\n' +
+          '/aimodel — choose AI model for streaming chat\n' +
+          '/studio — image, voice and audio tools with live menus\n' +
+          '/genimage — text-to-image via Workers AI\n' +
+          '/upscale — select model and scale from image-upscaling.net\n' +
+          '/removebg — background removal\n' +
+          '/reimagine — creative image styling\n' +
+          '/imagetts — image service TTS voice and speed\n' +
+          '/mvvoice — all MVSEP voice, speech and clone models\n' +
+          '/mvaudio — MVSEP music / audio generation\n' +
+          '/mvseparate — MVSEP model/option selector\n' +
+          '/mvsep — browse all MVSEP tools\n' +
+          '/studiojobs — optional job history (updates arrive automatically)\n' +
           '/clone — choose one of five saved voices or upload custom\n' +
           '/whoami — show your Telegram user ID\n' +
           '/allowed — owner: list authorized users\n' +
@@ -684,13 +710,16 @@ app.post('/telegram/webhook', async (c) => {
         content: row.content
       }))
       const assistantContext = await voiceAssistantContext(c.env,key)
-      const answer = await c.env.AI.run('@cf/meta/llama-3.1-8b-instruct-fp8', {
-        messages: [
+      const model = await getAiModel(c.env,key)
+      const reply = await streamAIToTelegram(c.env as unknown as Parameters<typeof streamAIToTelegram>[0],key,msg.message_id,[
+
           {
             role: 'system',
             content: [
               'You are the helpful AI guide for this Telegram bot. Reply in English and use the last 20 stored chat messages to understand the conversation. Give exact Telegram commands and clear, short examples.',
               'Available commands (do not invent commands):',
+              '/aimodel — choose your AI chat model (Llama 3.3 70B, Llama 3.1 8B, GPT-OSS 20B); normal chat streams progress with editMessageText.',
+              '/studio image/voice/audio menu; /genimage text-to-image; /upscale model+scale; /removebg; /reimagine; /imagetts; /mvvoice TTS voice design cloning; /mvaudio sound/music; /mvseparate and /mvsep all live MVSEP options; /studiojobs history. These options are now integrated, and media jobs are automatically polled/delivered.',
               '/help or /commands — show the command menu.',
               '/dub — open Telegram buttons to choose target English or Burmese, Microsoft Edge TTS or VoxCPM2, and voice. /dub_help gives instructions. Video jobs remain disabled until Kaggle tests pass.',
               '/vox TEXT — request VoxCPM2 Burmese speech (up to 8,000 characters); after output click Save this voice, then a slot. /voxvoice 1 TEXT reuses stored reference; /voxvoices lists five slots; /voxrename 1 Name renames. Reply to a UTF-8 .txt file with /vox or /voxvoice 1, or attach a .txt file as caption. /vox_status gives status; no OCI needed.',
@@ -715,13 +744,7 @@ app.post('/telegram/webhook', async (c) => {
             ].join('\n')
           },
           ...history
-        ],
-        max_tokens: 650
-      })
-      const reply = typeof answer.response === 'string' && answer.response.trim()
-        ? answer.response.trim().slice(0, 3900)
-        : 'I could not produce an answer. Please try asking again.'
-      await send(reply)
+        ],model)
       await db.prepare(
         "INSERT OR REPLACE INTO messages (chat_id, message_id, role, content) VALUES (?, ?, 'assistant', ?)"
       ).bind(key, msg.message_id, reply).run()
@@ -876,7 +899,7 @@ async function processQueuedMotion(env: Bindings): Promise<void> {
     ).bind(result.id,job.chat_id,job.telegram_message_id).run()
     await sendUpdate('Wan Animate 14B ' + (quality === 'hq' ? '480p HQ' : '360p') +
       ' motion submitted. Job ID: ' + result.id +
-      '\\nUse /motion_status to get your video.')
+      '\\nYou will receive the video automatically when ready.')
   } catch (error) {
     const reason = error instanceof Error ? error.message : 'Unknown submission error'
     // A transport timeout after POST may hide a successful submission.
@@ -919,7 +942,45 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
   // The previous bot subscribed to message updates only.
   // Voice-selection buttons require callback_query updates too.
   if (status.result?.url === target &&
-      status.result?.allowed_updates?.includes('callback_query')) return
+      status.result?.allowed_updates?.includes('callback_query')) {
+    // Refresh commands even when webhook is already registered.
+    try {
+      const commands = [
+        ...mediaStudioCommands,
+        {command:'aimodel',description:'Choose AI chatbot model'},
+        {command:'help',description:'Show all available commands'},
+        {command:'ask',description:'Ask the AI for commands and guidance'},
+        {command:'clone',description:'Pick a saved or custom voice'},
+        {command:'vox',description:'Kaggle VoxCPM2 Burmese speech'},
+        {command:'vox_status',description:'Check VoxCPM2 job status'},
+        {command:'dub',description:'Choose dubbing language and voice'},
+        {command:'dub_help',description:'pyVideoTrans video dubbing help'},
+        {command:'dub_status',description:'Check pyVideoTrans dubbing status'},
+        {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
+        {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
+        {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
+        {command:'tts_status',description:'Check Qwen3-TTS generation status'},
+        {command:'tts_long',description:'Start plain-text long speech composition'},
+        {command:'tts_done',description:'Finish long speech and confirm'},
+        {command:'voices',description:'View your five saved voices'},
+        {command:'savevoice',description:'Save reference voice to slot 1 to 5'},
+        {command:'clonelang',description:'Set voice generation language'},
+        {command:'cancel',description:'Cancel voice selection'},
+        {command:'separate',description:'Separate audio with MVSEP'},
+        {command:'sep_status',description:'Check MVSEP separation status'},
+        {command:'video',description:'Generate video with WAN 2.2'},
+        {command:'video_status',description:'Check WAN video status'},
+        {command:'motion',description:'Animate a character with WAN'},
+        {command:'motion_status',description:'Check WAN Animate status'},
+      ]
+      const response=await fetch(base+'/setMyCommands',{
+        method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({commands}),
+        signal:AbortSignal.timeout(10000)
+      })
+      if(!response.ok)console.error('Menu sync HTTP',response.status)
+    }catch(e){console.error('Telegram menu sync failed',e instanceof Error?e.name:'unknown')}
+    return
+  }
   const response = await fetch(`${base}/setWebhook`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -936,6 +997,8 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
     // Initialize Telegram's native slash-command menu when enabling voice buttons.
     try {
       const commands = [
+        ...mediaStudioCommands,
+        {command:'aimodel',description:'Choose AI chatbot model'},
         {command:'help',description:'Show all available commands'},
         {command:'ask',description:'Ask the AI for commands and guidance'},
         {command:'clone',description:'Pick a saved or custom voice'},
@@ -980,7 +1043,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pollMediaStudio(env),pollWanAuto(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }

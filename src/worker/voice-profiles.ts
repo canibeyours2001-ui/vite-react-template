@@ -1,3 +1,4 @@
+import {providerReceipt,duration} from './usage-receipts'
 
 import { isAllowedTelegramUser } from './telegram-access'
 
@@ -443,6 +444,9 @@ export async function processQwenVoiceJobs(env:VoiceEnv):Promise<void>{
           }
           await env.MEMORY_DB.prepare("UPDATE qwen_clone_jobs SET status='done',updated_at=unixepoch() WHERE id=?")
             .bind(active.id).run()
+          const times=await env.MEMORY_DB.prepare('SELECT created_at FROM qwen_clone_jobs WHERE id=?').bind(active.id).all<{created_at:number}>()
+          const elapsed=duration(Math.floor(Date.now()/1000)-(times.results[0]?.created_at||Math.floor(Date.now()/1000)))
+          await statusMessage(env,active.chat_id,active.status_message_id,'✅ Qwen voice delivered · '+elapsed+' wall time\n'+await providerReceipt(env,'mvsep')).catch(()=>undefined)
         }catch{
           await env.MEMORY_DB.prepare("UPDATE qwen_clone_jobs SET status='delivery-failed',updated_at=unixepoch() WHERE id=?")
             .bind(active.id).run()

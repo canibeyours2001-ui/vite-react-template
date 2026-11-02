@@ -1,3 +1,4 @@
+import {duration} from './usage-receipts'
 /**
  * pyVideoTrans private Kaggle job dispatcher for Telegram video dubbing.
  * Runs Microsoft Edge TTS or the native VoxCPM2 T4 provider, never on Workers.
@@ -291,7 +292,7 @@ async function sendVideo(env:VideoEnv,job:Job,url:string):Promise<void>{
  if(video.size<4096||video.size>MAX_OUTPUT)throw Error('Video too large or missing')
  const form=new FormData()
  form.set('chat_id',job.chat_id)
- form.set('caption','pyVideoTrans Kaggle job #'+job.id+' completed ('+job.engine+' TTS)')
+ form.set('caption','✅ pyVideoTrans #'+job.id+' ('+job.engine+') · '+duration(Math.floor(Date.now()/1000)-job.created_at)+' wall time\nKaggle GPU quota: not exposed by job API')
  form.set('video',video,'pyvideotrans-'+job.id+'.mp4')
  const sent=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendVideo',{
   method:'POST',body:form,signal:AbortSignal.timeout(65000)
