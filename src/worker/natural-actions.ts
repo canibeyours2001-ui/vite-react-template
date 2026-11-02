@@ -2,6 +2,9 @@
 // Only allowlisted actions, confirmation for inference and paid resources,
 // D1 compare-and-swap before submission, no arbitrary shell or HTTP execution.
 import {getAiModel} from './ai-models'
+import {queueModelScopeImage} from './modelscope-image'
+import {queueExternalImage} from './external-image'
+import {queueZeroImage} from './hf-zerogpu'
 import {handleMediaStudioMessage,startNaturalVoice,startNaturalAudio,startNaturalEdit} from './media-studio'
 
 type Media={file_id:string;file_size?:number;mime_type?:string;file_name?:string}
@@ -89,6 +92,25 @@ export async function reviewDirectPrompt(env:Env,msg:Msg):Promise<boolean>{
  const t=(msg.text||msg.caption||'').trim()
  if(!t||t.startsWith('/ask'))return false
  const image=msg.photo?.at(-1)||(msg.document&&/^image\//.test(msg.document.mime_type||'')?msg.document:undefined)
+ if(t.startsWith('/hfzero ')){
+  const prompt=t.slice('/hfzero '.length).trim()
+  if(!prompt)return false
+  await newDraft(env,String(msg.chat.id),{intent:'image_gen',prompt,stage:'review',messageId:msg.message_id,created:Date.now(),info:'hfzero'})
+  return true
+ }
+ if(t.startsWith('/ovhimage ')||t.startsWith('/hfimage ')){
+  const provider=t.startsWith('/ovhimage ')?'ovh':'hf'
+  const prompt=t.slice(provider==='ovh'?'/ovhimage '.length:'/hfimage '.length).trim()
+  if(!prompt)return false
+  await newDraft(env,String(msg.chat.id),{intent:'image_gen',prompt,stage:'review',messageId:msg.message_id,created:Date.now(),info:provider})
+  return true
+ }
+ if(t.startsWith('/msimage ')){
+  const prompt=t.slice('/msimage '.length).trim()
+  if(!prompt)return false
+  await newDraft(env,String(msg.chat.id),{intent:'image_gen',prompt,stage:'review',messageId:msg.message_id,created:Date.now(),info:'modelscope'})
+  return true
+ }
  if(t.startsWith('/video ')||t.startsWith('/image2video ')){
   const isImage=t.startsWith('/image2video ')
   const prompt=t.slice(isImage?13:7).trim()
@@ -100,10 +122,11 @@ export async function reviewDirectPrompt(env:Env,msg:Msg):Promise<boolean>{
  if(t.startsWith('/')||!t)return false
  const r=await env.MEMORY_DB.prepare('SELECT state FROM studio_sessions WHERE chat_id=?').bind(String(msg.chat.id)).all<{state:string}>()
  if(!r.results[0])return false
- let s:{step?:string;kind?:string}={}
+ let s:{step?:string;kind?:string;imageProvider?:string}={}
  try{s=JSON.parse(r.results[0].state)}catch{return false}
- if(s.step!=='prompt'||s.kind!=='generate')return false
- await newDraft(env,String(msg.chat.id),{intent:'image_gen',prompt:t,stage:'review',messageId:msg.message_id,created:Date.now(),info:'selected_studio_model'})
+ if(s.kind!=='generate'||!['prompt','provider_prompt'].includes(s.step||''))return false
+ const provider=s.step==='provider_prompt'&&['ovh','hf','hfzero','modelscope'].includes(s.imageProvider||'')?s.imageProvider:'selected_studio_model'
+ await newDraft(env,String(msg.chat.id),{intent:'image_gen',prompt:t,stage:'review',messageId:msg.message_id,created:Date.now(),info:provider})
  return true
 }
 export async function handleNaturalMessage(env:Env,msg:Msg):Promise<boolean>{
@@ -137,7 +160,7 @@ export async function handleNaturalMessage(env:Env,msg:Msg):Promise<boolean>{
  if(intent==='usage') {await handleMediaStudioMessage(env,{chat:msg.chat,from:msg.from,text:'/usage',message_id:msg.message_id});return true}
  if(intent==='image_gen'||intent==='video_gen'||intent==='video_image'){
    const prompt=clip(plainPrompt(t),2048)
-   await newDraft(env,chat,{intent,prompt,stage:intent==='video_image'&&!fileImage?'await_media':'review',messageId:msg.message_id,file:fileImage,created:Date.now()});return true
+   await newDraft(env,chat,{intent,prompt,stage:intent==='video_image'&&!fileImage?'await_media':'review',messageId:msg.message_id,file:fileImage,created:Date.now(),info:intent==='image_gen'?(/modelscope/i.test(t)?'modelscope':/hugging\s*face|\bhf\b/i.test(t)?'hf':'ovh'):undefined});return true
  }
  if(intent==='audio_gen'){
    await startNaturalAudio(env,chat,clip(plainPrompt(t),1600));return true
@@ -257,7 +280,7 @@ export async function handleNaturalCallback(env:Env,cb:{id:string;data?:string;m
   if(choice==='better'&&!draft.best){await tell(env,chat,'Please select Improve prompt first.');return}
   const chosen=choice==='better'?draft.best!:draft.prompt
   if(!await swap(env,chat,raw,{...draft,chosen,stage:'confirm'}))return
-  await tell(env,chat,'Review the '+(draft.intent==='image_gen'?'image':'video')+' request:\n\n'+clip(chosen,1300)+'\n\nGenerate now? '+(draft.intent==='image_gen'?'Workers AI inference quota applies.':'Modal GPU charges may apply.'),kb([[btn('✅ Generate now','generate'),btn('✏️ Edit','edit')],[btn('Cancel','cancel')]]))
+  await tell(env,chat,'Review the '+(draft.intent==='image_gen'?'image':'video')+' request:\n\n'+clip(chosen,1300)+'\n\nGenerate now? '+(draft.intent==='image_gen'?(draft.info==='modelscope'?'ModelScope grain credits may apply.':draft.info==='hfzero'?'Hugging Face ZeroGPU daily minutes apply.':draft.info==='hf'?'Hugging Face inference credits may apply.':draft.info==='ovh'?'OVHcloud free anonymous SDXL; subject to rate limits.':'Workers AI inference quota applies.'):'Modal GPU charges may apply.'),kb([[btn('✅ Generate now','generate'),btn('✏️ Edit','edit')],[btn('Cancel','cancel')]]))
   return
  }
  if(choice==='generate'){
@@ -277,7 +300,10 @@ export async function pollNaturalActions(env:Env){
   const running={...d,stage:'running'}
   if(!await swap(env,row.chat_id,row.state,running))continue
   try{
-   if(d.intent==='image_gen')await imageNow(env,row.chat_id,d)
+   if(d.intent==='image_gen'&&d.info==='hfzero')await queueZeroImage(env,row.chat_id,d.messageId,d.chosen||d.prompt)
+   else if(d.intent==='image_gen'&&d.info==='modelscope')await queueModelScopeImage(env,row.chat_id,d.messageId,d.chosen||d.prompt)
+   else if(d.intent==='image_gen'&&(d.info==='ovh'||d.info==='hf'))await queueExternalImage(env,row.chat_id,d.messageId,d.chosen||d.prompt,d.info)
+   else if(d.intent==='image_gen')await imageNow(env,row.chat_id,d)
    else if(d.intent==='video_gen'||d.intent==='video_image')await videoNow(env,row.chat_id,d)
    else if(['upscale','removebg','reimagine'].includes(d.intent))await startNaturalEdit(env,row.chat_id,d.intent,d.file,d.prompt)
    const current=await read(env,row.chat_id)

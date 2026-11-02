@@ -1,6 +1,9 @@
 import {handleAiModelCommand,handleAiModelCallback,getAiModel} from './ai-models'
 import {handleNaturalMessage,handleNaturalCallback,reviewDirectPrompt,pollNaturalActions} from './natural-actions'
 import {streamAIToTelegram} from './stream-telegram-ai'
+import {pollModelScopeImages,modelScopeCommand} from './modelscope-image'
+import {pollExternalImages,checkImageProviders} from './external-image'
+import {pollZeroImages,zeroStatus} from './hf-zerogpu'
 import {pollWanAuto} from './wan-auto'
 import { handleMediaStudioMessage, handleMediaStudioCallback, pollMediaStudio, mediaStudioCommands } from './media-studio'
 import { Hono } from 'hono'
@@ -34,6 +37,8 @@ type Bindings = {
   MVSEP_API_TOKEN?: string
   IMAGE_CLIENT_IDS?: string
   KAGGLE_API_TOKEN?: string
+  MODELSCOPE_API_TOKEN?: string
+  HUGGINGFACE_API_TOKEN?: string
   AI: AIClient
   MEMORY_DB: {
     prepare: (query: string) => {
@@ -296,6 +301,9 @@ app.post('/telegram/webhook', async (c) => {
     try {
       if (isAccessCommand(text) && await handleAccessCommand(c.env,sender,text,send)) return
       if (!allowed) return
+      if(/^\/imageproviders(?:@\w+)?$/i.test(text)){await checkImageProviders(c.env,key);return}
+      if(/^\/hfzerostatus(?:@\w+)?$/i.test(text)){await zeroStatus(c.env,key);return}
+      if(await modelScopeCommand(c.env,key,text)) return
       if(/^\/aimodel(?:@[A-Za-z0-9_]+)?$/i.test(text)) {
         await handleAiModelCommand(c.env,key)
         return
@@ -660,6 +668,13 @@ app.post('/telegram/webhook', async (c) => {
           '/aimodel — choose AI model for streaming chat\n' +
           '/studio — image, voice and audio tools with live menus\n' +
           '/genimage — text-to-image via Workers AI\n' +
+          '/msimage PROMPT — ModelScope Qwen image generation\n' +
+          '/ovhimage PROMPT — free anonymous OVH SDXL\n' +
+          '/hfimage PROMPT — Hugging Face FLUX\n' +
+          '/hfzero PROMPT — Hugging Face ZeroGPU free minutes\n' +
+          '/hfzerostatus — status of ZeroGPU image\n' +
+          '/imageproviders — provider status and token check\n' +
+          '/msstatus — ModelScope image job status\n' +
           '/upscale — select model and scale from image-upscaling.net\n' +
           '/removebg — background removal\n' +
           '/reimagine — creative image styling\n' +
@@ -956,6 +971,13 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
       const commands = [
         ...mediaStudioCommands,
         {command:'aimodel',description:'Choose AI chatbot model'},
+        {command:'msimage',description:'Generate image using ModelScope Qwen'},
+        {command:'ovhimage',description:'Generate free anonymous OVH SDXL image'},
+        {command:'hfimage',description:'Generate Hugging Face FLUX image'},
+        {command:'hfzero',description:'Generate image using free ZeroGPU time'},
+        {command:'hfzerostatus',description:'Check HF ZeroGPU image status'},
+        {command:'imageproviders',description:'Check image-provider connections'},
+        {command:'msstatus',description:'Check ModelScope image job'},
         {command:'help',description:'Show all available commands'},
         {command:'ask',description:'Ask the AI for commands and guidance'},
         {command:'clone',description:'Pick a saved or custom voice'},
@@ -1007,6 +1029,13 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
       const commands = [
         ...mediaStudioCommands,
         {command:'aimodel',description:'Choose AI chatbot model'},
+        {command:'msimage',description:'Generate image using ModelScope Qwen'},
+        {command:'ovhimage',description:'Generate free anonymous OVH SDXL image'},
+        {command:'hfimage',description:'Generate Hugging Face FLUX image'},
+        {command:'hfzero',description:'Generate image using free ZeroGPU time'},
+        {command:'hfzerostatus',description:'Check HF ZeroGPU image status'},
+        {command:'imageproviders',description:'Check image-provider connections'},
+        {command:'msstatus',description:'Check ModelScope image job'},
         {command:'help',description:'Show all available commands'},
         {command:'ask',description:'Ask the AI for commands and guidance'},
         {command:'clone',description:'Pick a saved or custom voice'},
@@ -1051,7 +1080,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }

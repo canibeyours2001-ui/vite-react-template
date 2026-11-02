@@ -115,7 +115,7 @@ function optFields(algo) {
   })).sort((a,b)=>Number(a.name.replace(/\D/g,''))-Number(b.name.replace(/\D/g,'')));
 }
 const home=keys([
- [btn('🎨 Generate image','i:generate'),btn('🔎 Upscale','i:upscale')],
+ [btn('🎨 Generate image','provider:menu'),btn('🔎 Upscale','i:upscale')],
  [btn('🧽 Remove background','i:removebg'),btn('🖌 Re-Imagine','i:reimagine')],
  [btn('🗣 Voice / TTS','mv:voice:0'),btn('🎼 Audio generation','mv:audio:0')],
  [btn('🎚 Separate / Enhance','mv:separate:0'),btn('🧰 All MVSEP models','mv:all:0')],
@@ -139,6 +139,12 @@ async function imageConfig() {
   return r.json();
 }
 async function imageMenu(env,chat) {return message(env,chat,'Choose an image tool:',home)}
+const imageProviders=keys([
+ [btn('🆓 OVHcloud SDXL','provider:ovh'),btn('🌟 ModelScope Qwen','provider:modelscope')],
+ [btn('🤗 Hugging Face FLUX','provider:hf'),btn('🆓 HF ZeroGPU Qwen','provider:hfzero')],
+ [btn('☁️ Cloudflare Workers AI','i:generate')],
+ [btn('🏠 Home','home')]
+]);
 async function pickImage(env,chat,kind) {
   if(kind==='generate') {
     await setSession(env,chat,{step:'imagemodel',kind:'generate'});
@@ -509,6 +515,14 @@ async function handleCallback(env,q) {
   if(d==='home') {await setSession(env,chat,{step:'home'});return message(env,chat,'Welcome to CYAW Media Studio',home);}
   if(d==='help')return message(env,chat,HELP,home);
   if(d==='jobs')return sendRecent(env,chat);
+  if(d==='provider:menu')return message(env,chat,'🎨 Choose image generation provider. OVHcloud SDXL needs no key and is currently free; Hugging Face uses inference credits and ModelScope uses grains.',imageProviders);
+  if(d.startsWith('provider:')){
+    const provider=d.slice('provider:'.length);
+    if(!['ovh','hf','hfzero','modelscope'].includes(provider))throw Error('Unknown image provider');
+    await setSession(env,chat,{step:'provider_prompt',kind:'generate',imageProvider:provider});
+    const name=provider==='ovh'?'OVHcloud SDXL (no API key)':provider==='hf'?'Hugging Face FLUX':provider==='hfzero'?'Hugging Face ZeroGPU Qwen 2.1':'ModelScope Qwen Image';
+    return message(env,chat,'Selected: '+name+'.\n\nSend your image prompt. I will offer to improve it, let you review it, and ask for confirmation before generating.');
+  }
   if(d.startsWith('i:'))return pickImage(env,chat,d.slice(2));
   if(d.startsWith('imgmodel:')){
     const i=Number(d.slice('imgmodel:'.length)),model=IMAGE_MODELS[i];
