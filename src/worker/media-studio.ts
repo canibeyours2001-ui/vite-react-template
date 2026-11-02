@@ -2,7 +2,9 @@
 import {providerReceipt,duration,aiFooter} from './usage-receipts'
 // CYAW Media Studio: existing Hono/Telegram integration, no second webhook.
 
-const MV = 'https://sg.mvsep.com/api';
+// Use a stable regional host for creation. Old SG-host jobs may still be visible only on DE/DE2.
+const MV = 'https://de.mvsep.com/api';
+const MV_FALLBACK = ['https://de2.mvsep.com/api', 'https://sg.mvsep.com/api'];
 const UP = 'https://image-upscaling.net';
 const IMAGE_MODELS=[
  {id:'@cf/black-forest-labs/flux-1-schnell',name:'FLUX.1 Schnell',steps:4,output:'base64'},
@@ -96,8 +98,11 @@ async function catalog(scope='all') {
   return filtered;
 }
 function optFields(algo) {
-  return (algo.algorithm_fields||[]).map(f=>({name:f.name,label:f.text||f.name,options:parseJSON(f.options||'{}',{})}))
-    .sort((a,b)=>Number(a.name.replace(/\D/g,''))-Number(b.name.replace(/\D/g,'')));
+  return (algo.algorithm_fields||[]).map(f=>({
+    name:f.name,label:f.text||f.name,options:parseJSON(f.options||'{}',{}),
+    required:f.required===1||f.required===true, defaultKey:f.default_key??null,
+    inputType:f.input_type||'text'
+  })).sort((a,b)=>Number(a.name.replace(/\D/g,''))-Number(b.name.replace(/\D/g,'')));
 }
 const home=keys([
  [btn('🎨 Generate image','i:generate'),btn('🔎 Upscale','i:upscale')],
@@ -184,7 +189,11 @@ async function nextField(env,chat,s) {
     return showOptions(env,chat,s);
   }
   s.step='field_text';await setSession(env,chat,s);
-  return message(env,chat,'Parameter '+(s.fieldIndex+1)+'/'+s.fields.length+': '+f.label+'\nSend text, or /skip for optional fields. For text prompts, supply the words you want generated.',keys([[btn('Skip','opt:skip')]]));
+  return message(env,chat,'Parameter '+(s.fieldIndex+1)+'/'+s.fields.length+': '+f.label+
+    (f.required?' (required)':' (optional)')+
+    '\nSend the text you want generated or the voice instructions.'+
+    (f.required?'':' You may /skip this field.'),
+    f.required?undefined:keys([[btn('Skip','opt:skip')]]));
 }
 async function showOptions(env,chat,s){
   const f=s.fields[s.fieldIndex], opts=Object.entries(f.options||{}), page=s.optionPage||0;
@@ -192,13 +201,19 @@ async function showOptions(env,chat,s){
   const n=[];if(page>0)n.push(btn('⬅','opage:'+(page-1)));
   if((page+1)*8<opts.length)n.push(btn('➡','opage:'+(page+1)));
   if(n.length)rows.push(n);
-  rows.push([btn('Use provider default','opt:skip')]);
+  if(!f.required||f.defaultKey!==null)rows.push([btn('Use provider default','opt:skip')]);
   return message(env,chat,'Parameter '+(s.fieldIndex+1)+'/'+s.fields.length+': '+f.label+'\nChoose a supported option:',keys(rows));
 }
 async function advanceField(env,chat,value,skip=false) {
   const s=await session(env,chat),f=s.fields?.[s.fieldIndex];
   if(!f)throw Error('No current field');
-  if(!skip)s.values[f.name]=String(value);
+  if(skip) {
+    if(f.defaultKey!==null)s.values[f.name]=String(f.defaultKey);
+    else if(f.required)return message(env,chat,'⚠️ '+f.label+' is required for this MVSEP model. Please supply a value.');
+  } else {
+    if(f.required&&!String(value||'').trim())return message(env,chat,'⚠️ '+f.label+' cannot be empty.');
+    s.values[f.name]=String(value);
+  }
   s.fieldIndex++;
   await setSession(env,chat,s);
   return nextField(env,chat,s);
@@ -207,7 +222,8 @@ async function readyMv(env,chat,fmt) {
   const s=await session(env,chat);s.format=Number(fmt);
   if(s.widget==='no_upload'){
     s.step='confirm';await setSession(env,chat,s);
-    return message(env,chat,'Ready: '+s.modelName+'\nNo input file needed.\nSubmitting may consume MVSEP credits.',keys([[btn('✅ Generate','mvsubmit'),btn('Cancel','home')]]));
+    const prompt=s.fields.find(f=>f.inputType==='textarea'&&/prompt|text/i.test(f.label));
+    return message(env,chat,'Ready: '+s.modelName+'\nNo audio upload needed. '+(prompt?'Text prompt: '+String(s.values[prompt.name]||'').length+' characters.\n':'')+'Submitting may consume MVSEP credits. Tap Generate only once.',keys([[btn('✅ Generate','mvsubmit'),btn('Cancel','home')]]));
   }
   s.step='file';await setSession(env,chat,s);
   return message(env,chat,'Send your '+(s.widget==='matchering_upload'?'target audio file (then reference audio)':'reference/input audio file')+' as audio, voice or document. (Telegram upload limits apply.)');
@@ -311,13 +327,28 @@ function resultUrls(v) {
   walk(v);return res;
 }
 function sentReceipt(j){return 'delivered · '+duration(epoch()-j.created_at)+' wall time'}
+// MVSEP documents a shared job database, but in production SG can return not_found
+// for an accepted hash while DE and DE2 correctly return waiting/done. Never mark
+// jobs failed on the first region's not_found response.
+async function mvsepStatus(hash){
+  let missing=0,failed=0;
+  for(const host of [MV,...MV_FALLBACK]){
+    try{
+      const r=await fetch(host+'/separation/get?hash='+encodeURIComponent(hash));
+      if(!r.ok){failed++;continue;}
+      const data=await r.json();
+      if(data.status==='not_found'){missing++;continue;}
+      if(data.status&&data.status!=='not_found')return data;
+      failed++;
+    }catch{failed++;}
+  }
+  throw Error(failed?'MVSEP regional status temporarily unavailable':'MVSEP job not yet visible across '+missing+' regions');
+}
 async function pollJob(env,j){
   try{
     if(j.provider==='mvsep'){
-      const r=await fetch(MV+'/separation/get?hash='+encodeURIComponent(j.external_id));
-      if(!r.ok)throw Error('MVSEP status '+r.status);
-      const data=await r.json();
-      if(data.status==='failed'||data.status==='not_found'){await editJob(env,j.id,'failed',truncate(data.data?.message||data.status,240));await progress(env,j,'❌ '+j.kind+' · '+data.status);await message(env,j.chat_id,'❌ MVSEP '+j.kind+' failed: '+truncate(data.data?.message||data.status,150));return;}
+      const data=await mvsepStatus(j.external_id);
+      if(data.status==='failed'){await editJob(env,j.id,'failed',truncate(data.data?.message||data.status,240));await progress(env,j,'❌ '+j.kind+' · failed');await message(env,j.chat_id,'❌ MVSEP '+j.kind+' failed: '+truncate(data.data?.message||data.status,150));return;}
       if(data.status!=='done'){
         const label='⏳ '+j.kind+' · '+(data.status||'processing')+
           (data.data?.current_order!==undefined?'\nQueue position '+data.data.current_order:'')+
@@ -479,7 +510,19 @@ async function handleCallback(env,q) {
   if(d.startsWith('opage:')){const s=await session(env,chat);s.optionPage=Number(d.split(':')[1]);await setSession(env,chat,s);return showOptions(env,chat,s);}
   if(d.startsWith('opt:')){const s=await session(env,chat),index=Number(d.split(':')[1]);if(d==='opt:skip')return advanceField(env,chat,'',true);const opt=Object.entries(s.fields[s.fieldIndex].options||{})[index];if(!opt)throw Error('Option unavailable');return advanceField(env,chat,opt[0]);}
   if(d.startsWith('fmt:'))return readyMv(env,chat,d.slice(4));
-  if(d==='mvsubmit'){const s=await session(env,chat);if(s.kind!=='mvsep'||s.widget!=='no_upload')throw Error('Select a model first');return submitMv(env,chat,s);}
+  if(d==='mvsubmit'){
+    const s=await session(env,chat);
+    if(s.kind==='mvsep'&&s.step==='submitting')return message(env,chat,'⏳ MVSEP submission is already underway. Do not tap Generate again.');
+    if(s.kind!=='mvsep'||s.widget!=='no_upload'||s.step!=='confirm')throw Error('Select a model and finish its parameters first');
+    const invalid=s.fields.find(f=>f.required&&!String(s.values[f.name]||'').trim());
+    if(invalid)return message(env,chat,'⚠️ Required MVSEP field missing: '+invalid.label+'. Please select the model again.');
+    // Atomic guard against double-tap duplicate billable submissions.
+    const lock=await env.MEMORY_DB.prepare('UPDATE studio_sessions SET state=?,updated_at=? WHERE chat_id=? AND state=?')
+      .bind(JSON.stringify({...s,step:'submitting'}),epoch(),String(chat),JSON.stringify(s)).run();
+    if(!lock.meta?.changes)return message(env,chat,'⏳ This submission was already started.');
+    try{return await submitMv(env,chat,s)}
+    catch(e){await setSession(env,chat,s);throw e;}
+  }
   if(d.startsWith('speed:')){const s=await session(env,chat);s.speed=Number(d.slice(6));s.step='tts_text';await setSession(env,chat,s);return message(env,chat,'Send text to speak. Maximum 60,000 characters.');}
 }
 
