@@ -83,7 +83,15 @@ function slotFor(env,chat) {
 async function upstream(env,path,slot,opts={}) {
   const id=imageIds(env)[slot]; if(!id)throw Error('Client ID not configured');
   const r=await fetch(UP+'/'+path,{...opts,headers:{...(opts.headers||{}),Cookie:'client_id='+id}});
-  if(!r.ok)throw Error('Image service HTTP '+r.status);
+  if(!r.ok){
+    const raw=await r.text().catch(()=>'');
+    const json=parseJSON(raw,{});
+    const note=typeof json==='object'&&json?(json.detail||json.error||json.message||''):'';
+    const detail=String(note||raw).replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();
+    // Never echo credentials, full web pages, service cookies or untrusted HTML.
+    const safe=/^[\p{L}\p{N}\s.,:()_+\-/]{4,180}$/u.test(detail)?detail:'';
+    throw Error('Image service rejected the request (HTTP '+r.status+')'+(safe?': '+safe:'; check the selected model, scale, file format, and provider quota'));
+  }
   const t=await r.text();
   return parseJSON(t,t);
 }
@@ -101,7 +109,7 @@ async function catalog(scope='all') {
 }
 function optFields(algo) {
   return (algo.algorithm_fields||[]).map(f=>({
-    name:f.name,label:f.text||f.name,options:parseJSON(f.options||'{}',{}),
+    name:f.name,serverKey:f.server_key||null,label:f.text||f.name,options:parseJSON(f.options||'{}',{}),
     required:f.required===1||f.required===true, defaultKey:f.default_key??null,
     inputType:f.input_type||'text'
   })).sort((a,b)=>Number(a.name.replace(/\D/g,''))-Number(b.name.replace(/\D/g,'')));
@@ -168,7 +176,9 @@ async function finishScale(env,chat,val) {
   s.scale=val;
   if(s.hasPrompt){s.step='upscale_prompt';await setSession(env,chat,s);return message(env,chat,'Optional model guidance: send a text description or /skip');}
   if(s.hasFx){s.step='face';await setSession(env,chat,s);return message(env,chat,'Enhance faces?',keys([[btn('✅ Yes','face:yes'),btn('No','face:no')]]));}
-  s.step='file';await setSession(env,chat,s);return message(env,chat,'Send the image to upscale.');
+  s.step='file';await setSession(env,chat,s);
+  if(s.savedMedia){const b=await getTelegramFile(env,s.savedMedia);return uploadImage(env,chat,s,b);}
+  return message(env,chat,'Send the image to upscale.');
 }
 async function mvModel(env,chat,id,scope) {
   const all=await catalog('all'), a=all.find(x=>String(x.render_id)===String(id));
@@ -239,7 +249,15 @@ async function getTelegramFile(env,media) {
   if(!r.ok)throw Error('Failed to download Telegram file');
   const b=await r.blob();
   if(b.size>LIMIT)throw Error('File exceeds 10 MB');
-  return new File([b],truncate(media.file_name||'input',120),{type:media.mime_type||b.type||'application/octet-stream'});
+  const serverExt=(String(f.file_path||'').match(/\.(jpg|jpeg|png|webp|mp3|wav|ogg|m4a|flac|mp4)$/i)||[])[1]?.toLowerCase();
+  const declared=String(media.mime_type||'').toLowerCase();
+  const guessed=serverExt==='jpg'||serverExt==='jpeg'?'image/jpeg':serverExt==='png'?'image/png':
+    serverExt==='webp'?'image/webp':serverExt==='ogg'?'audio/ogg':serverExt==='mp3'?'audio/mpeg':
+    serverExt==='wav'?'audio/wav':serverExt==='mp4'?'video/mp4':'';
+  const mime=declared||guessed||String(b.type||'application/octet-stream');
+  const ext=serverExt||(mime==='image/jpeg'?'jpg':mime==='image/png'?'png':mime==='image/webp'?'webp':mime==='audio/ogg'?'ogg':'bin');
+  const filename=media.file_name&&/\.[a-z0-9]{2,5}$/i.test(media.file_name)?media.file_name:'telegram-media.'+ext;
+  return new File([b],truncate(filename,120),{type:mime});
 }
 async function submitMv(env,chat,s,file,reference) {
   if(!env.MVSEP_API_TOKEN)throw Error('MVSEP token is not configured');
@@ -249,6 +267,18 @@ async function submitMv(env,chat,s,file,reference) {
   form.set('output_format',String(s.format??0));
   form.set('is_demo','false');
   for(const [k,v] of Object.entries(s.values||{}))form.set(k,String(v));
+  // MVSEP's model catalog exposes server_key (for Qwen3-TTS text is `text`).
+  // The public API documents add_optN, but the live TTS worker also requires
+  // the server-side named fields. Send both for no-upload generators.
+  if(s.widget==='no_upload'){
+    for(const f of s.fields||[]){
+      if(f.serverKey&&/^[a-z][a-z0-9_]{1,48}$/i.test(f.serverKey)&&
+         Object.prototype.hasOwnProperty.call(s.values||{},f.name))
+        form.set(f.serverKey,String(s.values[f.name]));
+    }
+    const prompt=(s.fields||[]).find(f=>/text prompt|lyrics/i.test(f.label));
+    if(prompt&&!String(s.values?.[prompt.name]||'').trim())throw Error('Required MVSEP text or lyrics are missing. No credits were spent.');
+  }
   if(file)form.set(s.widget==='matchering_upload'?'target_audiofile':'audiofile',file);
   if(reference)form.set('reference_audiofile',reference);
   const r=await fetch(MV+'/separation/create',{method:'POST',body:form});
@@ -452,7 +482,7 @@ async function handleMessage(env,m) {
     await tg(env,'sendPhoto',form);await setSession(env,chat,{step:'home'});return;
   }
   if(s.step==='style'){if(!text||text.length>90)return message(env,chat,'Enter a style name under 90 characters.');s.style=text.trim();s.step='file';await setSession(env,chat,s);return message(env,chat,'Style: '+s.style+'\nNow send an image.');}
-  if(s.step==='upscale_prompt'){if(command!=='/skip')s.guidance=text;s.step=s.hasFx?'face':'file';await setSession(env,chat,s);if(s.hasFx)return message(env,chat,'Enhance faces?',keys([[btn('Yes','face:yes'),btn('No','face:no')]]));return message(env,chat,'Send an image to upscale.');}
+  if(s.step==='upscale_prompt'){if(command!=='/skip')s.guidance=text;s.step=s.hasFx?'face':'file';await setSession(env,chat,s);if(s.hasFx)return message(env,chat,'Enhance faces?',keys([[btn('Yes','face:yes'),btn('No','face:no')]]));if(s.savedMedia){const b=await getTelegramFile(env,s.savedMedia);return uploadImage(env,chat,s,b);}return message(env,chat,'Send an image to upscale.');}
   if(s.step==='field_text')return advanceField(env,chat,text,command==='/skip');
   const file=m.photo?.at(-1)||m.document||m.audio||m.voice;
   if(s.step==='file'&&file){
@@ -506,7 +536,7 @@ async function handleCallback(env,q) {
   }
   if(d.startsWith('upmodel:'))return startScale(env,chat,d.slice(8));
   if(d.startsWith('scale:'))return finishScale(env,chat,d.slice(6));
-  if(d.startsWith('face:')){const s=await session(env,chat);s.face=d.endsWith('yes');s.step='file';await setSession(env,chat,s);return message(env,chat,'Send the image to upscale.');}
+  if(d.startsWith('face:')){const s=await session(env,chat);s.face=d.endsWith('yes');s.step='file';await setSession(env,chat,s);if(s.savedMedia){const b=await getTelegramFile(env,s.savedMedia);return uploadImage(env,chat,s,b);}return message(env,chat,'Send the image to upscale.');}
   if(d.startsWith('mv:')){const [,scope,p]=d.split(':');return showCatalog(env,chat,scope,Number(p)||0);}
   if(d.startsWith('model:')){const [,id,scope]=d.split(':');return mvModel(env,chat,id,scope);}
   if(d.startsWith('opage:')){const s=await session(env,chat);s.optionPage=Number(d.split(':')[1]);await setSession(env,chat,s);return showOptions(env,chat,s);}
@@ -566,3 +596,50 @@ export async function handleMediaStudioCallback(env,q){
   }
 }
 export async function pollMediaStudio(env) {if(!env.MEMORY_DB||!env.TELEGRAM_BOT_TOKEN)return;await pollAll(env);}
+
+// Natural language agent entry points. Reuse the exact existing studio submit/confirm logic.
+export async function startNaturalVoice(env,chat,text,style='custom') {
+  const models=await catalog('all');
+  const target=models.find(x=>Number(x.render_id)===(style==='design'?119:118));
+  if(!target)throw Error('MVSEP Qwen3 speech model is unavailable');
+  const fields=optFields(target),values={};
+  for(const f of fields){
+    if(/text prompt/i.test(f.label))values[f.name]=text;
+    else if(/speaker/i.test(f.label))values[f.name]='aiden';
+    else if(/language/i.test(f.label))values[f.name]='auto';
+    else if(/voice description/i.test(f.label))values[f.name]='Clear natural voice with expressive but controlled delivery';
+    else if(f.defaultKey!==null)values[f.name]=f.defaultKey;
+  }
+  const incomplete=fields.filter(f=>f.required&&!String(values[f.name]||'').trim());
+  if(incomplete.length)throw Error('Missing MVSEP required field: '+incomplete.map(x=>x.label).join(', '));
+  const state={step:'confirm',kind:'mvsep',scope:'voice',model:target.render_id,modelName:target.name,widget:target.audio_widget,fields,values,format:1};
+  await setSession(env,chat,state);
+  return message(env,chat,'🗣 Prepared '+target.name+'\n\nText: '+truncate(text,900)+'\n\nSpeaker: '+(style==='design'?'Voice Design':'Aiden')+' · Language: Auto · WAV 16-bit\n\nReview before submitting. MVSEP may charge credits. You can adjust the voice via /mvvoice.',keys([[btn('✅ Generate audio','mvsubmit'),btn('Cancel','home')]]));
+}
+export async function startNaturalEdit(env,chat,kind,photo,details='') {
+  const name=kind==='removebg'?'removebg':kind==='upscale'?'upscale':'reimagine';
+  if(!photo){await pickImage(env,chat,name);return;}
+  if(name==='removebg'){await setSession(env,chat,{step:'file',kind:name});return handleMessage(env,{chat:{id:chat},from:{id:chat},photo:[photo]});}
+  if(name==='reimagine'){
+    await setSession(env,chat,{step:'file',kind:name,style:/oil painting/i.test(details)?'Oil_Painting':'Oil_Painting'});
+    return handleMessage(env,{chat:{id:chat},from:{id:chat},photo:[photo]});
+  }
+  await pickImage(env,chat,'upscale');
+  const s=await session(env,chat);s.savedMedia=photo;await setSession(env,chat,s);
+  return message(env,chat,'📷 Your image is saved for this upscaling request. Choose a model and scale; you do not need to resend it.');
+}
+
+export async function startNaturalAudio(env,chat,text){
+ const models=await catalog('all'),a=models.find(x=>Number(x.render_id)===62);
+ if(!a)throw Error('MVSEP Stable Audio model is unavailable');
+ const fields=optFields(a),values={};
+ for(const f of fields){
+   if(/text prompt/i.test(f.label))values[f.name]=text;
+   else if(/length/i.test(f.label))values[f.name]='10';
+   else if(f.defaultKey!==null)values[f.name]=String(f.defaultKey);
+ }
+ const invalid=fields.find(f=>f.required&&!String(values[f.name]||'').trim());
+ if(invalid)throw Error('Missing sound-generation field: '+invalid.label);
+ await setSession(env,chat,{step:'confirm',kind:'mvsep',scope:'audio',model:a.render_id,modelName:a.name,widget:a.audio_widget,fields,values,format:1});
+ return message(env,chat,'🎼 I selected Stable Audio Open Gen 1.0.\n\nPrompt: '+truncate(text,1100)+'\nLength: 10 seconds · WAV 16-bit\n\nGenerate? MVSEP credits may apply.',keys([[btn('✅ Generate audio','mvsubmit'),btn('Cancel','home')]]));
+}

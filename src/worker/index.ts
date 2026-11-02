@@ -1,4 +1,5 @@
 import {handleAiModelCommand,handleAiModelCallback,getAiModel} from './ai-models'
+import {handleNaturalMessage,handleNaturalCallback,reviewDirectPrompt,pollNaturalActions} from './natural-actions'
 import {streamAIToTelegram} from './stream-telegram-ai'
 import {pollWanAuto} from './wan-auto'
 import { handleMediaStudioMessage, handleMediaStudioCallback, pollMediaStudio, mediaStudioCommands } from './media-studio'
@@ -215,7 +216,9 @@ app.post('/telegram/webhook', async (c) => {
     const cb = update.callback_query
     const chat = String(cb.message?.chat.id ?? '')
     const sender = String(cb.from.id)
-    if(cb.data?.startsWith('am:') && await isAllowedTelegramUser(c.env,chat,sender,cb.message?.chat.type)){
+    if(cb.data?.startsWith('na:') && await isAllowedTelegramUser(c.env,chat,sender,cb.message?.chat.type)){
+      c.executionCtx.waitUntil(handleNaturalCallback(c.env,cb).catch(e=>console.error('Natural action failed',e instanceof Error?e.name:'unknown')))
+    }else if(cb.data?.startsWith('am:') && await isAllowedTelegramUser(c.env,chat,sender,cb.message?.chat.type)){
       c.executionCtx.waitUntil(handleAiModelCallback(c.env,chat,cb))
     }else if(cb.data?.startsWith('st:') && await isAllowedTelegramUser(c.env,chat,sender,cb.message?.chat.type)){
       c.executionCtx.waitUntil(handleMediaStudioCallback(c.env,cb))
@@ -297,7 +300,12 @@ app.post('/telegram/webhook', async (c) => {
         await handleAiModelCommand(c.env,key)
         return
       }
+      // Review prompts (including /video) before any billable generation.
+      if(await reviewDirectPrompt(c.env,msg))return
       if (await handleMediaStudioMessage(c.env,msg)) return
+      // Route plain-language media requests to real, allowlisted providers.
+      // Existing /commands and active media wizards still have priority.
+      if(await handleNaturalMessage(c.env,msg))return
       if (await pyvtCommand(c.env,msg,key,text,send)) return
       if (await pyvtSelectedMedia(c.env,msg,key,send)) return
       if (await handleVoxTelegram(c.env,key,msg.message_id,text,send,msg)) return
@@ -309,7 +317,7 @@ app.post('/telegram/webhook', async (c) => {
         return
       }
       if (text === '/start') {
-        await send('Welcome to CYAW Media Studio.\n/studio opens image, voice and audio tools.\n/commands lists your other video, dubbing and AI capabilities.\n/forget clears chat memory.')
+        await send('Welcome to CYAW AI Studio.\n\nJust tell me what you want: “Create a cinematic image of a lighthouse”, “Make a 5-second video of sunset”, “Narrate this script”, or send a photo and say “Upscale this”. I will select the tool, ask only for necessary inputs, offer prompt improvements, and request confirmation before generation.\n\n/commands remains available. /forget clears chat memory.')
         return
       }
 
@@ -648,7 +656,7 @@ app.post('/telegram/webhook', async (c) => {
       // /help and /commands are explicit, low-latency guidance; /ask bypasses voice wizard.
       if (/^\/(?:help|commands)(?:@\w+)?$/i.test(text)) {
         await send(
-          'Available bot commands:\n' +
+          '🤖 You can now talk to the bot normally! For example: “Generate an image of a forest”, “Make a video showing a lighthouse”, “Narrate this sentence”, or send an image and say “Upscale this”. I will offer an improved prompt and get your confirmation before generating.\n\nOptional commands:\n' +
           '/aimodel — choose AI model for streaming chat\n' +
           '/studio — image, voice and audio tools with live menus\n' +
           '/genimage — text-to-image via Workers AI\n' +
@@ -716,7 +724,7 @@ app.post('/telegram/webhook', async (c) => {
           {
             role: 'system',
             content: [
-              'You are the helpful AI guide for this Telegram bot. Reply in English and use the last 20 stored chat messages to understand the conversation. Give exact Telegram commands and clear, short examples.',
+              'You are the helpful AI assistant for this Telegram bot. Reply clearly using the last 20 stored chat messages. Image, video, speech and media actions are now invoked directly from users’ normal-language requests by a real, allowlisted action router; do not tell users commands are mandatory. If the user asks for a task that was not executed, do not pretend it was. For image or video prompts offer improvement and confirm before generation.',
               'Available commands (do not invent commands):',
               '/aimodel — choose your AI chat model (Llama 3.3 70B, Llama 3.1 8B, GPT-OSS 20B); normal chat streams progress with editMessageText.',
               '/studio image/voice/audio menu; /genimage text-to-image; /upscale model+scale; /removebg; /reimagine; /imagetts; /mvvoice TTS voice design cloning; /mvaudio sound/music; /mvseparate and /mvsep all live MVSEP options; /studiojobs history. These options are now integrated, and media jobs are automatically polled/delivered.',
@@ -1043,7 +1051,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pollMediaStudio(env),pollWanAuto(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }

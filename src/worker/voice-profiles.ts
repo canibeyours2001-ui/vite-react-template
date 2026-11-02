@@ -370,9 +370,12 @@ async function mvsepCreate(env:VoiceEnv,job:Job,blob:Blob):Promise<string>{
   f.set('audiofile',blob,'reference.ogg')
   f.set('sep_type','120')
   f.set('add_opt1',job.speech_text)
-  if(job.ref_text.trim())f.set('add_opt2',job.ref_text.trim())
+  f.set('text',job.speech_text) // Live Qwen3-TTS worker requires its server_key.
+  if(job.ref_text.trim()){f.set('add_opt2',job.ref_text.trim());f.set('ref_text',job.ref_text.trim())}
   f.set('add_opt3',job.lang.toLowerCase())
+  f.set('language',job.lang.toLowerCase())
   f.set('add_opt4','0')
+  f.set('extract_type','0')
   f.set('output_format','0')
   f.set('is_demo','0')
   const r=await fetch(MVSEP_API+'/separation/create',{method:'POST',body:f,
