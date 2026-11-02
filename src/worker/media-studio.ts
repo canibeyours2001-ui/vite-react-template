@@ -4,7 +4,11 @@ import {providerReceipt,duration,aiFooter} from './usage-receipts'
 
 const MV = 'https://sg.mvsep.com/api';
 const UP = 'https://image-upscaling.net';
-const IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
+const IMAGE_MODELS=[
+ {id:'@cf/black-forest-labs/flux-1-schnell',name:'FLUX.1 Schnell',steps:4,output:'base64'},
+ {id:'@cf/bytedance/stable-diffusion-xl-lightning',name:'SDXL Lightning',steps:4,output:'stream'},
+ {id:'@cf/stabilityai/stable-diffusion-xl-base-1.0',name:'SDXL Base 1.0',steps:20,output:'stream'}
+];
 const LIMIT = 10_000_000;
 const epoch = () => Math.floor(Date.now()/1000);
 async function progress(env,j,text){
@@ -122,8 +126,10 @@ async function imageConfig() {
 async function imageMenu(env,chat) {return message(env,chat,'Choose an image tool:',home)}
 async function pickImage(env,chat,kind) {
   if(kind==='generate') {
-    await setSession(env,chat,{step:'prompt',kind:'generate',model:IMAGE_MODEL,steps:4});
-    return message(env,chat,'🎨 Text-to-image using Cloudflare FLUX.1 schnell. Send your image description. Steps: 4 (fixed default).',keys([[btn('🏠 Home','home')]]));
+    await setSession(env,chat,{step:'imagemodel',kind:'generate'});
+    const rows=IMAGE_MODELS.map((a,i)=>[btn(a.name,'imgmodel:'+i)]);
+    rows.push([btn('🏠 Home','home')]);
+    return message(env,chat,'🎨 Text-to-image — select a model:',keys(rows));
   }
   if(kind==='upscale') {
     const config=await imageConfig();
@@ -376,7 +382,7 @@ async function handleMessage(env,m) {
   if(command==='/mvsep')return showCatalog(env,chat,'all');
   if(command==='/studiomodels'){
     const a=await catalog('all'),im=await imageConfig();
-    return message(env,chat,'Live catalogs: '+a.length+' MVSEP models, '+Object.keys(im).length+' image upscalers.\nUse /mvsep or /image.',home);
+    return message(env,chat,'Live catalogs: '+a.length+' MVSEP models, '+Object.keys(im).length+' upscalers, '+IMAGE_MODELS.length+' text-to-image models.\nUse /mvsep or /image.',home);
   }
   if(command==='/imagetts'){await setSession(env,chat,{step:'tts_voice',kind:'tts'});return message(env,chat,'Enter a voice ID (e.g. am_michael). The provider does not publish a voice-list API.');}
   const s=await session(env,chat);
@@ -386,10 +392,30 @@ async function handleMessage(env,m) {
   if(s.step==='prompt'&&s.kind==='generate'){
     if(!text||text.length>2048)return message(env,chat,'Send a prompt of 1–2048 characters.');
     if(!env.AI)throw Error('Workers AI is not enabled');
-    const data=await env.AI.run(IMAGE_MODEL,{prompt:text,steps:4,seed:Math.floor(Math.random()*1000000)});
-    const bytes=Uint8Array.from(atob(data.image),c=>c.charCodeAt(0));
-    const form=new FormData();form.set('chat_id',String(chat));form.set('photo',new File([bytes],'generated.jpg',{type:'image/jpeg'}));
-    await tg(env,'sendPhoto',form);await setSession(env,chat,{step:'home'});return message(env,chat,'Generated with FLUX.1 schnell. Choose another action:',home);
+    const model=IMAGE_MODELS.find(x=>x.id===s.model);
+    if(!model)throw Error('Choose an image model first');
+    const started=Date.now();
+    const params={prompt:text,seed:Math.floor(Math.random()*1000000)};
+    if(model.output==='base64')params.steps=model.steps;
+    else {
+      params.num_steps=model.steps;
+      if(s.width&&s.height){params.width=s.width;params.height=s.height;}
+    }
+    const data=await env.AI.run(model.id,params);
+    let bytes,type;
+    if(data?.image&&typeof data.image==='string'){
+      bytes=Uint8Array.from(atob(data.image),c=>c.charCodeAt(0));type='image/jpeg';
+    }else if(data instanceof ReadableStream){
+      bytes=new Uint8Array(await new Response(data).arrayBuffer());type='image/png';
+    }else if(data instanceof Uint8Array||data instanceof ArrayBuffer){
+      bytes=data instanceof Uint8Array?data:new Uint8Array(data);type='image/png';
+    }else throw Error('Cloudflare image model returned an unsupported format');
+    if(!bytes.length||bytes.length>9*1024*1024)throw Error('Generated image unavailable or exceeds 9 MB');
+    const sec=duration(Math.ceil((Date.now()-started)/1000));
+    const form=new FormData();form.set('chat_id',String(chat));
+    form.set('caption','🎨 '+model.name+' · '+sec+' processing time\nWorkers AI quota: see Cloudflare dashboard (neuron usage is not returned per request)');
+    form.set('photo',new File([bytes],'generated.'+(type==='image/jpeg'?'jpg':'png'),{type}));
+    await tg(env,'sendPhoto',form);await setSession(env,chat,{step:'home'});return;
   }
   if(s.step==='style'){if(!text||text.length>90)return message(env,chat,'Enter a style name under 90 characters.');s.style=text.trim();s.step='file';await setSession(env,chat,s);return message(env,chat,'Style: '+s.style+'\nNow send an image.');}
   if(s.step==='upscale_prompt'){if(command!=='/skip')s.guidance=text;s.step=s.hasFx?'face':'file';await setSession(env,chat,s);if(s.hasFx)return message(env,chat,'Enhance faces?',keys([[btn('Yes','face:yes'),btn('No','face:no')]]));return message(env,chat,'Send an image to upscale.');}
@@ -420,6 +446,30 @@ async function handleCallback(env,q) {
   if(d==='help')return message(env,chat,HELP,home);
   if(d==='jobs')return sendRecent(env,chat);
   if(d.startsWith('i:'))return pickImage(env,chat,d.slice(2));
+  if(d.startsWith('imgmodel:')){
+    const i=Number(d.slice('imgmodel:'.length)),model=IMAGE_MODELS[i];
+    if(!model)throw Error('Unsupported image model');
+    const state={step:model.output==='base64'?'prompt':'imgsize',kind:'generate',model:model.id,steps:model.steps};
+    await setSession(env,chat,state);
+    if(model.output==='base64')return message(env,chat,'✅ FLUX.1 Schnell selected. Send a detailed image prompt (max 2048 characters).');
+    return message(env,chat,model.name+' — choose aspect ratio:',keys([
+      [btn('◻ Square 768×768','imgsize:square')],
+      [btn('▭ Landscape 1024×576','imgsize:landscape')],
+      [btn('▯ Portrait 576×1024','imgsize:portrait')],
+      [btn('🏠 Home','home')]
+    ]));
+  }
+  if(d.startsWith('imgsize:')){
+    const s=await session(env,chat);
+    if(s.kind!=='generate'||!IMAGE_MODELS.some(x=>x.id===s.model))throw Error('Choose image model first');
+    const sizes={square:[768,768],landscape:[1024,576],portrait:[576,1024]};
+    const dimensions=sizes[d.slice('imgsize:'.length)];
+    if(!dimensions)throw Error('Invalid image dimensions');
+    s.width=dimensions[0];s.height=dimensions[1];s.step='prompt';
+    await setSession(env,chat,s);
+    return message(env,chat,'✅ '+IMAGE_MODELS.find(x=>x.id===s.model).name+' · '+s.width+'×'+s.height+
+      '\nSend your prompt (1–2048 characters).');
+  }
   if(d.startsWith('upmodel:'))return startScale(env,chat,d.slice(8));
   if(d.startsWith('scale:'))return finishScale(env,chat,d.slice(6));
   if(d.startsWith('face:')){const s=await session(env,chat);s.face=d.endsWith('yes');s.step='file';await setSession(env,chat,s);return message(env,chat,'Send the image to upscale.');}
