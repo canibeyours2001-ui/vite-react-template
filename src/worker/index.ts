@@ -15,8 +15,9 @@ import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAss
 import { isAllowedTelegramUser, handleAccessCommand, isAccessCommand } from './telegram-access'
 import {handleVoxTelegram,checkKaggleConnection,pollVoxKaggle,probeKaggleReadMethods} from './vox-kaggle-direct'
 import {handleVoxCallback} from './vox-voice-profiles'
-import {pyvtCommand,pyvtSignedFile,pollPyvt,pyvtPreflight,pyvtSelectedMedia,pyvtRememberMedia,pyvtStartRecentVideo,pyvtTranslate,pyvtGeminiTts,pyvtGeminiHealth} from './pyvt-kaggle'
+import {pyvtCommand,pyvtSignedFile,pollPyvt,pyvtPreflight,pyvtSelectedMedia,pyvtRememberMedia,pyvtStartRecentVideo,pyvtTranslate,pyvtGeminiTts,pyvtGeminiHealth,pyvtQueueUploaded} from './pyvt-kaggle'
 import {dubMenuCallback} from './pyvt-menu'
+import {handleDubUpload} from './pyvt-upload'
 
 type AIClient = {
   run: (
@@ -46,6 +47,7 @@ type Bindings = {
   MODELSCOPE_API_TOKEN?: string
   HUGGINGFACE_API_TOKEN?: string
   AI: AIClient
+  DUB_UPLOADS: import('./pyvt-upload').UploadEnv['DUB_UPLOADS']
   MEMORY_DB: {
     prepare: (query: string) => {
       bind: (...params: (string | number)[]) => {
@@ -200,6 +202,12 @@ type TelegramUpdate = {
     }
   }
 }
+
+// Browser-to-R2 multipart upload bypasses Telegram's 20 MB getFile cap.
+for(const path of ['/dub/u/init','/dub/u/part','/dub/u/finish']){
+ app.post(path,c=>handleDubUpload(c.env,c.req.raw,(chat,key,size,ext)=>pyvtQueueUploaded(c.env,chat,key,size,ext)))
+}
+app.get('/dub/u',c=>handleDubUpload(c.env,c.req.raw,(chat,key,size,ext)=>pyvtQueueUploaded(c.env,chat,key,size,ext)))
 
 // GET is the signed file download for private Kaggle jobs; POST is the existing Telegram webhook.
 app.get('/telegram/webhook',c=>c.req.query('pvtrans')?pyvtTranslate(c.env,c.req.raw):pyvtSignedFile(c.env,c.req.raw))
@@ -699,6 +707,7 @@ app.post('/telegram/webhook', async (c) => {
           '/dub — choose English/Burmese target, TTS engine and voice\n' +
           '/dub_help — pyVideoTrans video dubbing with Edge or VoxCPM2\n' +
           '/dub_status — last Kaggle video dubbing status\n' +
+          '/dub_upload — upload large videos up to 1 GiB in your browser\n' +
           '/voxvoices — show five saved VoxCPM2 voices\n' +
           '/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n' +
           '/voxrename 1 Name — rename saved VoxCPM2 voice\n' +
@@ -1018,6 +1027,7 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'vox_status',description:'Check VoxCPM2 job status'},
         {command:'dub',description:'Choose dubbing language and voice'},
         {command:'dub_help',description:'pyVideoTrans video dubbing help'},
+        {command:'dub_upload',description:'Upload videos up to 1 GiB'},
         {command:'dub_status',description:'Check pyVideoTrans dubbing status'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
@@ -1078,6 +1088,7 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'vox_status',description:'Check VoxCPM2 job status'},
         {command:'dub',description:'Choose dubbing language and voice'},
         {command:'dub_help',description:'pyVideoTrans video dubbing help'},
+        {command:'dub_upload',description:'Upload videos up to 1 GiB'},
         {command:'dub_status',description:'Check pyVideoTrans dubbing status'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
