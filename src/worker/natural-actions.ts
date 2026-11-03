@@ -22,6 +22,7 @@ const clip=(s:string,n=1500)=>s.slice(0,n)
 const btn=(label:string,data:string)=>({text:label,callback_data:'na:'+data})
 const kb=(rows:ReturnType<typeof btn>[][])=>({inline_keyboard:rows})
 const reviewButtons=kb([[btn('✨ Improve prompt','improve'),btn('Keep original','original')],[btn('✏️ Edit myself','edit'),btn('Cancel','cancel')]])
+const quickImageButtons=kb([[btn('✅ Generate image','generate'),btn('✨ Improve with AI','improve')],[btn('✏️ Edit prompt','edit'),btn('Cancel','cancel')]])
 async function api(env:Env,method:string,data:Record<string,unknown>|FormData){
  const form=data instanceof FormData
  const r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/'+method,{
@@ -52,7 +53,7 @@ async function swap(env:Env,chat:string,raw:string,draft:Draft){
 /** Remove only complete request phrases. The former regex matched "image"
  * inside "images" and left the single-letter prompt "s". */
 export function plainPrompt(text:string):string{
- const cleaned=text.replace(/^\/?(?:please\s+)?(?:generate|create|make|draw|render|design|produce)\s+(?:me\s+)?(?:an?\s+)?(?:images?|pictures?|photos?|artworks?|illustrations?|videos?|clips?|animations?)\b(?:\s+(?:of|showing|about|with|where|that)\b|\s*[:\-])?\s*/i,'').trim()
+ const cleaned=text.replace(/^\/?(?:(?:(?:can|could|would)\s+you(?:\s+please)?(?:\s+help\s+me)?|i\s+want\s+(?:you\s+to|to)|please)\s+)?(?:generate|create|make|draw|render|design|produce)\s+(?:me\s+)?(?:an?\s+)?(?:images?|pictures?|photos?|artworks?|illustrations?|videos?|clips?|animations?)\b(?:\s+(?:of|showing|about|with|where|that)\b|\s*[:\-])?\s*/i,'').trim()
  return cleaned
 }
 
@@ -90,14 +91,44 @@ async function classify(env:Env,text:string,hasImage:boolean,hasVideo:boolean):P
   return (['image_gen','video_gen','video_image','voice_tts','voice_design','upscale','removebg','reimagine','audio_gen','separate','dub','motion','usage','chat'] as string[]).includes(choice)?choice:'chat'
  }catch{return 'chat'}
 }
+function preparedImagePrompt(raw:string):string{
+ const input=clip(raw.trim(),1500)
+ if(input.length>240)return input
+ // A deterministic enhancement so the agent can advance even if the free
+ // text LLM is temporarily unavailable. Do not add unrelated characters.
+ const subject=/^(?:photograph|photo|image|picture|cinematic|photorealistic)\b/i.test(input)?
+  input:'Photorealistic cinematic photograph of '+input
+ return subject+'. Carefully composed shot, believable natural expressions and poses, '+
+  'professional photographic lighting, realistic color grading, detailed textures, '+
+  'sharp intended focal point, clean background separation, no watermark, no captions.'
+}
 async function newDraft(env:Env,chat:string,d:Draft){
  const old=await read(env,chat)
- if(old&&['queued','running'].includes(old.draft.stage)){await tell(env,chat,'A generation is already queued or running. I will deliver the result when it finishes.');return}
+ if(old&&['queued','running'].includes(old.draft.stage)){
+  await tell(env,chat,'A generation is already queued or running. I will deliver the result when it finishes.')
+  return
+ }
+ if(d.stage==='await_media'||d.stage==='await_prompt'){
+  await save(env,chat,d)
+  return tell(env,chat,d.stage==='await_media'?
+   '📷 Send the image for this request. You can add a caption or just send the photo.':
+   '✍️ What image should I make? Describe the subject or scene in one sentence.')
+ }
+ if(d.intent==='image_gen'&&d.stage==='review'&&d.prompt.trim()){
+  const ready={...d,chosen:preparedImagePrompt(d.prompt),stage:'confirm'}
+  await save(env,chat,ready)
+  await tell(env,chat,'🎨 Image ready to generate\n\n'+clip(ready.chosen||'',1400)+
+   '\n\n🏆 Provider: highest-quality available free option. No paid API credits or automatic paid retries.'+
+   '\nNote: Qwen ZeroGPU has a noncommercial/research license; select OVHcloud for commercial images.'+
+   '\n\nI can generate this now, improve it with AI, or let you edit it.',quickImageButtons)
+  return
+ }
  await save(env,chat,d)
- if(d.stage==='await_media')return tell(env,chat,'📷 Send the image for this request. You can add a caption, or just send the photo.')
- if(d.stage==='await_prompt')return tell(env,chat,'✍️ What exactly should I generate? Send the words or description you want me to use.')
- await tell(env,chat,'🎬 '+(d.intent==='image_gen'?'Image':'Video')+' request understood.\n\nPrompt: '+clip(d.prompt,700)+'\n\nWould you like me to improve the prompt for better results first?',reviewButtons)
+ await tell(env,chat,'🎬 '+(d.intent==='image_gen'?'Image':'Video')+
+  ' request understood.\n\nPrompt: '+clip(d.prompt,700)+
+  '\n\nWould you like me to improve the prompt for better results first?',reviewButtons)
 }
+
 export async function reviewDirectPrompt(env:Env,msg:Msg):Promise<boolean>{
  const t=(msg.text||msg.caption||'').trim()
  if(!t||t.startsWith('/ask'))return false
@@ -176,6 +207,19 @@ export async function handleNaturalMessage(env:Env,msg:Msg):Promise<boolean>{
  }
  if(!t&&fileVideo){await tell(env,chat,'🎬 I received your video. Tell me what to do with it, such as “dub into Burmese” or “extract audio”.');return true}
  if(!t)return false
+ if(/\b(?:dub|dubbing|kaggle)\b/i.test(t) &&
+   /\b(?:status|stuck|hanging|hang|progress|failed|running|check|what happened)\b/i.test(t)){
+  const jobs=await env.MEMORY_DB.prepare(
+   'SELECT id,status,error_message,version_number FROM pyvt_kaggle_jobs WHERE chat_id=? ORDER BY id DESC LIMIT 1'
+  ).bind(chat).all<{id:number;status:string;error_message:string|null;version_number:number|null}>().catch(()=>({results:[]}))
+  const job=jobs.results[0]
+  await tell(env,chat,job?
+   '🎬 Dub #'+job.id+': '+job.status+(job.version_number?' (Kaggle v'+job.version_number+')':'')+
+   (job.error_message?'\n'+clip(job.error_message,300):'')+
+   (job.status==='failed'?'\nYou can use /dub to submit a NEW video after choosing a target and voice. The failed job will not be charged or rerun automatically.':''):
+   'No dubbing job recorded. Send /dub to begin.')
+  return true
+ }
  const intent=await classify(env,t,!!fileImage,!!fileVideo)
  if(intent==='chat')return false
  if(intent==='usage') {await handleMediaStudioMessage(env,{chat:msg.chat,from:msg.from,text:'/usage',message_id:msg.message_id});return true}
@@ -290,7 +334,7 @@ export async function handleNaturalCallback(env:Env,cb:{id:string;data?:string;m
  if(choice==='cancel'){await swap(env,chat,raw,{...draft,stage:'cancelled'});await tell(env,chat,'Cancelled. No new generation was submitted.');return}
  if(choice==='edit'){await swap(env,chat,raw,{...draft,stage:'edit'});await tell(env,chat,'✏️ Send your edited prompt. I will review it before generating.');return}
  if(choice==='improve'){
-  if(!['review','select'].includes(draft.stage))return
+  if(!['review','select','confirm'].includes(draft.stage))return
   const working={...draft,stage:'improving'}
   if(!await swap(env,chat,raw,working))return
   await tell(env,chat,'✨ Refining the prompt for better composition, lighting and motion…')
@@ -300,7 +344,7 @@ export async function handleNaturalCallback(env:Env,cb:{id:string;data?:string;m
    await tell(env,chat,'✨ Improved prompt:\n\n'+clip(best,1500)+'\n\nWhich prompt should I use?',kb([[btn('✅ Use improved','better'),btn('Use original','original')],[btn('✏️ Edit','edit'),btn('Cancel','cancel')]]))
   }catch{
    await swap(env,chat,JSON.stringify(working),{...draft,stage:'review'})
-   await tell(env,chat,'I could not rewrite the prompt. You can use the original instead.',reviewButtons)
+   await tell(env,chat,'The AI prompt enhancer is unavailable. Your prepared prompt is still ready to generate.',draft.intent==='image_gen'?quickImageButtons:reviewButtons)
   }
   return
  }
