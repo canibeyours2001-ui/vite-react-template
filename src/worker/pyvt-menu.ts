@@ -42,16 +42,16 @@ export async function startDubMenu(env:DubMenuEnv,chat:string):Promise<void>{
  await ensureDubMenu(env.MEMORY_DB)
  await env.MEMORY_DB.prepare(
   'INSERT INTO pyvt_dub_selections(chat_id,stage,source_lang,target_lang,engine,voice,voice_slot) '+
-  "VALUES(?,'target','en','my','edge','my-MM-NilarNeural',0) "+
-  "ON CONFLICT(chat_id) DO UPDATE SET stage='target',updated_at=unixepoch()"
+  "VALUES(?,'target','auto','my','edge','my-MM-NilarNeural',0) "+
+  "ON CONFLICT(chat_id) DO UPDATE SET stage='target',source_lang='auto',updated_at=unixepoch()"
  ).bind(chat).run()
  await send(env,'sendMessage',{chat_id:chat,
-  text:'🎬 pyVideoTrans dubbing\nStep 1/3 — Choose the language you want in the final video.',
+  text:'🎬 Dub my video\nChoose only the TARGET language. The original speech language will be detected automatically.',
   reply_markup:buttons([
-   [{text:'🇨🇳 Chinese → 🇬🇧 English',callback_data:'pd:lang:en-zh'}],
-   [{text:'🇲🇲 Burmese → 🇬🇧 English',callback_data:'pd:lang:en'}],
-   [{text:'🇬🇧 English → 🇲🇲 Burmese',callback_data:'pd:lang:my'}]
+   [{text:'🇲🇲 Burmese (Gemini translation)',callback_data:'pd:lang:my'}],
+   [{text:'🇬🇧 English',callback_data:'pd:lang:en'}]
   ])})
+
 }
 export async function selectedDubCommand(env:DubMenuEnv,chat:string):Promise<string|null>{
  await ensureDubMenu(env.MEMORY_DB)
@@ -61,7 +61,7 @@ export async function selectedDubCommand(env:DubMenuEnv,chat:string):Promise<str
  const s=r.results[0]
  if(!s||s.stage!=='ready')return null
  // Literal command generated only from validated and private D1 menu selections.
- if(!['en','my','zh-cn'].includes(s.source_lang)||!['en','my'].includes(s.target_lang)||
+ if(!['auto','en','my','zh-cn'].includes(s.source_lang)||!['en','my'].includes(s.target_lang)||
   !['vox','edge'].includes(s.engine))return null
  if(s.engine==='vox'){
   if(s.voice_slot<0||s.voice_slot>5)return null
@@ -71,7 +71,7 @@ export async function selectedDubCommand(env:DubMenuEnv,chat:string):Promise<str
  if(!allowed)return null
  return '/dub edge '+s.source_lang+' '+s.target_lang+' '+s.voice
 }
-export async function dubMenuCallback(env:DubMenuEnv,cb:DubCallback):Promise<void>{
+export async function dubMenuCallback(env:DubMenuEnv,cb:DubCallback):Promise<boolean|void>{
  const chat=String(cb.message?.chat.id??'')
  try{
   if(!chat||String(cb.from.id)!==chat||!cb.data?.startsWith('pd:'))return
@@ -81,22 +81,23 @@ export async function dubMenuCallback(env:DubMenuEnv,cb:DubCallback):Promise<voi
   ).bind(chat).all<Selection>()).results[0]
   if(!current)throw Error('Selection expired. Restart /dub.')
   const [_,action,value]=cb.data.split(':')
-  if(action==='lang'&&current.stage==='target'&&['en','my','en-zh'].includes(value)){
-   const source=value==='en-zh'?'zh-cn':value==='en'?'my':'en'
-   const target=value==='en-zh'?'en':value
+  if(action==='lang'&&current.stage==='target'&&['en','my'].includes(value)){
+   const target=value
+   const voice=target==='my'?'my-MM-NilarNeural':'en-US-AriaNeural'
    await env.MEMORY_DB.prepare(
-    "UPDATE pyvt_dub_selections SET source_lang=?,target_lang=?,stage='engine',updated_at=unixepoch() "+
+    "UPDATE pyvt_dub_selections SET source_lang='auto',target_lang=?,engine='edge',voice=?,voice_slot=0,stage='ready',updated_at=unixepoch() "+
     "WHERE chat_id=? AND stage='target'"
-   ).bind(source,target,chat).run()
+   ).bind(target,voice,chat).run()
    await send(env,'sendMessage',{chat_id:chat,
-    text:'Step 2/3 — '+(source==='zh-cn'?'Chinese':source==='my'?'Burmese':'English')+' → '+(target==='my'?'Burmese':'English')+
-     '\nChoose the dubbing engine.',
-    reply_markup:buttons([
-     [{text:'🔊 Microsoft Edge TTS',callback_data:'pd:engine:edge'}],
-     [{text:'🎙️ VoxCPM2 (Kaggle GPU)',callback_data:'pd:engine:vox'}]
-    ])})
-   return
+    text:'✅ Target: '+(target==='my'?'Burmese':'English')+
+     '\n🎧 Original speech: automatically detected'+
+     '\n🔊 Voice: '+(target==='my'?'Nilar (Burmese)':'Aria (English)')+
+     '\n🌐 Translation: '+(target==='my'?'Gemini (Cloudflare secured)':'automatic')+
+     '\n\nIf you already sent a video recently, it will be queued now. Otherwise, send the video (20 MB maximum). Send /dub to change the target.'
+   })
+   return true
   }
+
   if(action==='engine'&&current.stage==='engine'&&['edge','vox'].includes(value)){
    await env.MEMORY_DB.prepare(
     "UPDATE pyvt_dub_selections SET engine=?,stage='voice',updated_at=unixepoch() "+

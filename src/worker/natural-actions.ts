@@ -2,6 +2,7 @@
 // Only allowlisted actions, confirmation for inference and paid resources,
 // D1 compare-and-swap before submission, no arbitrary shell or HTTP execution.
 import {getAiModel} from './ai-models'
+import {pyvtCommand} from './pyvt-kaggle'
 import {queueModelScopeImage} from './modelscope-image'
 import {queueExternalImage} from './external-image'
 import {queueZeroImage} from './hf-zerogpu'
@@ -11,7 +12,7 @@ import {handleMediaStudioMessage,startNaturalVoice,startNaturalAudio,startNatura
 type Media={file_id:string;file_size?:number;mime_type?:string;file_name?:string}
 type Msg={chat:{id:number};from?:{id:number};message_id:number;text?:string;caption?:string;photo?:Media[];document?:Media;video?:Media;audio?:Media;voice?:Media}
 type DB={prepare:(sql:string)=>{bind:(...values:(number|string)[])=>{run:()=>Promise<{meta:{changes:number}}>;all:<T>()=>Promise<{results:T[]}>}}}
-type Env={MEMORY_DB:DB;TELEGRAM_BOT_TOKEN:string;AI:{run:(model:string,input:{messages:Array<{role:'system'|'user'|'assistant';content:string}>;max_tokens:number;temperature?:number;stream?:boolean})=>Promise<unknown>};MODAL_WAN_API_BASE?:string;MODAL_WAN_API_KEY?:string;MVSEP_API_TOKEN?:string;IMAGE_CLIENT_IDS?:string}
+type Env={MEMORY_DB:DB;TELEGRAM_BOT_TOKEN:string;TELEGRAM_WEBHOOK_SECRET:string;KAGGLE_API_TOKEN?:string;GEMINI_API_KEY?:string;AI:{run:(model:string,input:{messages:Array<{role:'system'|'user'|'assistant';content:string}>;max_tokens:number;temperature?:number;stream?:boolean})=>Promise<unknown>};MODAL_WAN_API_BASE?:string;MODAL_WAN_API_KEY?:string;MVSEP_API_TOKEN?:string;IMAGE_CLIENT_IDS?:string}
 type Intent='image_gen'|'video_gen'|'video_image'|'voice_tts'|'voice_design'|'upscale'|'removebg'|'reimagine'|'audio_gen'|'separate'|'dub'|'motion'|'usage'|'chat'
 type Draft={intent:Intent;prompt:string;best?:string;chosen?:string;stage:string;messageId:number;file?:Media;created:number;info?:string;upgen?:UpgenConfig}
 const MAX_AGE=30*60;
@@ -192,9 +193,16 @@ export async function handleNaturalMessage(env:Env,msg:Msg):Promise<boolean>{
  }
  const commands:{[key:string]:string}={audio_gen:'/mvaudio',separate:'/mvseparate',dub:'/dub',motion:'/motion'}
  const command=commands[intent]
- if(command){await tell(env,chat,'✅ I understand: '+(intent==='separate'?'separate or enhance audio':intent==='dub'?'dub your video':'animate using a driving video')+'. I’ll open the matching workflow and ask only for the required inputs.');
-  if(command==='/mvaudio'||command==='/mvseparate')await handleMediaStudioMessage(env,{chat:msg.chat,from:msg.from,text:command,message_id:msg.message_id});
-  else await tell(env,chat,intent==='dub'?'Choose the target language and voice using /dub (the existing dubbing workflow).':'For motion transfer, send a reference photo and a driving video. You can still use /motion to see the format.');
+ if(command){
+  if(intent==='dub'){
+   const target=/\b(?:burmese|myanmar)\b/i.test(t)?'my':/\benglish\b/i.test(t)?'en':null
+   const direct=target?'/dub edge auto '+target:'/dub'
+   await pyvtCommand(env,{message_id:msg.message_id,video:fileVideo},chat,direct,async (message)=>{await tell(env,chat,message)})
+   return true
+  }
+  await tell(env,chat,'✅ I understand: '+(intent==='separate'?'separate or enhance audio':'animate using a driving video')+'. I’ll open the matching workflow and ask only for the required inputs.')
+  if(command==='/mvaudio'||command==='/mvseparate')await handleMediaStudioMessage(env,{chat:msg.chat,from:msg.from,text:command,message_id:msg.message_id})
+  else await tell(env,chat,'For motion transfer, send a reference photo and a driving video. You can still use /motion to see the format.')
   return true
  }
  return false

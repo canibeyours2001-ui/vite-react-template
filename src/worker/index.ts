@@ -13,7 +13,7 @@ import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAss
 import { isAllowedTelegramUser, handleAccessCommand, isAccessCommand } from './telegram-access'
 import {handleVoxTelegram,checkKaggleConnection,pollVoxKaggle,probeKaggleReadMethods} from './vox-kaggle-direct'
 import {handleVoxCallback} from './vox-voice-profiles'
-import {pyvtCommand,pyvtSignedFile,pollPyvt,pyvtPreflight,pyvtSelectedMedia} from './pyvt-kaggle'
+import {pyvtCommand,pyvtSignedFile,pollPyvt,pyvtPreflight,pyvtSelectedMedia,pyvtRememberMedia,pyvtStartRecentVideo,pyvtTranslate} from './pyvt-kaggle'
 import {dubMenuCallback} from './pyvt-menu'
 
 type AIClient = {
@@ -38,6 +38,7 @@ type Bindings = {
   MVSEP_API_TOKEN?: string
   IMAGE_CLIENT_IDS?: string
   KAGGLE_API_TOKEN?: string
+  GEMINI_API_KEY?: string
   MODELSCOPE_API_TOKEN?: string
   HUGGINGFACE_API_TOKEN?: string
   AI: AIClient
@@ -208,7 +209,7 @@ type TelegramUpdate = {
 }
 
 // GET is the signed file download for private Kaggle jobs; POST is the existing Telegram webhook.
-app.get('/telegram/webhook',c=>pyvtSignedFile(c.env,c.req.raw))
+app.get('/telegram/webhook',c=>c.req.query('pvtrans')?pyvtTranslate(c.env,c.req.raw):pyvtSignedFile(c.env,c.req.raw))
 app.post('/telegram/webhook', async (c) => {
   const configured = c.env.TELEGRAM_WEBHOOK_SECRET
   if (!configured || c.req.header('X-Telegram-Bot-Api-Secret-Token') !== configured) {
@@ -236,7 +237,10 @@ app.post('/telegram/webhook', async (c) => {
       c.executionCtx.waitUntil(handleVoxCallback(c.env,cb))
     }else if(cb.data?.startsWith('pd:') &&
         await isAllowedTelegramUser(c.env,chat,sender,cb.message?.chat.type)) {
-      c.executionCtx.waitUntil(dubMenuCallback(c.env,cb))
+      c.executionCtx.waitUntil((async()=>{
+        const selected=await dubMenuCallback(c.env,cb)
+        if(selected && cb.message?.message_id)await pyvtStartRecentVideo(c.env,chat,cb.message.message_id)
+      })().catch(e=>console.error('Dub target selection error',e instanceof Error?e.name:'unknown')))
     }
     return c.json({ok:true})
   }
@@ -302,6 +306,7 @@ app.post('/telegram/webhook', async (c) => {
     try {
       if (isAccessCommand(text) && await handleAccessCommand(c.env,sender,text,send)) return
       if (!allowed) return
+      await pyvtRememberMedia(c.env,msg,key).catch(()=>undefined)
       if(/^\/imageproviders(?:@\w+)?$/i.test(text)){await checkImageProviders(c.env,key);return}
       if(/^\/hfzerostatus(?:@\w+)?$/i.test(text)){await zeroStatus(c.env,key);return}
       if(await modelScopeCommand(c.env,key,text)) return
