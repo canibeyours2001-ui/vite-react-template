@@ -4,19 +4,16 @@
 export type D1 = {prepare:(sql:string)=>{bind:(...args:(number|string)[])=>{run:()=>Promise<unknown>,all:<T>()=>Promise<{results:T[]}>}}}
 export type AiChoiceEnv={MEMORY_DB:D1;TELEGRAM_BOT_TOKEN:string}
 export const AI_MODELS=[
- {name:'Llama 3.3 70B · quality',id:'@cf/meta/llama-3.3-70b-instruct-fp8-fast'},
- {name:'Llama 3.1 8B · quick',id:'@cf/meta/llama-3.1-8b-instruct-fp8'},
- {name:'GPT-OSS 20B · reasoning',id:'@cf/openai/gpt-oss-20b'}
+ {name:'FreeLLM Auto (free provider router)',id:'auto'}
 ] as const
-const DEFAULT_MODEL=AI_MODELS[0].id
+const DEFAULT_MODEL='auto'
 export async function initModels(db:D1){
  await db.prepare('CREATE TABLE IF NOT EXISTS studio_ai_models (chat_id TEXT PRIMARY KEY, model_id TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT (unixepoch()))').bind().run()
 }
 export async function getAiModel(env:AiChoiceEnv,chat:string){
  await initModels(env.MEMORY_DB)
  const rows=await env.MEMORY_DB.prepare('SELECT model_id FROM studio_ai_models WHERE chat_id=?').bind(chat).all<{model_id:string}>()
- const value=rows.results[0]?.model_id
- return AI_MODELS.find(m=>m.id===value)?.id||DEFAULT_MODEL
+ return AI_MODELS.find(m=>m.id===rows.results[0]?.model_id)?.id||DEFAULT_MODEL
 }
 async function send(env:AiChoiceEnv,chat:string,method:string,data:Record<string,unknown>){ void chat;
  const r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/'+method,{
@@ -30,7 +27,7 @@ export async function handleAiModelCommand(env:AiChoiceEnv,chat:string){
  const current=await getAiModel(env,chat)
  await send(env,chat,'sendMessage',{
   chat_id:chat,text:'🤖 Choose your AI chat model.\\n\\nCurrent: '+(AI_MODELS.find(m=>m.id===current)?.name||'Default')+
-    '\\n\\nYour selection is saved. All normal messages and /ask use your chosen model. Model usage may incur Cloudflare AI charges.',
+    '\\n\\nAll chat and planning use FreeLLM. Workers AI Neurons are reserved for image generation.',
   reply_markup:{inline_keyboard:AI_MODELS.map((m,i)=>[{text:(m.id===current?'✅ ':'')+m.name,callback_data:'am:'+i}])}
  })
 }

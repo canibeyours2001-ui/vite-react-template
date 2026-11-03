@@ -1,7 +1,7 @@
 /**
  * Compact provider receipts. No invented cost, GPU runtime or credit counts.
  * Image quota is per provider-reported client. MVSEP premium_minutes are credits.
- * AI call count is informational only. Cloudflare enforces the actual Workers AI quota.
+ * Text AI call counter is informational. FreeLLM handles text; Workers AI handles images.
  */
 export type UsageDb={prepare(sql:string):{bind(...v:(string|number)[]):{
  run:()=>Promise<unknown>;all:<T>()=>Promise<{results:T[]}>
@@ -65,5 +65,5 @@ export async function countAi(db:UsageDb,chat:string){
 }
 export async function aiFooter(db:UsageDb,chat:string){
  const used=await aiUsage(db,chat)
- return '🤖 Bot AI calls today: '+used.toLocaleString('en-US')+' (no local daily cap) · Cloudflare Neurons: view Workers AI dashboard; resets at 00:00 UTC'
+ return '🤖 FreeLLM chat requests today: '+used.toLocaleString('en-US')+' (no local cap) · Workers AI Neurons reserved for images; resets at 00:00 UTC'
 }

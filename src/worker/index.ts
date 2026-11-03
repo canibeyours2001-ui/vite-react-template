@@ -1,6 +1,7 @@
 import {handleAiModelCommand,handleAiModelCallback,getAiModel} from './ai-models'
 import {handleNaturalMessage,handleNaturalCallback,reviewDirectPrompt,pollNaturalActions} from './natural-actions'
 import {streamAIToTelegram} from './stream-telegram-ai'
+import {completeFreeLlm} from './free-llm'
 import {pollModelScopeImages,modelScopeCommand} from './modelscope-image'
 import {pollExternalImages,checkImageProviders} from './external-image'
 import {pollZeroImages,zeroStatus} from './hf-zerogpu'
@@ -13,7 +14,7 @@ import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAss
 import { isAllowedTelegramUser, handleAccessCommand, isAccessCommand } from './telegram-access'
 import {handleVoxTelegram,checkKaggleConnection,pollVoxKaggle,probeKaggleReadMethods} from './vox-kaggle-direct'
 import {handleVoxCallback} from './vox-voice-profiles'
-import {pyvtCommand,pyvtSignedFile,pollPyvt,pyvtPreflight,pyvtSelectedMedia,pyvtRememberMedia,pyvtStartRecentVideo,pyvtTranslate} from './pyvt-kaggle'
+import {pyvtCommand,pyvtSignedFile,pollPyvt,pyvtPreflight,pyvtSelectedMedia,pyvtRememberMedia,pyvtStartRecentVideo,pyvtTranslate,pyvtGeminiTts} from './pyvt-kaggle'
 import {dubMenuCallback} from './pyvt-menu'
 
 type AIClient = {
@@ -30,6 +31,8 @@ type Bindings = {
   TELEGRAM_BOT_TOKEN: string
   TELEGRAM_CHAT_ID: string
   AI_ACCESS_KEY: string
+  FREE_LLM_API_KEY?: string
+  FREE_LLM_BASE_URL?: string
   TELEGRAM_WEBHOOK_SECRET: string
   MODAL_WAN_API_BASE?: string
   MODAL_WAN_API_KEY?: string
@@ -112,10 +115,6 @@ app.post('/api/ai', async (c) => {
     return c.json({ ok: false, error: 'Incorrect AI access key' }, 401)
   }
 
-  if (!c.env.AI) {
-    return c.json({ ok: false, error: 'Workers AI binding is missing' }, 503)
-  }
-
   let payload: unknown
   try {
     payload = await c.req.json()
@@ -136,26 +135,19 @@ app.post('/api/ai', async (c) => {
   }
 
   try {
-    const result = await c.env.AI.run('@cf/meta/llama-3.1-8b-instruct-fp8', {
-      messages: [
+    const answer = await completeFreeLlm(c.env, [
         {
           role: 'system',
           content: 'You are a helpful AI assistant. Answer clearly and concisely. Respond in Burmese if the user asks in Burmese.'
         },
         { role: 'user', content: prompt.trim() }
-      ],
-      max_tokens: 400
-    })
+      ],{max_tokens:400})
 
-    if (!result || typeof result.response !== 'string') {
-      return c.json({ ok: false, error: 'The AI did not return a text answer' }, 502)
-    }
-
-    return c.json({ ok: true, answer: result.response })
+    return c.json({ok:true,answer})
   } catch {
     return c.json({
       ok: false,
-      error: 'AI request failed. Check your Workers AI usage and try again.'
+      error: 'FreeLLM request failed. Check the relay and its key.'
     }, 502)
   }
 })
@@ -210,7 +202,9 @@ type TelegramUpdate = {
 
 // GET is the signed file download for private Kaggle jobs; POST is the existing Telegram webhook.
 app.get('/telegram/webhook',c=>c.req.query('pvtrans')?pyvtTranslate(c.env,c.req.raw):pyvtSignedFile(c.env,c.req.raw))
+app.post('/telegram/webhook/tts',c=>pyvtGeminiTts(c.env,c.req.raw))
 app.post('/telegram/webhook', async (c) => {
+  if(c.req.query('pvtts'))return pyvtGeminiTts(c.env,c.req.raw)
   const configured = c.env.TELEGRAM_WEBHOOK_SECRET
   if (!configured || c.req.header('X-Telegram-Bot-Api-Secret-Token') !== configured) {
     return c.text('Unauthorized', 401)
@@ -251,7 +245,7 @@ app.post('/telegram/webhook', async (c) => {
   const sender = String(msg.from?.id ?? msg.chat.id)
   const token = c.env.TELEGRAM_BOT_TOKEN
   const text = (msg.text ?? msg.caption ?? '').trim().slice(0, 4096)
-  if (!token || !c.env.AI) return c.json({ok:false},503)
+  if (!token) return c.json({ok:false},503)
   // Only private chats. Unapproved users can request their own ID via /whoami.
   const allowed = await isAllowedTelegramUser(c.env,String(chatId),sender,msg.chat.type)
   const privateChat = (!msg.chat.type || msg.chat.type === 'private') &&
@@ -319,9 +313,9 @@ app.post('/telegram/webhook', async (c) => {
       if (await handleMediaStudioMessage(c.env,msg)) return
       // Route plain-language media requests to real, allowlisted providers.
       // Existing /commands and active media wizards still have priority.
-      if(await handleNaturalMessage(c.env,msg))return
       if (await pyvtCommand(c.env,msg,key,text,send)) return
       if (await pyvtSelectedMedia(c.env,msg,key,send)) return
+      if(await handleNaturalMessage(c.env,msg))return
       if (await handleVoxTelegram(c.env,key,msg.message_id,text,send,msg)) return
       if (await handleVoiceMessage(c.env,msg,key,text)) return
       if (await handleAudioTelegram(c.env, msg, key, text, send)) return
@@ -747,10 +741,10 @@ app.post('/telegram/webhook', async (c) => {
             content: [
               'You are the helpful AI assistant for this Telegram bot. Reply clearly using the last 20 stored chat messages. Image, video, speech and media actions are now invoked directly from users’ normal-language requests by a real, allowlisted action router; do not tell users commands are mandatory. If the user asks for a task that was not executed, do not pretend it was. For image or video prompts offer improvement and confirm before generation.',
               'Available commands (do not invent commands):',
-              '/aimodel — choose your AI chat model (Llama 3.3 70B, Llama 3.1 8B, GPT-OSS 20B); normal chat streams progress with editMessageText.',
+              '/aimodel — FreeLLM Auto router is used for chat, planning and prompt improvement. Cloudflare Neurons are used only for image generation.',
               '/studio image/voice/audio menu; /genimage text-to-image; /upscale model+scale; /removebg; /reimagine; /imagetts; /mvvoice TTS voice design cloning; /mvaudio sound/music; /mvseparate and /mvsep all live MVSEP options; /studiojobs history. These options are now integrated, and media jobs are automatically polled/delivered.',
               '/help or /commands — show the command menu.',
-              '/dub — open Telegram buttons to choose target English or Burmese, Microsoft Edge TTS or VoxCPM2, and voice. /dub_help gives instructions. Video jobs remain disabled until Kaggle tests pass.',
+              '/dub — choose target language, TTS engine (Edge, VoxCPM2, Gemini), model and voice. Speech language auto-detected; /dub_help gives instructions.',
               '/vox TEXT — request VoxCPM2 Burmese speech (up to 8,000 characters); after output click Save this voice, then a slot. /voxvoice 1 TEXT reuses stored reference; /voxvoices lists five slots; /voxrename 1 Name renames. Reply to a UTF-8 .txt file with /vox or /voxvoice 1, or attach a .txt file as caption. /vox_status gives status; no OCI needed.',
               '/whoami — show your Telegram numeric user ID.',
               '/allow USER_ID, /deny USER_ID and /allowed — owner-only access management for private chats.',

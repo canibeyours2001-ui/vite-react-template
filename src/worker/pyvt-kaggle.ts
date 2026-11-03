@@ -40,7 +40,7 @@ async function isReady(env:VideoEnv):Promise<boolean>{
  return r.results[0]?.enabled===1
 }
 const HELP='Video translation + dubbing (private Kaggle jobs):\n'+
- '/dub — choose only the target language; source speech is auto-detected.\n'+
+ '/dub — target language, engine (Edge / VoxCPM2 / Gemini), TTS model and voice.\n'+
  '/dub edge auto en — auto-detect the original spoken language and dub into English.\n'+
  '/dub edge auto my — auto-detect original speech and use Gemini translation for Burmese.\n'+
  '/dub vox auto my — optional VoxCPM2 dubbing on Kaggle T4 GPU.\n'+
@@ -100,7 +100,7 @@ export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:stri
    await send('Video dubbing on Kaggle is in compatibility testing. No GPU job submitted. '+HELP)
    return true
   }
-  const parsed=text.trim().match(/^\/dub(?:@[a-zA-Z0-9_]+)?\s+(edge|vox)\s+(auto|[a-z]{2,3}(?:-[a-z]{2,3})?)\s+(en|my)(?:\s+([a-zA-Z0-9-]{1,80}))?$/i)
+  const parsed=text.trim().match(/^\/dub(?:@[a-zA-Z0-9_]+)?\s+(edge|vox|gemini)\s+(auto|[a-z]{2,3}(?:-[a-z]{2,3})?)\s+(en|my)(?:\s+([a-zA-Z0-9-]{1,80}))?$/i)
   if(!parsed){await send(HELP);return true}
   const engine=parsed[1].toLowerCase(),inputLang=parsed[2].toLowerCase(),targetLang=parsed[3].toLowerCase()
   const sourceLang=['ch','cn','zh','zh-cn'].includes(inputLang)?'zh-cn':inputLang
@@ -116,6 +116,15 @@ export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:stri
    if(!found.results.length){await send('VoxCPM2 voice slot '+slot+' is empty. Use /voxvoices.');return true}
   }
   const voice=engine==='vox'?'Narrator':rawVoice||defaultVoices[targetLang]
+  if(engine==='gemini'){
+   const allowed=['Kore','Aoede','Puck','Charon','Leda','Fenrir','Zephyr','Orus']
+   const parts=voice.split('-'),model=parts[0],speaker=parts[1]
+   if(parts.length!==2||!['flash','lite'].includes(model)||!allowed.includes(speaker)||
+     (targetLang==='my'&&model!=='flash')){
+    await send('Select a supported Gemini model and voice using /dub. Burmese requires 3.8 Flash TTS.')
+    return true
+   }
+  }
   if(engine==='edge'&&!voice){await send('Choose an Edge voice for this language, e.g. /dub edge en my my-MM-NilarNeural');return true}
   if(sourceLang!=='auto'&&sourceLang===targetLang){await send('Source and target language are identical. Choose distinct codes or use /vox for speech only.');return true}
   const media=selectMedia(msg)||await lastDubMedia(env,chat)
@@ -188,7 +197,7 @@ export async function pyvtSelectedMedia(env:VideoEnv,msg:Message,chat:string,
 function hex(bytes:ArrayBuffer):string{
  return [...new Uint8Array(bytes)].map(x=>x.toString(16).padStart(2,'0')).join('')
 }
-async function signature(secret:string,id:number,expires:number,purpose:'file'|'translate'='file'){
+async function signature(secret:string,id:number,expires:number,purpose:'file'|'translate'|'tts'='file'){
  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(secret),
    {name:'HMAC',hash:'SHA-256'},false,['sign'])
  return hex(await crypto.subtle.sign('HMAC',key,
@@ -304,9 +313,71 @@ export async function pyvtTranslate(env:VideoEnv,request:Request):Promise<Respon
   })
  }catch(e){console.error('pyVideoTrans Gemini request error',e instanceof Error?e.name:'unknown');return err(502,'Gemini translation request failed')}
 }
-function renderKernel(job:Job,inputUrl:string,voiceB64:string,translateUrl:string):string{
+/** Native Gemini TTS bridge for pyVideoTrans's custom TTS adapter.
+ * Each signed request is bound to an active private video job; key stays in Worker.
+ */
+export async function pyvtGeminiTts(env:VideoEnv,request:Request):Promise<Response>{
+ const u=new URL(request.url),id=Number(u.searchParams.get('pvtts'))
+ const expiry=Number(u.searchParams.get('expire')),sig=u.searchParams.get('sig')||''
+ const now=Math.floor(Date.now()/1000)
+ const error=(status:number,detail:string)=>new Response(JSON.stringify({code:status,msg:detail,data:''}),
+  {status,headers:{'content-type':'application/json','cache-control':'no-store'}})
+ if(!Number.isSafeInteger(id)||id<=0||!Number.isSafeInteger(expiry)||
+  expiry<now||expiry>now+43200||!/^[0-9a-f]{64}$/.test(sig)||
+  !env.TELEGRAM_WEBHOOK_SECRET)return error(404,'Not found')
+ const expected=await signature(env.TELEGRAM_WEBHOOK_SECRET,id,expiry,'tts')
+ if(!safeEqual(sig,expected))return error(404,'Not found')
+ if(!env.GEMINI_API_KEY)return error(503,'Gemini TTS not configured')
+ const jobs=await env.MEMORY_DB.prepare(
+  "SELECT voice,target_lang FROM pyvt_kaggle_jobs WHERE id=? AND engine='gemini' AND status IN ('submitting','submitted','running')"
+ ).bind(id).all<{voice:string;target_lang:string}>()
+ const job=jobs.results[0]
+ if(!job)return error(404,'Inactive job')
+ const voicePart=job.voice.split('-'),model=voicePart[0],speaker=voicePart[1]
+ if(voicePart.length!==2||!['flash','lite'].includes(model)||
+  !['Kore','Aoede','Puck','Charon','Leda','Fenrir','Zephyr','Orus'].includes(speaker)||
+  (job.target_lang==='my'&&model!=='flash'))return error(400,'Invalid voice configuration')
+ const length=Number(request.headers.get('content-length')||0)
+ if(length>4000)return error(413,'Text too long')
+ const form=await request.formData().catch(()=>null)
+ const text=String(form?.get('text')||'').trim()
+ if(!text||text.length>750)return error(413,'Segment must contain 1-750 characters')
+ // Never accept caller-selected voice/model. They come from the private D1 job only.
+ await env.MEMORY_DB.prepare(
+  'CREATE TABLE IF NOT EXISTS pyvt_tts_uses (job_id INTEGER PRIMARY KEY,uses INTEGER NOT NULL DEFAULT 0)'
+ ).bind().run()
+ await env.MEMORY_DB.prepare('INSERT OR IGNORE INTO pyvt_tts_uses(job_id) VALUES(?)').bind(id).run()
+ const allowed=await env.MEMORY_DB.prepare(
+  'UPDATE pyvt_tts_uses SET uses=uses+1 WHERE job_id=? AND uses<100'
+ ).bind(id).run()
+ if(!allowed.meta.changes)return error(429,'TTS segment limit reached')
+ try{
+  const resp=await fetch('https://generativelanguage.googleapis.com/v1beta/interactions',{
+   method:'POST',headers:{'x-goog-api-key':env.GEMINI_API_KEY,'content-type':'application/json'},
+   body:JSON.stringify({
+    model:model==='flash'?'gemini-3.8-flash-tts':'gemini-3.8-flash-lite-tts',
+    input:[{type:'user_input',content:[{type:'text',text,
+     annotations:[{type:'speech_metadata',style:'Clear natural narration with consistent pacing, pronounced in '+(job.target_lang==='my'?'Burmese':'English')}]}]}],
+    response_format:{type:'audio'},
+    generation_config:{speech_config:[{voice:speaker}]}
+   }),
+   signal:AbortSignal.timeout(55000)
+  })
+  if(!resp.ok){console.error('Gemini TTS HTTP',resp.status);return error(502,'Gemini speech provider unavailable')}
+  const data=await resp.json() as {outputAudio?:{data?:string};output_audio?:{data?:string}}
+  const audio=data.outputAudio?.data||data.output_audio?.data||''
+  if(!audio||audio.length>3500000||!/^[A-Za-z0-9+/=]+$/.test(audio))
+   return error(502,'Gemini TTS returned no valid WAV data')
+  return new Response(JSON.stringify({code:0,msg:'OK',data:'data:audio/wav;base64,'+audio}),
+   {headers:{'content-type':'application/json','cache-control':'no-store'}})
+ }catch(e){
+  console.error('Gemini TTS exception',e instanceof Error?e.name:'unknown')
+  return error(502,'Gemini speech generation failed')
+ }
+}
+function renderKernel(job:Job,inputUrl:string,voiceB64:string,translateUrl:string,ttsUrl:string):string{
  const task={url:inputUrl,source:job.source_lang,target:job.target_lang,
-  provider:job.engine,voice:job.voice,ext:job.file_ext,voice_ref_b64:voiceB64,translate_url:translateUrl}
+  provider:job.engine,voice:job.voice,ext:job.file_ext,voice_ref_b64:voiceB64,translate_url:translateUrl,tts_url:ttsUrl}
  // Generated script embeds an expiring URL only, never a Telegram token or Kaggle credential.
  return [
  'import json, os, sys, subprocess, pathlib, shutil, base64',
@@ -340,14 +411,30 @@ function renderKernel(job:Job,inputUrl:string,voiceB64:string,translateUrl:strin
  "    source=transapi.read_text()",
  "    assert 'requests.get(url=requrl,verify=False)' in source, 'Translator API changed'",
  "    transapi.write_text(source.replace('requests.get(url=requrl,verify=False)','requests.get(url=requrl,verify=True,timeout=85)'))",
+ "# Gemini TTS: custom pyVideoTrans API provider calls signed Cloudflare endpoint, not Google directly.",
+ "if TASK['provider']=='gemini':",
+ "    adapter=repo/'tools/kaggle_video_dub_job.py'",
+ "    code=adapter.read_text()",
+ "    old='PROVIDERS = {\"edge\": 0, \"voxcpm2\": 38}'",
+ "    assert old in code, 'pyVideoTrans provider adapter changed'",
+ "    adapter.write_text(code.replace(old,'PROVIDERS = {\"edge\": 0, \"voxcpm2\": 38, \"ttsapi\": 35}'))",
+ "    configenv=os.environ.copy(); configenv['PYVT_TTS_URL']=TASK['tts_url']",
+ "    setup='from videotrans.configure.config import params; import os; params.save({\"ttsapi_url\":os.environ[\"PYVT_TTS_URL\"]})'",
+ "    subprocess.run([str(python),'-c',setup],env=configenv,cwd=str(repo),check=True,timeout=90)",
+ "    ttsapi=repo/'videotrans/tts/_ttsapi.py'",
+ "    source=ttsapi.read_text()",
+ "    source=source.replace('data=data, verify=False, headers=headers)', 'data=data, verify=True, headers=headers, timeout=85)')",
+ "    source=source.replace('data=data,  verify=False, headers=headers,files=files)', 'data=data,  verify=True, headers=headers,files=files,timeout=85)')",
+ "    assert 'verify=True, headers=headers, timeout=85' in source, 'TTS API changed'",
+ "    ttsapi.write_text(source)",
  "# uv.lock installs edge-tts 7.2.7, which gets HTTP 403 on current Edge speech WebSocket.",
  "if TASK['provider']=='edge':",
  "    subprocess.run(['uv','pip','install','--python',str(python),'edge-tts==7.3.1'],check=True,timeout=240)",
  "command=[str(python),str(repo/'tools/kaggle_video_dub_job.py'),'--task','vtv','--input',str(video),"+
-  "'--tts',TASK['provider'],'--voice-role',TASK['voice'],'--source-language-code',TASK['source'],"+
+  "'--tts',('ttsapi' if TASK['provider']=='gemini' else 'voxcpm2' if TASK['provider']=='vox' else TASK['provider']),'--voice-role',TASK['voice'],'--source-language-code',TASK['source'],"+
   "'--target-language-code',TASK['target'],'--translate-type',('24' if TASK['target']=='my' else '0'),'--whisper-model','small',"+
   "'--recogn-type','0','--temp-output',str(ROOT/'results'),'--final-output','/kaggle/working/pyvideotrans_result.mp4','--voice-autorate']",
- "if TASK['provider']=='voxcpm2': command.append('--cuda')",
+ "if TASK['provider']=='vox': command.append('--cuda')",
  "if TASK.get('voice_ref_b64'):",
  "    blob=base64.b64decode(TASK['voice_ref_b64'],validate=True)",
  "    if len(blob)<1500 or len(blob)>180000: raise ValueError('Bad saved voice reference')",
@@ -557,7 +644,10 @@ export async function pollPyvt(env:VideoEnv):Promise<void>{
    next.id+'&expire='+expires+'&sig='+translateSign:''
   const response=await kaggle(env,'push',{
    slug:KERNEL,newTitle:'pyVideoTrans Telegram Edge or VoxCPM2',
-   text:renderKernel(next,fileURL(next.id,expires,sign),voiceB64,translateUrl),
+   text:renderKernel(next,fileURL(next.id,expires,sign),voiceB64,translateUrl,
+    next.engine==='gemini'?
+     'https://vite-react-template.canibeyours2001.workers.dev/telegram/webhook?pvtts='+
+     next.id+'&expire='+expires+'&sig='+await signature(env.TELEGRAM_WEBHOOK_SECRET,next.id,expires,'tts'):''),
    language:'python',kernelType:'script',isPrivate:true,enableGpu:next.engine==='vox',
    enableInternet:true,machineShape:'NvidiaTeslaT4',sessionTimeoutSeconds:3600,
    datasetDataSources:[],competitionDataSources:[],kernelDataSources:[],modelDataSources:[]

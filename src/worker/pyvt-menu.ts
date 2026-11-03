@@ -1,4 +1,6 @@
-/** Private Telegram inline menu for pyVideoTrans language, dubbing engine and voice. */
+/** Owner-only Telegram dubbing wizard. Detect original speech automatically.
+ * Target -> TTS engine -> (Gemini model) -> voice -> ready. No hidden defaults.
+ */
 type DB={prepare(query:string):{bind(...v:(string|number)[]):{
  run():Promise<{meta:{changes:number}}>;all<T>():Promise<{results:T[]}>
 }}}
@@ -10,160 +12,197 @@ type Selection={chat_id:string;source_lang:string;target_lang:string;engine:stri
 type Button={text:string;callback_data:string}
 const edgeVoices:Record<string,{name:string;code:string}[]>={
  en:[
-  {name:'Aria • woman (US)',code:'en-US-AriaNeural'},
-  {name:'Guy • man (US)',code:'en-US-GuyNeural'},
-  {name:'Christopher • man (US)',code:'en-US-ChristopherNeural'}
+  {name:'Aria • female (US)',code:'en-US-AriaNeural'},
+  {name:'Guy • male (US)',code:'en-US-GuyNeural'},
+  {name:'Christopher • male (US)',code:'en-US-ChristopherNeural'}
  ],
  my:[
-  {name:'Nilar • woman (Burmese)',code:'my-MM-NilarNeural'},
-  {name:'Thiha • man (Burmese)',code:'my-MM-ThihaNeural'}
+  {name:'Nilar • female (Myanmar)',code:'my-MM-NilarNeural'},
+  {name:'Thiha • male (Myanmar)',code:'my-MM-ThihaNeural'}
  ]
 }
+const geminiVoices=[
+ {name:'Kore • firm',code:'Kore'},
+ {name:'Aoede • breezy',code:'Aoede'},
+ {name:'Puck • upbeat',code:'Puck'},
+ {name:'Charon • informative',code:'Charon'},
+ {name:'Leda • youthful',code:'Leda'},
+ {name:'Fenrir • energetic',code:'Fenrir'},
+ {name:'Zephyr • bright',code:'Zephyr'},
+ {name:'Orus • firm',code:'Orus'}
+]
+const buttons=(rows:Button[][])=>({inline_keyboard:rows})
+async function send(env:DubMenuEnv,method:'sendMessage'|'answerCallbackQuery',data:Record<string,unknown>){
+ const r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/'+method,{
+  method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(data),signal:AbortSignal.timeout(15000)
+ })
+ const obj=await r.json().catch(()=>({})) as {ok?:boolean}
+ if(!r.ok||!obj.ok)throw new Error('Telegram '+method+' failed')
+}
 export async function ensureDubMenu(db:DB):Promise<void>{
- await db.prepare(
-  'CREATE TABLE IF NOT EXISTS pyvt_dub_selections ('+
-  'chat_id TEXT PRIMARY KEY,source_lang TEXT NOT NULL DEFAULT "en",'+
+ await db.prepare('CREATE TABLE IF NOT EXISTS pyvt_dub_selections ('+
+  'chat_id TEXT PRIMARY KEY,source_lang TEXT NOT NULL DEFAULT "auto",'+
   'target_lang TEXT NOT NULL DEFAULT "my",engine TEXT NOT NULL DEFAULT "edge",'+
   'voice TEXT NOT NULL DEFAULT "my-MM-NilarNeural",'+
   'voice_slot INTEGER NOT NULL DEFAULT 0,stage TEXT NOT NULL DEFAULT "target",'+
-  'updated_at INTEGER NOT NULL DEFAULT (unixepoch()))'
- ).bind().run()
+  'updated_at INTEGER NOT NULL DEFAULT (unixepoch()))').bind().run()
 }
-async function send(env:DubMenuEnv,method:'sendMessage'|'answerCallbackQuery',
- payload:Record<string,unknown>){
- const res=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/'+method,{
-  method:'POST',headers:{'content-type':'application/json'},
-  body:JSON.stringify(payload),signal:AbortSignal.timeout(15000)})
- const data=await res.json().catch(()=>({})) as {ok?:boolean}
- if(!res.ok||!data.ok)throw Error('Telegram '+method+' failed')
+async function engineMenu(env:DubMenuEnv,chat:string,target:'en'|'my'){
+ await send(env,'sendMessage',{chat_id:chat,
+  text:'🎙 Target: '+(target==='my'?'Burmese':'English')+
+   '\nOriginal speech will be detected automatically.\n\nStep 2 — Choose the TTS engine:',
+  reply_markup:buttons([
+   [{text:'🔊 Microsoft Edge TTS (CPU)',callback_data:'pd:engine:edge'}],
+   [{text:'🎤 VoxCPM2 (Kaggle GPU)',callback_data:'pd:engine:vox'}],
+   [{text:'✨ Gemini TTS (API)',callback_data:'pd:engine:gemini'}]
+  ])
+ })
 }
-const buttons=(rows:Button[][])=>({inline_keyboard:rows})
-export async function startDubMenu(env:DubMenuEnv,chat:string):Promise<void>{
+export async function startDubMenu(env:DubMenuEnv,chat:string,target?:'en'|'my'):Promise<void>{
  await ensureDubMenu(env.MEMORY_DB)
+ const stage=target?'engine':'target'
  await env.MEMORY_DB.prepare(
   'INSERT INTO pyvt_dub_selections(chat_id,stage,source_lang,target_lang,engine,voice,voice_slot) '+
-  "VALUES(?,'target','auto','my','edge','my-MM-NilarNeural',0) "+
-  "ON CONFLICT(chat_id) DO UPDATE SET stage='target',source_lang='auto',updated_at=unixepoch()"
- ).bind(chat).run()
+  "VALUES(?,?,'auto',?,'edge','',0) "+
+  "ON CONFLICT(chat_id) DO UPDATE SET stage=excluded.stage,source_lang='auto',"+
+  'target_lang=excluded.target_lang,voice=\'\',voice_slot=0,updated_at=unixepoch()'
+ ).bind(chat,stage,target||'my').run()
+ if(target){await engineMenu(env,chat,target);return}
  await send(env,'sendMessage',{chat_id:chat,
-  text:'🎬 Dub my video\nChoose only the TARGET language. The original speech language will be detected automatically.',
+  text:'🎬 Dub my video\nChoose only the TARGET language; original speech is detected automatically.',
   reply_markup:buttons([
-   [{text:'🇲🇲 Burmese (Gemini translation)',callback_data:'pd:lang:my'}],
+   [{text:'🇲🇲 Burmese • Gemini translation',callback_data:'pd:lang:my'}],
    [{text:'🇬🇧 English',callback_data:'pd:lang:en'}]
   ])})
-
 }
 export async function selectedDubCommand(env:DubMenuEnv,chat:string):Promise<string|null>{
  await ensureDubMenu(env.MEMORY_DB)
  const r=await env.MEMORY_DB.prepare(
-  "SELECT source_lang,target_lang,engine,voice,voice_slot,stage FROM pyvt_dub_selections WHERE chat_id=?"
+  'SELECT source_lang,target_lang,engine,voice,voice_slot,stage FROM pyvt_dub_selections WHERE chat_id=?'
  ).bind(chat).all<Selection>()
  const s=r.results[0]
- if(!s||s.stage!=='ready')return null
- // Literal command generated only from validated and private D1 menu selections.
- if(!['auto','en','my','zh-cn'].includes(s.source_lang)||!['en','my'].includes(s.target_lang)||
-  !['vox','edge'].includes(s.engine))return null
+ if(!s||s.stage!=='ready'||s.source_lang!=='auto'||!['en','my'].includes(s.target_lang))return null
  if(s.engine==='vox'){
-  if(s.voice_slot<0||s.voice_slot>5)return null
-  return '/dub vox '+s.source_lang+' '+s.target_lang+(s.voice_slot?' '+s.voice_slot:'')
+  if(!Number.isInteger(s.voice_slot)||s.voice_slot<0||s.voice_slot>5)return null
+  return '/dub vox auto '+s.target_lang+(s.voice_slot?' '+s.voice_slot:'')
  }
- const allowed=(edgeVoices[s.target_lang]||[]).some(v=>v.code===s.voice)
- if(!allowed)return null
- return '/dub edge '+s.source_lang+' '+s.target_lang+' '+s.voice
+ if(s.engine==='edge'){
+  if(!(edgeVoices[s.target_lang]||[]).some(v=>v.code===s.voice))return null
+  return '/dub edge auto '+s.target_lang+' '+s.voice
+ }
+ if(s.engine==='gemini'){
+  const [model,voice]=s.voice.split('-')
+  if(!['flash','lite'].includes(model)||!geminiVoices.some(v=>v.code===voice)||
+   (s.target_lang==='my'&&model!=='flash'))return null
+  return '/dub gemini auto '+s.target_lang+' '+s.voice
+ }
+ return null
 }
 export async function dubMenuCallback(env:DubMenuEnv,cb:DubCallback):Promise<boolean|void>{
- const chat=String(cb.message?.chat.id??'')
+ const chat=String(cb.message?.chat.id||'')
  try{
   if(!chat||String(cb.from.id)!==chat||!cb.data?.startsWith('pd:'))return
   await ensureDubMenu(env.MEMORY_DB)
   const current=(await env.MEMORY_DB.prepare(
    'SELECT chat_id,source_lang,target_lang,engine,voice,voice_slot,stage,updated_at FROM pyvt_dub_selections WHERE chat_id=?'
   ).bind(chat).all<Selection>()).results[0]
-  if(!current)throw Error('Selection expired. Restart /dub.')
+  if(!current)throw new Error('Selection expired')
   const [_,action,value]=cb.data.split(':')
-  if(action==='lang'&&current.stage==='target'&&['en','my'].includes(value)){
-   const target=value
-   const voice=target==='my'?'my-MM-NilarNeural':'en-US-AriaNeural'
+  if(action==='lang'&&current.stage==='target'&&(value==='my'||value==='en')){
    await env.MEMORY_DB.prepare(
-    "UPDATE pyvt_dub_selections SET source_lang='auto',target_lang=?,engine='edge',voice=?,voice_slot=0,stage='ready',updated_at=unixepoch() "+
+    "UPDATE pyvt_dub_selections SET target_lang=?,source_lang='auto',stage='engine',updated_at=unixepoch() "+
     "WHERE chat_id=? AND stage='target'"
-   ).bind(target,voice,chat).run()
-   await send(env,'sendMessage',{chat_id:chat,
-    text:'✅ Target: '+(target==='my'?'Burmese':'English')+
-     '\n🎧 Original speech: automatically detected'+
-     '\n🔊 Voice: '+(target==='my'?'Nilar (Burmese)':'Aria (English)')+
-     '\n🌐 Translation: '+(target==='my'?'Gemini (Cloudflare secured)':'automatic')+
-     '\n\nIf you already sent a video recently, it will be queued now. Otherwise, send the video (20 MB maximum). Send /dub to change the target.'
-   })
-   return true
-  }
-
-  if(action==='engine'&&current.stage==='engine'&&['edge','vox'].includes(value)){
-   await env.MEMORY_DB.prepare(
-    "UPDATE pyvt_dub_selections SET engine=?,stage='voice',updated_at=unixepoch() "+
-    "WHERE chat_id=? AND stage='engine'"
    ).bind(value,chat).run()
+   await engineMenu(env,chat,value)
+   return
+  }
+  if(action==='engine'&&current.stage==='engine'&&['edge','vox','gemini'].includes(value)){
+   const stage=value==='gemini'?'model':'voice'
+   await env.MEMORY_DB.prepare(
+    "UPDATE pyvt_dub_selections SET engine=?,voice='',voice_slot=0,stage=?,updated_at=unixepoch() "+
+    "WHERE chat_id=? AND stage='engine'"
+   ).bind(value,stage,chat).run()
+   if(value==='gemini'){
+    const options:Button[][]=[
+     [{text:'Gemini 3.8 Flash TTS • multilingual',callback_data:'pd:model:flash'}]
+    ]
+    if(current.target_lang==='en')options.push([
+     {text:'Gemini 3.8 Flash-Lite • English',callback_data:'pd:model:lite'}
+    ])
+    await send(env,'sendMessage',{chat_id:chat,text:'Step 3 — Choose a Gemini TTS model.\nBurmese requires 3.8 Flash TTS.',
+     reply_markup:buttons(options)})
+    return
+   }
    if(value==='edge'){
     const voices=edgeVoices[current.target_lang]||[]
     await send(env,'sendMessage',{chat_id:chat,
-     text:'Step 3/3 — Choose the Microsoft '+(current.target_lang==='my'?'Burmese':'English')+' voice.',
+     text:'Step 3 — Choose an Edge TTS voice:',
      reply_markup:buttons(voices.map((v,i)=>[{text:v.name,callback_data:'pd:voice:e'+i}]))})
-   }else{
-    const v=await env.MEMORY_DB.prepare(
-     'SELECT slot,name FROM vox_saved_voices WHERE chat_id=? ORDER BY slot'
-    ).bind(chat).all<{slot:number;name:string}>()
-    const rows:Button[][]=[[{text:'New/default voice',callback_data:'pd:voice:v0'}]]
-    for(const saved of v.results){
-     if(Number.isInteger(saved.slot)&&saved.slot>=1&&saved.slot<=5){
-      rows.push([{text:'Saved '+saved.slot+' • '+saved.name.slice(0,35),
-       callback_data:'pd:voice:v'+saved.slot}])
-     }
-    }
-    await send(env,'sendMessage',{chat_id:chat,
-     text:'Step 3/3 — Choose a VoxCPM2 voice. Your saved voices from /voxvoices are available here.',
-     reply_markup:buttons(rows)})
+    return
    }
+   const saved=await env.MEMORY_DB.prepare(
+    'SELECT slot,name FROM vox_saved_voices WHERE chat_id=? ORDER BY slot'
+   ).bind(chat).all<{slot:number;name:string}>()
+   const rows:Button[][]=[[{text:'Default narrator',callback_data:'pd:voice:v0'}]]
+   for(const v of saved.results)if(Number.isInteger(v.slot)&&v.slot>=1&&v.slot<=5)
+    rows.push([{text:'Voice '+v.slot+' • '+v.name.slice(0,30),callback_data:'pd:voice:v'+v.slot}])
+   await send(env,'sendMessage',{chat_id:chat,text:'Step 3 — Choose a VoxCPM2 voice or saved voice clone:',
+    reply_markup:buttons(rows)})
    return
   }
-  if(action==='voice'&&current.stage==='voice'&&/^[ev][0-9]$/.test(value)){
+  if(action==='model'&&current.stage==='model'&&
+   (value==='flash'||(value==='lite'&&current.target_lang==='en'))){
+   await env.MEMORY_DB.prepare(
+    "UPDATE pyvt_dub_selections SET voice=?,stage='voice',updated_at=unixepoch() WHERE chat_id=? AND stage='model'"
+   ).bind(value+'-',chat).run()
+   await send(env,'sendMessage',{chat_id:chat,text:'Step 4 — Choose a Gemini voice:',
+    reply_markup:buttons(geminiVoices.map((v,i)=>[{text:v.name,callback_data:'pd:voice:g'+i}]))})
+   return
+  }
+  if(action==='voice'&&current.stage==='voice'&&/^[evg][0-9]$/.test(value)){
    let voice='',slot=0,label=''
-   if(current.engine==='edge'&&value.startsWith('e')){
-    const index=Number(value[1]);const entry=(edgeVoices[current.target_lang]||[])[index]
-    if(!entry)throw Error('Invalid voice choice')
-    voice=entry.code;label=entry.name
-   }else if(current.engine==='vox'&&value.startsWith('v')){
+   if(current.engine==='edge'&&value[0]==='e'){
+    const v=(edgeVoices[current.target_lang]||[])[Number(value[1])]
+    if(!v)throw new Error('Invalid Edge voice')
+    voice=v.code;label=v.name
+   }else if(current.engine==='vox'&&value[0]==='v'){
     slot=Number(value[1])
-    if(slot>5)throw Error('Invalid voice slot')
+    if(slot>5)throw new Error('Invalid voice slot')
     if(slot){
-     const found=await env.MEMORY_DB.prepare(
+     const existing=await env.MEMORY_DB.prepare(
       'SELECT name FROM vox_saved_voices WHERE chat_id=? AND slot=?'
      ).bind(chat,slot).all<{name:string}>()
-     if(!found.results[0])throw Error('That saved voice slot is unavailable')
-     label='Saved voice '+slot+' • '+found.results[0].name
-    }else label='New/default VoxCPM2 voice'
+     if(!existing.results[0])throw new Error('Saved voice unavailable')
+     label='Saved voice '+slot+' • '+existing.results[0].name
+    }else label='Default VoxCPM2 narrator'
     voice='Narrator'
-   }else throw Error('Voice engine does not match')
+   }else if(current.engine==='gemini'&&value[0]==='g'){
+    const v=geminiVoices[Number(value[1])]
+    const prefix=current.voice
+    if(!v||!['flash-','lite-'].includes(prefix)||current.target_lang==='my'&&prefix!=='flash-')
+     throw new Error('Invalid Gemini model/voice')
+    voice=prefix+v.code
+    label=v.name+' • '+(prefix==='flash-'?'Gemini 3.8 Flash':'Gemini 3.8 Flash-Lite')
+   }else throw new Error('Engine/voice mismatch')
    await env.MEMORY_DB.prepare(
     "UPDATE pyvt_dub_selections SET voice=?,voice_slot=?,stage='ready',updated_at=unixepoch() "+
     "WHERE chat_id=? AND stage='voice'"
    ).bind(voice,slot,chat).run()
-   const src=current.source_lang==='zh-cn'?'Chinese':current.source_lang==='my'?'Burmese':'English'
-   const trg=current.target_lang==='my'?'Burmese':'English'
    await send(env,'sendMessage',{chat_id:chat,text:
-    '✅ Selection saved!\n'+src+' → '+trg+
-    '\nEngine: '+(current.engine==='edge'?'Microsoft Edge TTS':'VoxCPM2')+
-    '\nVoice: '+label+
-    '\n\nSend a video up to 20 MB to use these settings, or reply to one with /dub.'+
-    '\nKaggle will process videos with audible speech; GPU use depends on your selected engine.'+
-    '\nSend /dub to change the language or voice.'})
-   return
+    '✅ Target: '+(current.target_lang==='my'?'Burmese':'English')+
+    '\n🎧 Source: auto-detected'+
+    '\n🎙 Engine: '+(current.engine==='edge'?'Microsoft Edge':current.engine==='vox'?'VoxCPM2':'Gemini TTS')+
+    '\n🔊 Voice/model: '+label+
+    '\n🌐 Translation: '+(current.target_lang==='my'?'Gemini (Cloudflare secured)':'Automatic')+
+    '\n\nSend a video up to 20 MB, or reply to one with /dub. Recent video is reused automatically.'
+   })
+   return true
   }
-  await send(env,'sendMessage',{chat_id:chat,
-   text:'This selection is outdated. Send /dub to choose language, engine and voice again.'})
+  await send(env,'sendMessage',{chat_id:chat,text:'That choice expired. Send /dub to restart.'})
  }catch(e){
-  console.error('pyVideoTrans menu failed',e instanceof Error?e.name:'unknown')
+  console.error('pyvt wizard',e instanceof Error?e.message:'unknown')
   if(chat)await send(env,'sendMessage',{chat_id:chat,
-   text:'Unable to save that dubbing choice. Send /dub to restart the menu.'}).catch(()=>undefined)
+   text:'Dubbing selection could not be saved. Please send /dub again.'}).catch(()=>undefined)
  }finally{
   await send(env,'answerCallbackQuery',{callback_query_id:cb.id}).catch(()=>undefined)
  }

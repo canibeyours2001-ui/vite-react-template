@@ -1,7 +1,8 @@
-import {aiFooter,countAi} from './usage-receipts'
-/** Live Telegram answer updates over Workers AI streaming SSE. Never exposes model tokens or secrets. */
+import {freeLlmRequest,type FreeLlmEnv} from './free-llm'
+import {countAi} from './usage-receipts'
+/** Live Telegram answer updates over FreeLLM OpenAI-compatible streaming SSE. Never exposes model tokens or secrets. */
 type Msg={role:'system'|'user'|'assistant';content:string}
-type AiEnv={TELEGRAM_BOT_TOKEN:string;MEMORY_DB:import('./usage-receipts').UsageDb;AI: {run:(model:string,params:Record<string,unknown>)=>Promise<unknown>}}
+type AiEnv=FreeLlmEnv&{TELEGRAM_BOT_TOKEN:string;MEMORY_DB:import('./usage-receipts').UsageDb;AI: {run:(model:string,params:Record<string,unknown>)=>Promise<unknown>}}
 type Out={ok?:boolean;result?:{message_id?:number};description?:string}
 async function tgCall(env:AiEnv,method:string,payload:Record<string,unknown>):Promise<Out>{
  const response=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/'+method,{
@@ -12,8 +13,7 @@ async function tgCall(env:AiEnv,method:string,payload:Record<string,unknown>):Pr
  return await response.json() as Out
 }
 export async function streamAIToTelegram(env:AiEnv,chatId:string,replyMessage:number,messages:Msg[],modelId:string):Promise<string>{
- // Count requests for information only; do not impose an artificial daily limit.
- // Workers AI itself rejects requests when the Cloudflare plan quota is exhausted.
+ // Count FreeLLM text completions separately from Workers AI Neuron usage.
  await countAi(env.MEMORY_DB,chatId)
  const opening=await tgCall(env,'sendMessage',{chat_id:chatId,text:'🤖 Thinking…',reply_parameters:{message_id:replyMessage}})
  const msgId=opening.result?.message_id
@@ -30,9 +30,9 @@ export async function streamAIToTelegram(env:AiEnv,chatId:string,replyMessage:nu
  const payload={messages,max_tokens:1000,temperature:0.4,stream:true}
  const model=modelId
  try{
-  const result=await env.AI.run(model,payload)
-  if(!(result instanceof ReadableStream))throw Error('Workers AI did not return a stream')
-  const reader=result.getReader(), decoder=new TextDecoder()
+  const response=await freeLlmRequest(env,messages,{...payload,model})
+  if(!response.body)throw Error('FreeLLM did not return a response stream')
+  const reader=response.body.getReader(), decoder=new TextDecoder()
   for(;;){
    const {done,value}=await reader.read()
    if(done)break
@@ -59,15 +59,14 @@ export async function streamAIToTelegram(env:AiEnv,chatId:string,replyMessage:nu
    await edit()
    if(full.length>3900){await reader.cancel().catch(()=>{});break}
   }
-  full=(full.trim()||'I did not receive a complete answer from Workers AI.')
-  const usage=await aiFooter(env.MEMORY_DB,chatId).catch(()=>null)
-  if(usage)full=full.slice(0,3480)+'\n\n'+usage
+  full=(full.trim()||'I did not receive a complete answer from FreeLLM.')
+  full=full.slice(0,3800)
   await edit(true)
-  if(!sawDone&&full.startsWith('I did not receive'))console.error('Workers AI returned no text chunks')
+  if(!sawDone&&full.startsWith('I did not receive'))console.error('FreeLLM returned no text chunks')
   return full.slice(0,3850)
  }catch(error){
   const name=error instanceof Error?error.name:'unknown'
-  console.error('Worker AI streaming failed:',name)
+  console.error('FreeLLM streaming failed:',name)
   full=(full.trim()||'The AI service could not complete this answer. Please retry.')+' \n\n⚠️ Stream ended unexpectedly.'
   await edit(true)
   return full.slice(0,3850)
