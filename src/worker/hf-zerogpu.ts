@@ -25,7 +25,7 @@ export async function queueZeroImage(env:ZeroEnv,chat:string,messageId:number,pr
  if(prompt.trim().length===0||prompt.length>1400)throw Error('ZeroGPU prompt must contain 1–1400 characters');
  await initZero(env.MEMORY_DB);
  const r=await env.MEMORY_DB.prepare('INSERT OR IGNORE INTO hf_zero_image_jobs (id,chat_id,message_id,prompt,status) VALUES (?,?,?,?,?)').bind(crypto.randomUUID(),chat,messageId,prompt,'queued').run();
- if(r.meta.changes===1)await tell(env,chat,'🤗 Hugging Face ZeroGPU Qwen-Image 2.1 queued. This consumes your ZeroGPU daily GPU minutes, not Inference Providers credits. One submission only; progress will be checked automatically.');
+ if(r.meta.changes===1)await tell(env,chat,'🤗 Hugging Face ZeroGPU Qwen-Image 2.1 • 1024px / 30 steps queued. This consumes your ZeroGPU daily GPU minutes, not Inference Providers credits. One submission only; progress will be checked automatically.');
  return r.meta.changes===1;
 }
 async function submit(env:ZeroEnv,j:Job){
@@ -34,7 +34,7 @@ async function submit(env:ZeroEnv,j:Job){
  if(!env.HUGGINGFACE_API_TOKEN){await env.MEMORY_DB.prepare("UPDATE hf_zero_image_jobs SET status='failed',error='No HF token' WHERE id=?").bind(j.id).run();return;}
  let attempted=false;
  try{
-  const payload={prompt:j.prompt,transparent:false,size_preset:'1:1 — 1024x1024',steps:10,true_cfg_scale:1,negative_prompt:'',seed:0,randomize_seed:true};
+  const payload={prompt:j.prompt,transparent:false,size_preset:'1:1 — 1024x1024',steps:30,true_cfg_scale:1,negative_prompt:'',seed:0,randomize_seed:true};
   attempted=true;
   const r=await fetch(SPACE+ENDP,{method:'POST',headers:{Authorization:'Bearer '+env.HUGGINGFACE_API_TOKEN,'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(20000)});
   const data=await r.json().catch(()=>({})) as Record<string,unknown>;

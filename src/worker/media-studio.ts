@@ -169,6 +169,7 @@ function siteTtsLanguage(){return keys([
 async function siteTtsMenu(env,chat){await setSession(env,chat,{step:'tts_lang',kind:'tts'});return message(env,chat,'🎙 Image-upscaling.net TTS — choose language. Free daily quota applies; this produces speech, not music.',siteTtsLanguage());}
 
 const imageProviders=keys([
+ [btn('🏆 Best quality (automatic)', 'provider:best')],
  [btn('🆓 OVHcloud SDXL','provider:ovh'),btn('🌟 ModelScope Qwen','provider:modelscope')],
  [btn('🖼 Image-upscaling.net','upgen:menu')],
  [btn('🤗 Hugging Face FLUX','provider:hf'),btn('🆓 HF ZeroGPU Qwen','provider:hfzero')],
@@ -502,7 +503,7 @@ async function handleMessage(env,m) {
       '\n⏱ Processing times are included in completed job receipts.\n💳 Modal actual costs: check the Modal billing dashboard.',home);
   }
   if(command==='/upscale')return pickImage(env,chat,'upscale');
-  if(command==='/genimage')return pickImage(env,chat,'generate');
+  if(command==='/genimage')return message(env,chat,'🎨 Choose a provider. Best quality is first and uses free services only; paid models are opt-in.',imageProviders);
   if(command==='/imageup')return imageUpMenu(env,chat);
   if(command==='/studio'||command==='/image')return imageMenu(env,chat);
   if(command==='/removebg')return pickImage(env,chat,'removebg');
@@ -630,12 +631,12 @@ async function handleCallback(env,q) {
     // second quota-consuming call. The user may intentionally cancel/reset.
     return await submitTts(env,chat,s,s.text);
   }
-  if(d==='provider:menu')return message(env,chat,'🎨 Choose image generation provider. OVHcloud SDXL needs no key and is currently free; Hugging Face uses inference credits and ModelScope uses grains.',imageProviders);
+  if(d==='provider:menu')return message(env,chat,'🎨 Choose image generation provider. Best quality tries Qwen-Image-2.1 ZeroGPU first, or OVHcloud SDXL if unavailable. Qwen 2.1 is research-licensed: choose OVHcloud for commercial work. Paid credits are opt-in.',imageProviders);
   if(d.startsWith('provider:')){
     const provider=d.slice('provider:'.length);
-    if(!['ovh','hf','hfzero','modelscope'].includes(provider))throw Error('Unknown image provider');
+    if(!['best','ovh','hf','hfzero','modelscope'].includes(provider))throw Error('Unknown image provider');
     await setSession(env,chat,{step:'provider_prompt',kind:'generate',imageProvider:provider});
-    const name=provider==='ovh'?'OVHcloud SDXL (no API key)':provider==='hf'?'Hugging Face FLUX':provider==='hfzero'?'Hugging Face ZeroGPU Qwen 2.1':'ModelScope Qwen Image';
+    const name=provider==='best'?'Best quality (Qwen-Image-2.1 ZeroGPU → OVHcloud SDXL)':provider==='ovh'?'OVHcloud SDXL (no API key)':provider==='hf'?'Hugging Face FLUX':provider==='hfzero'?'Hugging Face ZeroGPU Qwen 2.1':'ModelScope Qwen Image';
     return message(env,chat,'Selected: '+name+'.\n\nSend your image prompt. I will offer to improve it, let you review it, and ask for confirmation before generating.');
   }
   if(d.startsWith('i:'))return pickImage(env,chat,d.slice(2));

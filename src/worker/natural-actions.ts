@@ -8,6 +8,7 @@ import {queueModelScopeImage} from './modelscope-image'
 import {queueExternalImage} from './external-image'
 import {queueZeroImage} from './hf-zerogpu'
 import {queueImageUp,type UpgenConfig} from './imageup-generation'
+import {queueBestImage} from './best-image-provider'
 import {handleMediaStudioMessage,startNaturalVoice,startNaturalAudio,startNaturalEdit,startNaturalImageSiteTts} from './media-studio'
 
 type Media={file_id:string;file_size?:number;mime_type?:string;file_name?:string}
@@ -137,7 +138,7 @@ export async function reviewDirectPrompt(env:Env,msg:Msg):Promise<boolean>{
   return true;
  }
  if(s.kind!=='generate'||!['prompt','provider_prompt'].includes(s.step||''))return false
- const provider=s.step==='provider_prompt'&&['ovh','hf','hfzero','modelscope'].includes(s.imageProvider||'')?s.imageProvider:'selected_studio_model'
+ const provider=s.step==='provider_prompt'&&['best','ovh','hf','hfzero','modelscope'].includes(s.imageProvider||'')?s.imageProvider:'selected_studio_model'
  await newDraft(env,String(msg.chat.id),{intent:'image_gen',prompt:t,stage:'review',messageId:msg.message_id,created:Date.now(),info:provider})
  if(s.step==='provider_prompt')await env.MEMORY_DB.prepare('UPDATE studio_sessions SET state=?,updated_at=unixepoch() WHERE chat_id=?').bind(JSON.stringify({step:'home'}),String(msg.chat.id)).run();
  return true
@@ -173,7 +174,7 @@ export async function handleNaturalMessage(env:Env,msg:Msg):Promise<boolean>{
  if(intent==='usage') {await handleMediaStudioMessage(env,{chat:msg.chat,from:msg.from,text:'/usage',message_id:msg.message_id});return true}
  if(intent==='image_gen'||intent==='video_gen'||intent==='video_image'){
    const prompt=clip(plainPrompt(t),2048)
-   await newDraft(env,chat,{intent,prompt,stage:intent==='video_image'&&!fileImage?'await_media':'review',messageId:msg.message_id,file:fileImage,created:Date.now(),info:intent==='image_gen'?(/image.upscal/i.test(t)?'imageup':/modelscope/i.test(t)?'modelscope':/hugging\s*face|\bhf\b/i.test(t)?'hf':'ovh'):undefined});return true
+   await newDraft(env,chat,{intent,prompt,stage:intent==='video_image'&&!fileImage?'await_media':'review',messageId:msg.message_id,file:fileImage,created:Date.now(),info:intent==='image_gen'?(/image.upscal/i.test(t)?'imageup':/modelscope/i.test(t)?'modelscope':/hugging\s*face|\bhf\b/i.test(t)?'hf':'best'):undefined});return true
  }
  if(intent==='audio_gen'){
    await startNaturalAudio(env,chat,clip(plainPrompt(t),1600));return true
@@ -300,7 +301,7 @@ export async function handleNaturalCallback(env:Env,cb:{id:string;data?:string;m
   if(choice==='better'&&!draft.best){await tell(env,chat,'Please select Improve prompt first.');return}
   const chosen=choice==='better'?draft.best!:draft.prompt
   if(!await swap(env,chat,raw,{...draft,chosen,stage:'confirm'}))return
-  await tell(env,chat,'Review the '+(draft.intent==='image_gen'?'image':'video')+' request:\n\n'+clip(chosen,1300)+'\n\nGenerate now? '+(draft.intent==='image_gen'?(draft.info==='modelscope'?'ModelScope grain credits may apply.':draft.info==='imageup'?'Image-upscaling.net free quota or balance applies.':draft.info==='hfzero'?'Hugging Face ZeroGPU daily minutes apply.':draft.info==='hf'?'Hugging Face inference credits may apply.':draft.info==='ovh'?'OVHcloud free anonymous SDXL; subject to rate limits.':'Workers AI inference quota applies.'):'Modal GPU charges may apply.'),kb([[btn('✅ Generate now','generate'),btn('✏️ Edit','edit')],[btn('Cancel','cancel')]]))
+  await tell(env,chat,'Review the '+(draft.intent==='image_gen'?'image':'video')+' request:\n\n'+clip(chosen,1300)+'\n\nGenerate now? '+(draft.intent==='image_gen'?(draft.info==='modelscope'?'ModelScope grain credits may apply.':draft.info==='imageup'?'Image-upscaling.net free quota or balance applies.':draft.info==='hfzero'?'Hugging Face ZeroGPU daily minutes apply.':draft.info==='hf'?'Hugging Face inference credits may apply.':draft.info==='ovh'?'OVHcloud free anonymous SDXL; subject to rate limits.':draft.info==='best'?'Quality-first: Qwen-Image-2.1 ZeroGPU (research/noncommercial license; free GPU minutes), otherwise OVHcloud SDXL. For commercial images, choose OVHcloud manually. No paid credits and no retry after submission.':'Workers AI inference quota applies.'):'Modal GPU charges may apply.'),kb([[btn('✅ Generate now','generate'),btn('✏️ Edit','edit')],[btn('Cancel','cancel')]]))
   return
  }
  if(choice==='generate'){
@@ -320,7 +321,8 @@ export async function pollNaturalActions(env:Env){
   const running={...d,stage:'running'}
   if(!await swap(env,row.chat_id,row.state,running))continue
   try{
-   if(d.intent==='image_gen'&&d.info==='imageup')await queueImageUp(env,row.chat_id,d.messageId,d.chosen||d.prompt,d.upgen||{model:'Z-Image-Turbo',aspect:'1:1'})
+   if(d.intent==='image_gen'&&d.info==='best')await queueBestImage(env,row.chat_id,d.messageId,d.chosen||d.prompt)
+   else if(d.intent==='image_gen'&&d.info==='imageup')await queueImageUp(env,row.chat_id,d.messageId,d.chosen||d.prompt,d.upgen||{model:'Z-Image-Turbo',aspect:'1:1'})
    else if(d.intent==='image_gen'&&d.info==='hfzero')await queueZeroImage(env,row.chat_id,d.messageId,d.chosen||d.prompt)
    else if(d.intent==='image_gen'&&d.info==='modelscope')await queueModelScopeImage(env,row.chat_id,d.messageId,d.chosen||d.prompt)
    else if(d.intent==='image_gen'&&(d.info==='ovh'||d.info==='hf'))await queueExternalImage(env,row.chat_id,d.messageId,d.chosen||d.prompt,d.info)
