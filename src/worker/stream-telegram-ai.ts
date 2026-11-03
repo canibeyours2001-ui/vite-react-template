@@ -66,8 +66,18 @@ export async function streamAIToTelegram(env:AiEnv,chatId:string,replyMessage:nu
   return full.slice(0,3850)
  }catch(error){
   const name=error instanceof Error?error.name:'unknown'
-  console.error('FreeLLM streaming failed:',name)
-  full=(full.trim()||'The AI service could not complete this answer. Please retry.')+' \n\n⚠️ Stream ended unexpectedly.'
+  const reason=error instanceof Error?error.message:'Provider request failed'
+  // Log a short category and message, never credentials, headers, or submitted prompts.
+  console.error('FreeLLM chat failure',name,String(reason).slice(0,120))
+  const match=reason.match(/HTTP (\d{3})/)
+  const status=match?Number(match[1]):null
+  const help=status===401||status===403?'FreeLLM rejected the API key or access. Check the key in Cloudflare.':
+   status===402?'FreeLLM reports insufficient credits.':
+   status===429?'FreeLLM is rate-limiting requests. Try again later.':
+   status?'FreeLLM returned HTTP '+status+'. Please try again later.':
+   name==='TimeoutError'?'FreeLLM took too long to respond.':
+   'The FreeLLM connection failed before a complete response arrived.'
+  full=(full.trim()?full.trim()+'\n\n⚠️ '+help:'⚠️ '+help)
   await edit(true)
   return full.slice(0,3850)
  }

@@ -6,7 +6,9 @@ export type TextMessage={role:'system'|'user'|'assistant';content:string}
 export type FreeLlmEnv={FREE_LLM_API_KEY?:string;FREE_LLM_BASE_URL?:string}
 function endpoint(env:FreeLlmEnv):string{
  if(!env.FREE_LLM_API_KEY)throw new Error('FreeLLM API key is not configured')
- const base=env.FREE_LLM_BASE_URL||''
+ // A fixed, controlled fallback avoids TypeError when deployments omit the plain-text binding.
+ // The key still comes exclusively from Cloudflare secrets.
+ const base=env.FREE_LLM_BASE_URL?.trim()||'https://freellm.healthylifeliving.store/v1'
  const u=new URL(base)
  if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash)
   throw new Error('Invalid FreeLLM base URL')
@@ -21,7 +23,7 @@ export async function freeLlmRequest(env:FreeLlmEnv,messages:TextMessage[],opts?
   body:JSON.stringify({model:opts?.model||'auto',messages,max_tokens:opts?.max_tokens||650,temperature:opts?.temperature??0.35,stream:opts?.stream||false}),
   signal:AbortSignal.timeout(opts?.stream?100000:45000)
  })
- if(!resp.ok){console.error('FreeLLM HTTP',resp.status);throw new Error('FreeLLM request failed (HTTP '+resp.status+')')}
+ if(!resp.ok){console.error('FreeLLM HTTP',resp.status);await resp.body?.cancel().catch(()=>undefined);throw new Error('FreeLLM request failed (HTTP '+resp.status+')')}
  return resp
 }
 export async function completeFreeLlm(env:FreeLlmEnv,messages:TextMessage[],opts?:{max_tokens?:number;temperature?:number;model?:string}):Promise<string>{

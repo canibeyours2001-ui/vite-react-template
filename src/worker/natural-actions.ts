@@ -17,7 +17,7 @@ type DB={prepare:(sql:string)=>{bind:(...values:(number|string)[])=>{run:()=>Pro
 type Env={FREE_LLM_API_KEY?:string;FREE_LLM_BASE_URL?:string;MEMORY_DB:DB;TELEGRAM_BOT_TOKEN:string;TELEGRAM_WEBHOOK_SECRET:string;KAGGLE_API_TOKEN?:string;GEMINI_API_KEY?:string;AI:{run:(model:string,input:{messages:Array<{role:'system'|'user'|'assistant';content:string}>;max_tokens:number;temperature?:number;stream?:boolean})=>Promise<unknown>};MODAL_WAN_API_BASE?:string;MODAL_WAN_API_KEY?:string;MVSEP_API_TOKEN?:string;IMAGE_CLIENT_IDS?:string}
 type Intent='image_gen'|'video_gen'|'video_image'|'voice_tts'|'voice_design'|'upscale'|'removebg'|'reimagine'|'audio_gen'|'separate'|'dub'|'motion'|'usage'|'chat'
 type Draft={intent:Intent;prompt:string;best?:string;chosen?:string;stage:string;messageId:number;file?:Media;created:number;info?:string;upgen?:UpgenConfig}
-const MAX_AGE=30*60;
+const MAX_AGE=2*60*60;
 const clip=(s:string,n=1500)=>s.slice(0,n)
 const btn=(label:string,data:string)=>({text:label,callback_data:'na:'+data})
 const kb=(rows:ReturnType<typeof btn>[][])=>({inline_keyboard:rows})
@@ -49,7 +49,13 @@ async function swap(env:Env,chat:string,raw:string,draft:Draft){
  const result=await env.MEMORY_DB.prepare('UPDATE natural_actions SET state=?,updated_at=unixepoch() WHERE chat_id=? AND state=?').bind(JSON.stringify(draft),chat,raw).run()
  return result.meta.changes===1
 }
-const plainPrompt=(text:string)=>text.replace(/^\/?(?:please\s+)?(?:generate|create|make|draw|render|design|produce)\s+(?:me\s+)?(?:an?\s+)?(?:image|picture|photo|artwork|illustration|video|clip|animation)\s*(?:of|showing|about|with|where|that|:)?\s*/i,'').trim()||text
+/** Remove only complete request phrases. The former regex matched "image"
+ * inside "images" and left the single-letter prompt "s". */
+export function plainPrompt(text:string):string{
+ const cleaned=text.replace(/^\/?(?:please\s+)?(?:generate|create|make|draw|render|design|produce)\s+(?:me\s+)?(?:an?\s+)?(?:images?|pictures?|photos?|artworks?|illustrations?|videos?|clips?|animations?)\b(?:\s+(?:of|showing|about|with|where|that)\b|\s*[:\-])?\s*/i,'').trim()
+ return cleaned
+}
+
 function intentHint(text:string,hasImage:boolean,hasVideo:boolean):Intent|'ambiguous'|null {
  const t=text.toLowerCase().trim()
  if(/^(how|why|what|which|can i|could i|is it|does|do you|tell me|explain)\b/.test(t))return null
@@ -64,6 +70,7 @@ function intentHint(text:string,hasImage:boolean,hasVideo:boolean):Intent|'ambig
  if(/(?:text.to.speech|tts|narrat|voiceover|voice over|read (?:this|the)|speak (?:these|this)|make (?:this|the) (?:text|script) (?:into|as) (?:speech|audio))/.test(t))return 'voice_tts'
  if(hasImage&&/(?:animate|turn|convert|transform|make|generate|create).{0,50}(?:video|clip|animation|move|motion)|(?:video|clip).{0,40}(?:from|of|with) (?:this|image|photo)/.test(t))return 'video_image'
  if(/(?:generate|create|make|produce|render)\s+(?:me\s+)?(?:an?\s+)?(?:cinematic\s+)?(?:short\s+)?(?:ai\s+)?(?:video|film|clip|animation)|(?:text.to.video)/.test(t))return hasImage?'video_image':'video_gen'
+ if(/^(?:(?:cinematic|photorealistic|realistic|professional|editorial)\s+)?(?:photo|photograph|picture|image|portrait|illustration)\s+of\b/.test(t))return 'image_gen'
  if(/(?:generate|create|make|produce|draw|render|design)\s+(?:me\s+)?(?:an?\s+)?(?:high.quality\s+|cinematic\s+|photorealistic\s+)?(?:image|picture|photo|artwork|illustration|poster)|(?:text.to.image)/.test(t))return 'image_gen'
  if(/^(?:show|check)\s+(?:me\s+)?(?:my\s+)?(?:credit|balance|usage|quota|jobs)/.test(t))return 'usage'
  if(hasVideo&&t)return 'ambiguous'
@@ -174,7 +181,8 @@ export async function handleNaturalMessage(env:Env,msg:Msg):Promise<boolean>{
  if(intent==='usage') {await handleMediaStudioMessage(env,{chat:msg.chat,from:msg.from,text:'/usage',message_id:msg.message_id});return true}
  if(intent==='image_gen'||intent==='video_gen'||intent==='video_image'){
    const prompt=clip(plainPrompt(t),2048)
-   await newDraft(env,chat,{intent,prompt,stage:intent==='video_image'&&!fileImage?'await_media':'review',messageId:msg.message_id,file:fileImage,created:Date.now(),info:intent==='image_gen'?(/image.upscal/i.test(t)?'imageup':/modelscope/i.test(t)?'modelscope':/hugging\s*face|\bhf\b/i.test(t)?'hf':'best'):undefined});return true
+   const needsPrompt=prompt.length<5 || /^(?:s|image|images|photo|photos|picture|pictures)$/i.test(prompt)
+   await newDraft(env,chat,{intent,prompt:needsPrompt?'':prompt,stage:needsPrompt?'await_prompt':intent==='video_image'&&!fileImage?'await_media':'review',messageId:msg.message_id,file:fileImage,created:Date.now(),info:intent==='image_gen'?(/image.upscal/i.test(t)?'imageup':/modelscope/i.test(t)?'modelscope':/hugging\s*face|\bhf\b/i.test(t)?'hf':'best'):undefined});return true
  }
  if(intent==='audio_gen'){
    await startNaturalAudio(env,chat,clip(plainPrompt(t),1600));return true
