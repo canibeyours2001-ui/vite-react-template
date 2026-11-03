@@ -1,4 +1,4 @@
-import {aiFooter,aiUsage,countAi} from './usage-receipts'
+import {aiFooter,countAi} from './usage-receipts'
 /** Live Telegram answer updates over Workers AI streaming SSE. Never exposes model tokens or secrets. */
 type Msg={role:'system'|'user'|'assistant';content:string}
 type AiEnv={TELEGRAM_BOT_TOKEN:string;MEMORY_DB:import('./usage-receipts').UsageDb;AI: {run:(model:string,params:Record<string,unknown>)=>Promise<unknown>}}
@@ -12,11 +12,8 @@ async function tgCall(env:AiEnv,method:string,payload:Record<string,unknown>):Pr
  return await response.json() as Out
 }
 export async function streamAIToTelegram(env:AiEnv,chatId:string,replyMessage:number,messages:Msg[],modelId:string):Promise<string>{
- const daily=await aiUsage(env.MEMORY_DB,chatId)
- if(daily>=100){
-  await tgCall(env,'sendMessage',{chat_id:chatId,text:'Your 100-request daily bot budget is reached (not Cloudflare neuron quota). Resets at 00:00 UTC. /usage shows your counters.'})
-  return 'Bot daily request budget reached'
- }
+ // Count requests for information only; do not impose an artificial daily limit.
+ // Workers AI itself rejects requests when the Cloudflare plan quota is exhausted.
  await countAi(env.MEMORY_DB,chatId)
  const opening=await tgCall(env,'sendMessage',{chat_id:chatId,text:'🤖 Thinking…',reply_parameters:{message_id:replyMessage}})
  const msgId=opening.result?.message_id

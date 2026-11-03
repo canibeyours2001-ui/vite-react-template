@@ -1,7 +1,7 @@
 /**
  * Compact provider receipts. No invented cost, GPU runtime or credit counts.
  * Image quota is per provider-reported client. MVSEP premium_minutes are credits.
- * AI request bar is an explicit local 100-message DAILY BOT BUDGET (not Cloudflare neurons).
+ * AI call count is informational only. Cloudflare enforces the actual Workers AI quota.
  */
 export type UsageDb={prepare(sql:string):{bind(...v:(string|number)[]):{
  run:()=>Promise<unknown>;all:<T>()=>Promise<{results:T[]}>
@@ -65,5 +65,5 @@ export async function countAi(db:UsageDb,chat:string){
 }
 export async function aiFooter(db:UsageDb,chat:string){
  const used=await aiUsage(db,chat)
- return '🤖 Bot AI requests: '+Math.min(used,100)+'/100 '+meter(Math.min(used,100),100)+' · local daily limit; Cloudflare neuron usage is separate'
+ return '🤖 Bot AI calls today: '+used.toLocaleString('en-US')+' (no local daily cap) · Cloudflare Neurons: view Workers AI dashboard; resets at 00:00 UTC'
 }

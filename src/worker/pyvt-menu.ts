@@ -48,8 +48,9 @@ export async function startDubMenu(env:DubMenuEnv,chat:string):Promise<void>{
  await send(env,'sendMessage',{chat_id:chat,
   text:'🎬 pyVideoTrans dubbing\nStep 1/3 — Choose the language you want in the final video.',
   reply_markup:buttons([
-   [{text:'🇬🇧 English',callback_data:'pd:lang:en'}],
-   [{text:'🇲🇲 Burmese (မြန်မာ)',callback_data:'pd:lang:my'}]
+   [{text:'🇨🇳 Chinese → 🇬🇧 English',callback_data:'pd:lang:en-zh'}],
+   [{text:'🇲🇲 Burmese → 🇬🇧 English',callback_data:'pd:lang:en'}],
+   [{text:'🇬🇧 English → 🇲🇲 Burmese',callback_data:'pd:lang:my'}]
   ])})
 }
 export async function selectedDubCommand(env:DubMenuEnv,chat:string):Promise<string|null>{
@@ -60,7 +61,7 @@ export async function selectedDubCommand(env:DubMenuEnv,chat:string):Promise<str
  const s=r.results[0]
  if(!s||s.stage!=='ready')return null
  // Literal command generated only from validated and private D1 menu selections.
- if(!['en','my'].includes(s.source_lang)||!['en','my'].includes(s.target_lang)||
+ if(!['en','my','zh-cn'].includes(s.source_lang)||!['en','my'].includes(s.target_lang)||
   !['vox','edge'].includes(s.engine))return null
  if(s.engine==='vox'){
   if(s.voice_slot<0||s.voice_slot>5)return null
@@ -80,14 +81,15 @@ export async function dubMenuCallback(env:DubMenuEnv,cb:DubCallback):Promise<voi
   ).bind(chat).all<Selection>()).results[0]
   if(!current)throw Error('Selection expired. Restart /dub.')
   const [_,action,value]=cb.data.split(':')
-  if(action==='lang'&&current.stage==='target'&&['en','my'].includes(value)){
-   const source=value==='en'?'my':'en'
+  if(action==='lang'&&current.stage==='target'&&['en','my','en-zh'].includes(value)){
+   const source=value==='en-zh'?'zh-cn':value==='en'?'my':'en'
+   const target=value==='en-zh'?'en':value
    await env.MEMORY_DB.prepare(
     "UPDATE pyvt_dub_selections SET source_lang=?,target_lang=?,stage='engine',updated_at=unixepoch() "+
     "WHERE chat_id=? AND stage='target'"
-   ).bind(source,value,chat).run()
+   ).bind(source,target,chat).run()
    await send(env,'sendMessage',{chat_id:chat,
-    text:'Step 2/3 — '+(source==='my'?'Burmese':'English')+' → '+(value==='my'?'Burmese':'English')+
+    text:'Step 2/3 — '+(source==='zh-cn'?'Chinese':source==='my'?'Burmese':'English')+' → '+(target==='my'?'Burmese':'English')+
      '\nChoose the dubbing engine.',
     reply_markup:buttons([
      [{text:'🔊 Microsoft Edge TTS',callback_data:'pd:engine:edge'}],
@@ -144,14 +146,14 @@ export async function dubMenuCallback(env:DubMenuEnv,cb:DubCallback):Promise<voi
     "UPDATE pyvt_dub_selections SET voice=?,voice_slot=?,stage='ready',updated_at=unixepoch() "+
     "WHERE chat_id=? AND stage='voice'"
    ).bind(voice,slot,chat).run()
-   const src=current.source_lang==='my'?'Burmese':'English'
+   const src=current.source_lang==='zh-cn'?'Chinese':current.source_lang==='my'?'Burmese':'English'
    const trg=current.target_lang==='my'?'Burmese':'English'
    await send(env,'sendMessage',{chat_id:chat,text:
     '✅ Selection saved!\n'+src+' → '+trg+
     '\nEngine: '+(current.engine==='edge'?'Microsoft Edge TTS':'VoxCPM2')+
     '\nVoice: '+label+
     '\n\nSend a video up to 20 MB to use these settings, or reply to one with /dub.'+
-    '\nVideo processing is still in compatibility testing, so no Kaggle GPU run will start until it is enabled.'+
+    '\nKaggle will process videos with audible speech; GPU use depends on your selected engine.'+
     '\nSend /dub to change the language or voice.'})
    return
   }

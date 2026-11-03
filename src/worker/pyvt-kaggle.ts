@@ -41,12 +41,13 @@ async function isReady(env:VideoEnv):Promise<boolean>{
 }
 const HELP='Video translation + dubbing (private Kaggle jobs):\n'+
  '/dub — choose English/Burmese target, Edge or VoxCPM2, and voice using buttons.\n'+
+ '/dub edge zh en — Chinese/Mandarin video into English (Aria); ch and zh-cn are aliases.\n'+
  '/dub edge en my — dub English video into Burmese using Microsoft Edge TTS (Nilar).\n'+
  '/dub vox en my — dub with VoxCPM2 on Kaggle T4 GPU.\n'+
  '/dub vox en my 1 — reuse your saved VoxCPM2 voice slot 1.\n'+
  '/dub_status — latest dubbing job status.\n'+
  'Attach a video <=20MB with /dub ... as its caption, or reply to a video with the command.\n'+
- 'This beta is not enabled until Kaggle runtime testing confirms the video pipeline.'
+ 'Input must have audible speech. Speech detection may reject silent or music-only videos.'
 const defaultVoices:Record<string,string>={
  my:'my-MM-NilarNeural',en:'en-US-AriaNeural',zh:'zh-CN-XiaoxiaoNeural',
  th:'th-TH-PremwadeeNeural',ja:'ja-JP-NanamiNeural'
@@ -99,9 +100,13 @@ export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:stri
    await send('Video dubbing on Kaggle is in compatibility testing. No GPU job submitted. '+HELP)
    return true
   }
-  const parsed=text.trim().match(/^\/dub(?:@[a-zA-Z0-9_]+)?\s+(edge|vox)\s+([a-z]{2,3})\s+([a-z]{2,3})(?:\s+([a-zA-Z0-9-]{1,80}))?$/i)
+  const parsed=text.trim().match(/^\/dub(?:@[a-zA-Z0-9_]+)?\s+(edge|vox)\s+([a-z]{2,3}(?:-[a-z]{2,3})?)\s+(en|my)(?:\s+([a-zA-Z0-9-]{1,80}))?$/i)
   if(!parsed){await send(HELP);return true}
-  const engine=parsed[1].toLowerCase(),sourceLang=parsed[2].toLowerCase(),targetLang=parsed[3].toLowerCase()
+  const engine=parsed[1].toLowerCase(),inputLang=parsed[2].toLowerCase(),targetLang=parsed[3].toLowerCase()
+  const sourceLang=['ch','cn','zh','zh-cn'].includes(inputLang)?'zh-cn':inputLang
+  if(!['en','my','zh-cn'].includes(sourceLang)){
+   await send('Supported inputs: Chinese (zh/ch), English (en), Burmese (my).');return true
+  }
   const rawVoice=parsed[4]
   const slot=engine==='vox'&&rawVoice&&/^[1-5]$/.test(rawVoice)?Number(rawVoice):0
   if(engine==='vox'&&rawVoice&&!slot){await send('For VoxCPM2 use a saved slot 1–5, e.g. /dub vox en my 1. Omit it for default voice.');return true}
@@ -229,6 +234,9 @@ function renderKernel(job:Job,inputUrl:string,voiceB64:string):string{
  "subprocess.run(['uv','python','install','3.10'],check=True,timeout=240)",
  "subprocess.run(['uv','sync','--python','3.10','--no-dev','--project',str(repo)],check=True,timeout=2100)",
  "python=repo/'.venv/bin/python'",
+ "# uv.lock installs edge-tts 7.2.7, which gets HTTP 403 on current Edge speech WebSocket.",
+ "if TASK['provider']=='edge':",
+ "    subprocess.run(['uv','pip','install','--python',str(python),'edge-tts==7.3.1'],check=True,timeout=240)",
  "command=[str(python),str(repo/'tools/kaggle_video_dub_job.py'),'--task','vtv','--input',str(video),"+
   "'--tts',TASK['provider'],'--voice-role',TASK['voice'],'--source-language-code',TASK['source'],"+
   "'--target-language-code',TASK['target'],'--translate-type','0','--whisper-model','small',"+
