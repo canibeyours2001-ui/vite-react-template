@@ -8,7 +8,15 @@ subprocess.run([sys.executable,'-m','pip','install','-q','faster-whisper'],check
 from faster_whisper import WhisperModel
 result=pathlib.Path('/kaggle/working/pyvideotrans_result.mp4')
 model=WhisperModel('small',device='cpu',compute_type='int8')
-segments,_=model.transcribe(str(result),language=TASK['target'],word_timestamps=True,vad_filter=True,beam_size=2)
+# Feed an ndarray, not an MP4 path. Kaggle's PyAV build lacks the
+# metadata_errors argument used by faster-whisper's path decoder.
+import numpy as np
+wav_bytes=subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-i',str(result),
+    '-vn','-ac','1','-ar','16000','-f','f32le','pipe:1'],check=True,
+    stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=180).stdout
+audio=np.frombuffer(wav_bytes,dtype=np.float32)
+if audio.size<16000: raise RuntimeError('Dubbed audio could not be decoded for karaoke')
+segments,_=model.transcribe(audio,language=TASK['target'],word_timestamps=True,vad_filter=True,beam_size=2)
 words=[]
 for seg in segments:
     for w in (seg.words or []):
