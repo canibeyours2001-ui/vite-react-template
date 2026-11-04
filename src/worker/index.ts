@@ -6,8 +6,10 @@ import {runFreeLlmRecoveryCheck} from './llm-once-diagnostic'
 import {pollModelScopeImages,modelScopeCommand} from './modelscope-image'
 import {pollExternalImages,checkImageProviders} from './external-image'
 import {pollZeroImages,zeroStatus} from './hf-zerogpu'
+import {handleLtxCommand,pollLtxJobs} from './hf-ltx-video'
 import {pollImageUp} from './imageup-generation'
 import {pollWanAuto} from './wan-auto'
+import {hfWanIntercept,hfWanScheduled} from './hf-wan-zerogpu'
 import { handleMediaStudioMessage, handleMediaStudioCallback, pollMediaStudio, mediaStudioCommands } from './media-studio'
 import { Hono } from 'hono'
 import { handleAudioTelegram, pollAudioJobs, mvsepStatus, checkMvsepAccount } from './audio-tools'
@@ -46,6 +48,7 @@ type Bindings = {
   GEMINI_API_KEY?: string
   MODELSCOPE_API_TOKEN?: string
   HUGGINGFACE_API_TOKEN?: string
+  HUGGINGFACE2_API_TOKEN?: string
   AI: AIClient
   DUB_UPLOADS: import('./pyvt-upload').UploadEnv['DUB_UPLOADS']
   MEMORY_DB: {
@@ -312,6 +315,7 @@ app.post('/telegram/webhook', async (c) => {
       await pyvtRememberMedia(c.env,msg,key).catch(()=>undefined)
       if(/^\/imageproviders(?:@\w+)?$/i.test(text)){await checkImageProviders(c.env,key);return}
       if(/^\/hfzerostatus(?:@\w+)?$/i.test(text)){await zeroStatus(c.env,key);return}
+      if(await handleLtxCommand(c.env,msg,key,text))return
       if(await modelScopeCommand(c.env,key,text)) return
       if(/^\/aimodel(?:@[A-Za-z0-9_]+)?$/i.test(text)) {
         await handleAiModelCommand(c.env,key)
@@ -682,6 +686,12 @@ app.post('/telegram/webhook', async (c) => {
           '/hfimage PROMPT — Hugging Face FLUX\n' +
           '/hfzero PROMPT — Hugging Face ZeroGPU free minutes\n' +
           '/hfzerostatus — status of ZeroGPU image\n' +
+          '/ltx — photo to a 2-second video with native sound (ZeroGPU)\n' +
+          '/ltxprobe — check the LTX-2.5 Space API\n' +
+          '/ltx_status — your latest LTX video job\n' +
+          '/gpuquota — HF ZeroGPU quota for token 2\n' +
+          '/wananimate — free HF Wan character animation (experimental)\n' +
+          '/wan_status — latest HF Wan job\n' +
           '/imageproviders — provider status and token check\n' +
           '/msstatus — ModelScope image job status\n' +
           '/upscale — select model and scale from image-upscaling.net\n' +
@@ -707,6 +717,7 @@ app.post('/telegram/webhook', async (c) => {
           '/dub — choose English/Burmese target, TTS engine and voice\n' +
           '/dub_help — pyVideoTrans video dubbing with Edge or VoxCPM2\n' +
           '/dub_status — last Kaggle video dubbing status\n' +
+          '/dub_recover — retrieve an already generated MP4 from a failed job without rerendering\n' +
           '/dub_upload — upload large videos up to 1 GiB in your browser\n' +
           '/voxvoices — show five saved VoxCPM2 voices\n' +
           '/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n' +
@@ -1016,6 +1027,12 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'hfimage',description:'Generate Hugging Face FLUX image'},
         {command:'hfzero',description:'Generate image using free ZeroGPU time'},
         {command:'hfzerostatus',description:'Check HF ZeroGPU image status'},
+        {command:'ltx',description:'Image to video with native sound on HF ZeroGPU'},
+        {command:'ltxprobe',description:'Check HF LTX-2.5 image-to-video Space'},
+        {command:'ltx_status',description:'Check LTX-2.5 video progress'},
+        {command:'gpuquota',description:'Check free Hugging Face ZeroGPU quota'},
+        {command:'wananimate',description:'HF Wan character animation (experimental)'},
+        {command:'wan_status',description:'Check HF Wan animation job'},
         {command:'imageproviders',description:'Check image-provider connections'},
         {command:'imageup',description:'Image-upscaling.net image generation'},
         {command:'imageup_status',description:'Check image-upscaling.net image jobs'},
@@ -1029,6 +1046,7 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'dub_help',description:'pyVideoTrans video dubbing help'},
         {command:'dub_upload',description:'Upload videos up to 1 GiB'},
         {command:'dub_status',description:'Check pyVideoTrans dubbing status'},
+        {command:'dub_recover',description:'Recover saved Kaggle MP4 without GPU rerun'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
         {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
@@ -1077,6 +1095,12 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'hfimage',description:'Generate Hugging Face FLUX image'},
         {command:'hfzero',description:'Generate image using free ZeroGPU time'},
         {command:'hfzerostatus',description:'Check HF ZeroGPU image status'},
+        {command:'ltx',description:'Image to video with native sound on HF ZeroGPU'},
+        {command:'ltxprobe',description:'Check HF LTX-2.5 image-to-video Space'},
+        {command:'ltx_status',description:'Check LTX-2.5 video progress'},
+        {command:'gpuquota',description:'Check free Hugging Face ZeroGPU quota'},
+        {command:'wananimate',description:'HF Wan character animation (experimental)'},
+        {command:'wan_status',description:'Check HF Wan animation job'},
         {command:'imageproviders',description:'Check image-provider connections'},
         {command:'imageup',description:'Image-upscaling.net image generation'},
         {command:'imageup_status',description:'Check image-upscaling.net image jobs'},
@@ -1090,6 +1114,7 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'dub_help',description:'pyVideoTrans video dubbing help'},
         {command:'dub_upload',description:'Upload videos up to 1 GiB'},
         {command:'dub_status',description:'Check pyVideoTrans dubbing status'},
+        {command:'dub_recover',description:'Recover saved Kaggle MP4 without GPU rerun'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
         {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
@@ -1119,14 +1144,14 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
 }
 
 export default {
-  fetch: app.fetch,
+  fetch(request: Request,env: Bindings,ctx: ExecutionContext) { return hfWanIntercept(request,env,ctx,app.fetch) },
   async scheduled(_event: unknown, env: Bindings): Promise<void> {
     try {
       await registerTelegramWebhook(env)
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollLtxJobs(env),hfWanScheduled(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }
