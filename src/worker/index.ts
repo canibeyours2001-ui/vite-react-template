@@ -6,6 +6,7 @@ import {runFreeLlmRecoveryCheck} from './llm-once-diagnostic'
 import {pollModelScopeImages,modelScopeCommand} from './modelscope-image'
 import {pollExternalImages,checkImageProviders} from './external-image'
 import {pollZeroImages,zeroStatus} from './hf-zerogpu'
+import {handleLtxCommand,pollLtxJobs} from './hf-ltx-video'
 import {pollImageUp} from './imageup-generation'
 import {pollWanAuto} from './wan-auto'
 import { handleMediaStudioMessage, handleMediaStudioCallback, pollMediaStudio, mediaStudioCommands } from './media-studio'
@@ -312,6 +313,7 @@ app.post('/telegram/webhook', async (c) => {
       await pyvtRememberMedia(c.env,msg,key).catch(()=>undefined)
       if(/^\/imageproviders(?:@\w+)?$/i.test(text)){await checkImageProviders(c.env,key);return}
       if(/^\/hfzerostatus(?:@\w+)?$/i.test(text)){await zeroStatus(c.env,key);return}
+      if(await handleLtxCommand(c.env,msg,key,text))return
       if(await modelScopeCommand(c.env,key,text)) return
       if(/^\/aimodel(?:@[A-Za-z0-9_]+)?$/i.test(text)) {
         await handleAiModelCommand(c.env,key)
@@ -682,6 +684,9 @@ app.post('/telegram/webhook', async (c) => {
           '/hfimage PROMPT — Hugging Face FLUX\n' +
           '/hfzero PROMPT — Hugging Face ZeroGPU free minutes\n' +
           '/hfzerostatus — status of ZeroGPU image\n' +
+          '/ltx — photo to a 2-second video with native sound (ZeroGPU)\n' +
+          '/ltxprobe — check the LTX-2.5 Space API\n' +
+          '/ltx_status — your latest LTX video job\n' +
           '/imageproviders — provider status and token check\n' +
           '/msstatus — ModelScope image job status\n' +
           '/upscale — select model and scale from image-upscaling.net\n' +
@@ -1016,6 +1021,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'hfimage',description:'Generate Hugging Face FLUX image'},
         {command:'hfzero',description:'Generate image using free ZeroGPU time'},
         {command:'hfzerostatus',description:'Check HF ZeroGPU image status'},
+        {command:'ltx',description:'Image to video with native sound on HF ZeroGPU'},
+        {command:'ltxprobe',description:'Check HF LTX-2.5 image-to-video Space'},
+        {command:'ltx_status',description:'Check LTX-2.5 video progress'},
         {command:'imageproviders',description:'Check image-provider connections'},
         {command:'imageup',description:'Image-upscaling.net image generation'},
         {command:'imageup_status',description:'Check image-upscaling.net image jobs'},
@@ -1077,6 +1085,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'hfimage',description:'Generate Hugging Face FLUX image'},
         {command:'hfzero',description:'Generate image using free ZeroGPU time'},
         {command:'hfzerostatus',description:'Check HF ZeroGPU image status'},
+        {command:'ltx',description:'Image to video with native sound on HF ZeroGPU'},
+        {command:'ltxprobe',description:'Check HF LTX-2.5 image-to-video Space'},
+        {command:'ltx_status',description:'Check LTX-2.5 video progress'},
         {command:'imageproviders',description:'Check image-provider connections'},
         {command:'imageup',description:'Image-upscaling.net image generation'},
         {command:'imageup_status',description:'Check image-upscaling.net image jobs'},
@@ -1126,7 +1137,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollLtxJobs(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }
