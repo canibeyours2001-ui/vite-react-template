@@ -717,6 +717,7 @@ app.post('/telegram/webhook', async (c) => {
           '/dub — choose English/Burmese target, TTS engine and voice\n' +
           '/dub_help — pyVideoTrans video dubbing with Edge or VoxCPM2\n' +
           '/dub_status — last Kaggle video dubbing status\n' +
+          '/dub_recover — retrieve an already generated MP4 from a failed job without rerendering\n' +
           '/dub_upload — upload large videos up to 1 GiB in your browser\n' +
           '/voxvoices — show five saved VoxCPM2 voices\n' +
           '/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n' +
@@ -1045,6 +1046,7 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'dub_help',description:'pyVideoTrans video dubbing help'},
         {command:'dub_upload',description:'Upload videos up to 1 GiB'},
         {command:'dub_status',description:'Check pyVideoTrans dubbing status'},
+        {command:'dub_recover',description:'Recover saved Kaggle MP4 without GPU rerun'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
         {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
@@ -1112,6 +1114,7 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'dub_help',description:'pyVideoTrans video dubbing help'},
         {command:'dub_upload',description:'Upload videos up to 1 GiB'},
         {command:'dub_status',description:'Check pyVideoTrans dubbing status'},
+        {command:'dub_recover',description:'Recover saved Kaggle MP4 without GPU rerun'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
         {command:'voxrename',description:'Rename VoxCPM2 saved voice'},

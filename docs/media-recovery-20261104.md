@@ -16,3 +16,8 @@ The Cloudflare Worker was independently modified after the GitHub main revision 
 
 ## Validation
 TypeScript compilation, full Vite build, mocked LTX quota/command tests, Wan duration/quota tests (11 cases), and embedded Python syntax checks passed. Fresh end-to-end Kaggle subtitle recovery and real Telegram LTX delivery are not yet verified.
+
+## Existing-MP4 recovery command
+Added /dub_recover to the authorized Telegram dubbing commands. For the most recent failed Kaggle version in that chat, this queues an output-only retrieval. The cron reads the existing Kaggle output URL and sends the MP4 through Telegram; it does not POST a new Kaggle kernel push. Status transitions ensure one delivery attempt and avoid duplicate sends when the delivery outcome is ambiguous. If the output URL is unavailable, the bot points the user to Kaggle Outputs. Mock integration checked queued -> delivery -> done, exactly one sendVideo, and no new Kaggle run.
+
+This new command is STAGED ONLY and is not yet available in the production bot.
