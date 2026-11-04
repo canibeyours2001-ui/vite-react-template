@@ -37,3 +37,11 @@ For Low Res Character Swap, the Space's current declared GPU reservations are: 5
 An additive D1 schema change adds `duration_s INTEGER NOT NULL DEFAULT 5` to `hf_wan22_jobs`. Existing jobs are preserved. Test the pure selection and mocked API interactions using `node tests/hf-wan-auto-duration.test.cjs`.
 
 **Production rollback:** use the prior deployment version from the Cloudflare Deployments panel; the added column can remain because older code ignores it.
+
+### 2026-11-04 rollout
+
+- **Deployed Worker version:** `74ef2b73-d42a-419a-bd9f-ab18c76d4632` at 100% traffic.
+- **Deployment ID:** `cb42338a-8ae2-4110-89c7-cd8c8f3a4432`.
+- **Immediate rollback version:** `5bf05e79-6458-4585-ab09-c4824e823687`.
+- Verified Cloudflare active version, 23 unchanged bindings, D1 duration column, original webhook, quota command, Gradio duration forwarding, and 401 on unauthenticated Telegram requests.
+- Not yet tested with a real Telegram-driving video and the user's HF2 account token; actual ZeroGPU account quota, performance and finished render cannot be asserted from these checks.
