@@ -44,7 +44,7 @@ for i,(start,end,token) in enumerate(words):
         if current: parts.append(r'{\c&H0000D7FF&\fscx108\fscy108}'+txt+r'{\c&H00FFFFFF&\fscx100\fscy100}')
         else: parts.append(txt)
     caption=' '.join(parts)
-    lines.append('Dialogue: 0,'+at(start)+','+at(max(end,start+0.13))+',Karaoke,,0,0,0,,'+caption+'\\n')
+    lines.append('Dialogue: 0,'+at(start)+','+at(max(end,start+0.13))+',Karaoke,,0,0,0,,'+caption+'\n')
 ass=pathlib.Path('/kaggle/working/pyvt_karaoke.ass')
 ass.write_text(''.join(lines),encoding='utf-8')
 rendered=pathlib.Path('/kaggle/working/pyvt_karaoke_render.mp4')
