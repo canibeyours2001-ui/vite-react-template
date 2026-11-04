@@ -27,12 +27,28 @@ async function zeroGpuReady(env:BestImageEnv):Promise<boolean>{
   return !!data.named_endpoints?.['/generate']
  }catch{return false}
 }
+/** Keep a failing HF ZeroGPU Space out of automatic routing for one hour.
+ * A reachable Space is not proof that its last generation succeeded.
+ * This is only a pre-submission provider choice: never retry a submitted job.
+ * An unavailable D1 status table does not block an otherwise working Space.
+ */
+async function zeroGpuRecentlyFailed(env:BestImageEnv):Promise<boolean>{
+ try{
+  const rows=await env.MEMORY_DB.prepare(
+   'SELECT status,created_at FROM hf_zero_image_jobs ORDER BY created_at DESC LIMIT 1'
+  ).bind().all<{status:string;created_at:number}>()
+  const last=rows.results[0]
+  return !!last && last.status==='failed' &&
+   Number.isFinite(last.created_at) &&
+   Math.floor(Date.now()/1000)-last.created_at<3600
+ }catch{return false}
+}
 /** A fixed ranking for the connected no-extra-payment providers.
  * Paid Qwen-Image-2512, ModelScope grain requests and HF inference credits
  * remain opt-in even when a corresponding secret exists.
  */
 export async function selectBestImageProvider(env:BestImageEnv):Promise<BestImageChoice>{
- if(await zeroGpuReady(env))return 'hfzero'
+ if(!(await zeroGpuRecentlyFailed(env)) && await zeroGpuReady(env))return 'hfzero'
  return 'ovh'
 }
 export async function queueBestImage(env:BestImageEnv,chat:string,messageId:number,prompt:string){
