@@ -6,7 +6,14 @@ const hfWanEndpoint = "/animate_scene";
 const hfWanPhotoMax = 5 * 1024 * 1024;
 const hfWanVideoMax = 18 * 1024 * 1024;
 const hfWanResultMax = 44 * 1024 * 1024;
-const hfWanEstimatedGpuSeconds = 195;
+// Conservative provider-advertised GPU reservations for the xlarge Low Res Wan Space.
+const hfWanCostSeconds = {5:150,6:210,7:220,8:260,9:270,10:270};
+function hfWanSelectSeconds(maxSeconds,quotaSeconds) {
+  for(let seconds=Math.min(10,Math.max(5,Math.floor(Number(maxSeconds)||5)));seconds>=5;seconds--){
+    if(quotaSeconds>=hfWanCostSeconds[seconds]) return seconds;
+  }
+  return 0;
+}
 const hfWanNote = (v, max = 260) => String(v ?? "").replace(/[\u0000-\u001f<>]/g, " ").slice(0, max);
 const hfWanToken = (env2) => env2.HUGGINGFACE2_API_TOKEN;
 const hfWanNow = () => Math.floor(Date.now()/1e3);
@@ -42,35 +49,42 @@ function hfWanShowQuota(q) {
    (q.paid>0?"\nWarning: over-quota usage: "+(q.paid/60).toFixed(1)+" min":"");
 }
 async function hfWanInit(env2){
-  await env2.MEMORY_DB.prepare("CREATE TABLE IF NOT EXISTS hf_wan22_jobs (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, video_id TEXT NOT NULL, photo_id TEXT NOT NULL, stage TEXT NOT NULL, event_id TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()), UNIQUE(chat_id,message_id))").run();
+  await env2.MEMORY_DB.prepare("CREATE TABLE IF NOT EXISTS hf_wan22_jobs (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, message_id INTEGER NOT NULL, video_id TEXT NOT NULL, photo_id TEXT NOT NULL, stage TEXT NOT NULL, event_id TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()), duration_s INTEGER NOT NULL DEFAULT 5, UNIQUE(chat_id,message_id))").run();
 }
 async function hfWanQueue(env2,msg,chat) {
   const driving=msg.video || (msg.document && /^video\//.test(msg.document.mime_type||"") ? msg.document:null);
   const photo=msg.reply_to_message?.photo?.at(-1) || (msg.reply_to_message?.document && /^image\//.test(msg.reply_to_message.document.mime_type||"") ? msg.reply_to_message.document:null);
   if (!driving || !photo){
-    await hfWanTell(env2,chat,"Wan 2.2 Animate: send a reference PHOTO first, then REPLY to it with a 2-second driving VIDEO and caption /wananimate. Maximum: 18 MB video and 5 MB photo. /gpuquota shows remaining free GPU minutes; /wan_status shows your latest job.");
+    await hfWanTell(env2,chat,"Wan 2.2 Animate: send a reference PHOTO first, then REPLY to it with a 5–10 second driving VIDEO and caption /wananimate. I choose the longest duration the input and GPU quota allow. Maximum: 18 MB video and 5 MB photo. /gpuquota shows remaining free GPU minutes; /wan_status shows your latest job.");
     return;
   }
   if (Number(driving.file_size||0)>hfWanVideoMax || Number(photo.file_size||0)>hfWanPhotoMax) {
     await hfWanTell(env2,chat,"Wan input too large. Use a video under 18 MB and a photo under 5 MB.");return;
   }
+  const reported=Number(driving.duration);
+  if(Number.isFinite(reported) && reported>0 && reported<5){
+    await hfWanTell(env2,chat,"Please send a driving video at least 5 seconds long. The auto-duration range is 5–10 seconds.");return;
+  }
+  // Telegram video documents do not expose duration. Choose a conservative 5 seconds.
+  const drivingSeconds=Number.isFinite(reported)&&reported>=5 ? Math.min(10,Math.floor(reported)):5;
   if(!hfWanToken(env2)){await hfWanTell(env2,chat,"HUGGINGFACE2_API_TOKEN secret is missing; no GPU request sent.");return;}
   let quota;
   try{quota=await hfWanQuota(env2);}
   catch(e){await hfWanTell(env2,chat,"Cannot verify Hugging Face ZeroGPU quota: "+hfWanNote(e.message)+". No generation started.");return;}
-  if(quota.left<hfWanEstimatedGpuSeconds){
-    await hfWanTell(env2,chat,hfWanShowQuota(quota)+"\nWan generation blocked: approximately 195 GPU-seconds are needed. No auto-switching accounts or paid over-quota usage.");return;
+  const chosen=hfWanSelectSeconds(drivingSeconds,quota.left);
+  if(!chosen){
+    await hfWanTell(env2,chat,hfWanShowQuota(quota)+"\nWan generation blocked: at least 150 GPU-seconds are needed for the minimum 5-second clip. No paid usage or account switching.");return;
   }
   await hfWanInit(env2);
-  const r=await env2.MEMORY_DB.prepare("INSERT OR IGNORE INTO hf_wan22_jobs (id, chat_id, message_id, video_id, photo_id, stage) VALUES (?,?,?,?,?,'queued')")
-   .bind(crypto.randomUUID(),chat,msg.message_id,driving.file_id,photo.file_id).run();
-  if(r.meta.changes) await hfWanTell(env2,chat,"Wan 2.2 Animate 2-second job queued with token 2. A single GPU attempt will be made; use /wan_status to check progress.\n"+hfWanShowQuota(quota));
+  const r=await env2.MEMORY_DB.prepare("INSERT OR IGNORE INTO hf_wan22_jobs (id, chat_id, message_id, video_id, photo_id, duration_s, stage) VALUES (?,?,?,?,?,?,'queued')")
+   .bind(crypto.randomUUID(),chat,msg.message_id,driving.file_id,photo.file_id,chosen).run();
+  if(r.meta.changes) await hfWanTell(env2,chat,"Wan Animate auto-selected "+chosen+" seconds"+(chosen<drivingSeconds?" (adjusted to available quota)":"")+". One GPU attempt only; check /wan_status.\n"+hfWanShowQuota(quota));
 }
 async function hfWanStatus(env2,chat) {
   await hfWanInit(env2);
-  const j=await env2.MEMORY_DB.prepare("SELECT stage,error,created_at FROM hf_wan22_jobs WHERE chat_id=? ORDER BY created_at DESC LIMIT 1").bind(chat).all();
+  const j=await env2.MEMORY_DB.prepare("SELECT stage,error,created_at,duration_s FROM hf_wan22_jobs WHERE chat_id=? ORDER BY created_at DESC LIMIT 1").bind(chat).all();
   const row=j.results?.[0];
-  await hfWanTell(env2,chat,row?"Wan Animate: "+row.stage+(row.error?"\n"+hfWanNote(row.error):""):"No Wan Animate job yet.");
+  await hfWanTell(env2,chat,row?"Wan Animate: "+row.stage+" ("+row.duration_s+" seconds)"+(row.error?"\n"+hfWanNote(row.error):""):"No Wan Animate job yet.");
 }
 async function hfWanIntercept(request,env2,ctx,originalFetch){
   if(request.method!=="POST" || new URL(request.url).pathname!=="/telegram/webhook")return originalFetch(request,env2,ctx);
@@ -130,11 +144,17 @@ async function hfWanSubmit(env2,j){
   let requestSent=false;
   try{
     const q=await hfWanQuota(env2);
-    if(q.left<hfWanEstimatedGpuSeconds)throw Error("ZeroGPU quota too low for this render. "+hfWanShowQuota(q));
+    const originalSeconds=Math.min(10,Math.max(5,Number(j.duration_s)||5));
+    const actualSeconds=hfWanSelectSeconds(originalSeconds,q.left);
+    if(!actualSeconds)throw Error("ZeroGPU quota below the minimum 5-second Wan requirement. "+hfWanShowQuota(q));
+    if(actualSeconds!==originalSeconds){
+      await env2.MEMORY_DB.prepare("UPDATE hf_wan22_jobs SET duration_s=?,updated_at=unixepoch() WHERE id=? AND stage='preparing'").bind(actualSeconds,j.id).run();
+      await hfWanTell(env2,j.chat_id,"Wan duration adjusted to "+actualSeconds+" seconds because available GPU quota changed.").catch(()=>{});
+    }
     const video=await hfWanFile(env2,j.video_id,hfWanVideoMax,["video/mp4"]);
     const image=await hfWanFile(env2,j.photo_id,hfWanPhotoMax,["image/jpeg","image/png","image/webp"]);
     const v=await hfWanUpload(env2,video),i=await hfWanUpload(env2,image);
-    const params=[v,2,i,"Character Swap","Low Res"];
+    const params=[v,actualSeconds,i,"Character Swap","Low Res"];
     requestSent=true;
     const r=await fetch(hfWanSpace+"/gradio_api/call/animate_scene",{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+hfWanToken(env2)},body:JSON.stringify({data:params}),signal:AbortSignal.timeout(24e3)});
     if(!r.ok){requestSent=false;throw Error("HF generation HTTP "+r.status);}
@@ -142,7 +162,7 @@ async function hfWanSubmit(env2,j){
     const event=x?.event_id;
     if(typeof event!=="string"||!(/^[a-zA-Z0-9_-]{5,120}$/).test(event))throw Error("Space did not return a valid event ID");
     await env2.MEMORY_DB.prepare("UPDATE hf_wan22_jobs SET stage='running',event_id=?,updated_at=unixepoch() WHERE id=?").bind(event,j.id).run();
-    await hfWanTell(env2,j.chat_id,"Wan Animate accepted the video. Waiting for the 2-second pose animation.").catch(()=>{});
+    await hfWanTell(env2,j.chat_id,"Wan Animate accepted the video. Generating "+actualSeconds+" seconds of pose animation.").catch(()=>{});
   }catch(e){await hfWanFail(env2,j,requestSent?"Submission outcome unknown; not retrying":e.message,requestSent?"uncertain":"failed");}
 }
 function hfWanVideoUrl(result){
