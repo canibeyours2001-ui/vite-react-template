@@ -73,7 +73,7 @@ async function poll(env:ZeroEnv,j:Job){
   await env.MEMORY_DB.prepare("UPDATE hf_zero_image_jobs SET status='expired',error='Space event expired after 1 hour',updated_at=unixepoch() WHERE id=?").bind(j.id).run();return;
  }
  try{
-  const url=SPACE+'/gradio_api/call/generate/'+encodeURIComponent(j.event_id);
+  const url=SPACE+ENDP+'/'+encodeURIComponent(j.event_id);
   const r=await fetch(url,{headers:{Authorization:'Bearer '+env.HUGGINGFACE_API_TOKEN,'Accept':'text/event-stream'},signal:AbortSignal.timeout(15000)});
   if(!r.ok){await r.body?.cancel();throw Error('ZeroGPU event HTTP '+r.status)}
   const reader=r.body?.getReader();if(!reader)throw Error('Missing ZeroGPU event stream');
@@ -91,12 +91,28 @@ async function poll(env:ZeroEnv,j:Job){
       completed=true;let data:unknown;try{data=JSON.parse(json)}catch{throw Error('ZeroGPU complete event missing JSON')}
       imageUrl=findImage(data);break;
      }
-     if(event==='error'){failed=true;failure='The Space reported a generation error';break;}
+     if(event==='error'){
+      failed=true;
+      let detail='';
+      try{
+       const parsed:unknown=JSON.parse(json);
+       if(typeof parsed==='string')detail=parsed;
+       else if(parsed&&typeof parsed==='object'){
+        const object=parsed as Record<string,unknown>;
+        detail=typeof object.message==='string'?object.message:typeof object.error==='string'?object.error:'';
+       }
+      }catch{detail=json}
+      failure=String(detail||'Upstream Space failed (possible quota, GPU or model error)')
+       .replace(/hf_[A-Za-z0-9]{10,}/g,'[redacted]')
+       .replace(/https?:\/\/\S+/g,'[link]')
+       .replace(/[\u0000-\u001f<>]/g,' ').slice(0,170);
+      break;
+     }
     }
     if(completed||failed)break;
    }
   }finally{await reader.cancel().catch(()=>{});}
-  if(failed){await env.MEMORY_DB.prepare("UPDATE hf_zero_image_jobs SET status='failed',error=?,updated_at=unixepoch() WHERE id=?").bind(failure,j.id).run();await tell(env,j.chat_id,'❌ ZeroGPU generation failed. No automatic retries.');return;}
+  if(failed){await env.MEMORY_DB.prepare("UPDATE hf_zero_image_jobs SET status='failed',error=?,updated_at=unixepoch() WHERE id=?").bind(failure,j.id).run();await tell(env,j.chat_id,'❌ ZeroGPU failed: '+failure+'. No automatic retries. Check /hfzerostatus.');return;}
   if(!completed)return;
   if(!imageHost(imageUrl)){
    await env.MEMORY_DB.prepare("UPDATE hf_zero_image_jobs SET status='delivery-failed',error='Unexpected output URL',updated_at=unixepoch() WHERE id=?").bind(j.id).run();
