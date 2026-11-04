@@ -27,3 +27,13 @@ The quota endpoint is `GET https://huggingface.co/api/spaces/zero-gpu/quota`. A 
 ## Rollback
 
 The previous production version ID above can be redeployed using Cloudflare Workers > Deployments > select version, or the Workers deployments API with 100% traffic to that version. The new D1 table is additive and may be left intact.
+
+## Wan automatic duration upgrade (2026-11-04)
+
+`/wananimate` now selects **5–10 seconds** without a duration argument, using the Telegram driving video duration and available HF2 account ZeroGPU quota. For video files uploaded as Telegram documents, duration metadata may be absent; the safe default is 5 seconds. Videos shorter than five seconds are rejected when duration metadata is present.
+
+For Low Res Character Swap, the Space's current declared GPU reservations are: 5s = 150 GPU-seconds, 6s = 210, 7s = 220, 8s = 260, 9s = 270, 10s = 270. The queue selects the maximum affordable duration not longer than the input. At submission it rechecks quota and may downgrade without retrying any generation. Quota availability and upstream Space behavior may change.
+
+An additive D1 schema change adds `duration_s INTEGER NOT NULL DEFAULT 5` to `hf_wan22_jobs`. Existing jobs are preserved. Test the pure selection and mocked API interactions using `node tests/hf-wan-auto-duration.test.cjs`.
+
+**Production rollback:** use the prior deployment version from the Cloudflare Deployments panel; the added column can remain because older code ignores it.
