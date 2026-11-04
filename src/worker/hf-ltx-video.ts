@@ -7,7 +7,7 @@ type DB = {prepare(q:string):{bind(...a:(string|number)[]):{run():Promise<{meta:
 export type LtxEnv={MEMORY_DB:DB;TELEGRAM_BOT_TOKEN:string;HUGGINGFACE2_API_TOKEN?:string}
 type Media={file_id:string;file_size?:number;mime_type?:string}
 type Msg={message_id:number;photo?:Media[];document?:Media;reply_to_message?:{photo?:Media[];document?:Media}}
-type Job={id:string;chat_id:string;message_id:number;file_id:string;prompt:string;status:string;event_id:string;created_at:number;error:string}
+type Job={id:string;chat_id:string;message_id:number;file_id:string;prompt:string;status:string;event_id:string;created_at:number;error:string;duration_s?:number;auto_len?:number}
 const SPACE='https://lightricks-ltx-2-5.hf.space'
 const ENDPOINT='/run'
 const MAX_IMAGE=5*1024*1024
@@ -36,12 +36,20 @@ async function send(env:LtxEnv,chat:string,message:string) {
 }
 async function init(env:LtxEnv){
   await env.MEMORY_DB.prepare("CREATE TABLE IF NOT EXISTS hf_ltx25_jobs (id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,message_id INTEGER NOT NULL,file_id TEXT NOT NULL,prompt TEXT NOT NULL,status TEXT NOT NULL,event_id TEXT NOT NULL DEFAULT '',error TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL DEFAULT (unixepoch()),updated_at INTEGER NOT NULL DEFAULT (unixepoch()),UNIQUE(chat_id,message_id))").bind().run()
+  // Additive migration; legacy two-second jobs remain unchanged.
+  const columns=await env.MEMORY_DB.prepare('PRAGMA table_info(hf_ltx25_jobs)').bind().all<{name:string}>()
+  if(!columns.results.some(c=>c.name==='duration_s')){
+    try{await env.MEMORY_DB.prepare('ALTER TABLE hf_ltx25_jobs ADD COLUMN duration_s REAL NOT NULL DEFAULT 2').bind().run()}catch(e){if(!String(e).includes('duplicate column'))throw e}
+  }
+  if(!columns.results.some(c=>c.name==='auto_len')){
+    try{await env.MEMORY_DB.prepare('ALTER TABLE hf_ltx25_jobs ADD COLUMN auto_len INTEGER NOT NULL DEFAULT 0').bind().run()}catch(e){if(!String(e).includes('duplicate column'))throw e}
+  }
 }
 async function status(env:LtxEnv,chat:string){
   await init(env)
-  const x=await env.MEMORY_DB.prepare('SELECT status,error,created_at FROM hf_ltx25_jobs WHERE chat_id=? ORDER BY created_at DESC LIMIT 1').bind(chat).all<{status:string;error:string;created_at:number}>()
+  const x=await env.MEMORY_DB.prepare('SELECT status,error,created_at,duration_s,auto_len FROM hf_ltx25_jobs WHERE chat_id=? ORDER BY created_at DESC LIMIT 1').bind(chat).all<{status:string;error:string;created_at:number;duration_s:number;auto_len:number}>()
   const j=x.results[0]
-  await send(env,chat,j?'LTX-2.5: '+j.status+(j.error?' — '+short(j.error,130):''):'No LTX-2.5 video job yet.')
+  await send(env,chat,j?'LTX-2.5: '+j.status+' ('+(j.auto_len?'auto ≤15':j.duration_s)+'s)'+(j.error?' — '+short(j.error,130):''):'No LTX-2.5 video job yet.')
 }
 export async function handleLtxCommand(env:LtxEnv,msg:Msg,chat:string,rawText:string):Promise<boolean>{
   const text=rawText.trim()
@@ -57,13 +65,27 @@ export async function handleLtxCommand(env:LtxEnv,msg:Msg,chat:string,rawText:st
   }
   const m=/^\/ltx(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(text)
   if(!m)return false
-  const prompt=(m[1]||'').trim()
+  let prompt=(m[1]||'').trim()
+  let duration=5,autoLen=false
+  // /ltx 5 PROMPT — explicit 1–5s (Space slider). /ltx auto PROMPT — model chooses up to 15s.
+  const setting=/^(auto|\d+(?:\.\d+)?s?)\s+([\s\S]+)$/i.exec(prompt)
+  if(setting){
+    prompt=setting[2].trim()
+    if(setting[1].toLowerCase()==='auto')autoLen=true
+    else{
+      duration=Number(setting[1].replace(/s$/i,''))
+      if(!Number.isFinite(duration)||duration<1||duration>5){
+        await send(env,chat,'This free LTX Space allows 1–5 seconds per fixed clip. Use /ltx 5 PROMPT or /ltx auto PROMPT for automatic length (up to 15s, not guaranteed).')
+        return true
+      }
+    }
+  }
   const media=msg.photo?.at(-1)||
     (msg.document&&/^image\/(jpeg|png|webp)$/.test(msg.document.mime_type||'')?msg.document:undefined)||
     msg.reply_to_message?.photo?.at(-1)||
     (msg.reply_to_message?.document&&/^image\/(jpeg|png|webp)$/.test(msg.reply_to_message.document.mime_type||'')?msg.reply_to_message.document:undefined)
   if(!prompt||!media){
-    await send(env,chat,'LTX-2.5 with synchronized sound: attach a photo with caption /ltx your scene and audio prompt, or reply to a photo with /ltx your prompt. Use /ltxprobe to check the free Space; /ltx_status checks jobs. Default: 2 seconds, 512×512, Fast. A failed GPU run may still consume your daily HF ZeroGPU minutes.')
+    await send(env,chat,'LTX-2.5 with sound: attach/reply to a photo with /ltx 5 your prompt (1–5s fixed), or /ltx auto your prompt (the model may choose up to 15s). Default /ltx PROMPT is now 5s. Free HF ZeroGPU time is limited; longer jobs may run out of quota. /ltx_status checks jobs.')
     return true
   }
   if(!env.HUGGINGFACE2_API_TOKEN){await send(env,chat,'HUGGINGFACE2_API_TOKEN is not configured. No job started.');return true}
@@ -72,8 +94,8 @@ export async function handleLtxCommand(env:LtxEnv,msg:Msg,chat:string,rawText:st
   }
   try{await quota(env)}catch(e){await send(env,chat,short(e instanceof Error?e.message:'HF quota check failed',300));return true}
   await init(env)
-  const r=await env.MEMORY_DB.prepare("INSERT OR IGNORE INTO hf_ltx25_jobs (id,chat_id,message_id,file_id,prompt,status) VALUES (?,?,?,?,?,'queued')").bind(crypto.randomUUID(),chat,msg.message_id,media.file_id,prompt).run()
-  if(r.meta.changes===1)await send(env,chat,'LTX-2.5 image-to-video with synchronized audio queued. Uses HF ZeroGPU quota (not Inference Providers). One generation attempt only; no automatic retry if the outcome is uncertain. Check /ltx_status.')
+  const r=await env.MEMORY_DB.prepare("INSERT OR IGNORE INTO hf_ltx25_jobs (id,chat_id,message_id,file_id,prompt,duration_s,auto_len,status) VALUES (?,?,?,?,?,?,?,'queued')").bind(crypto.randomUUID(),chat,msg.message_id,media.file_id,prompt,duration,autoLen?1:0).run()
+  if(r.meta.changes===1)await send(env,chat,'LTX-2.5 image-to-video with synchronized audio queued ('+(autoLen?'auto ≤15s':duration+'s')+'). HF ZeroGPU quota is limited. One generation attempt only; check /ltx_status.')
   return true
 }
 async function fail(env:LtxEnv,j:Job,reason:string,state='failed'){
@@ -110,7 +132,7 @@ async function submit(env:LtxEnv,j:Job){
     const data=[
       j.prompt+' Include synchronized natural audio matching the movement and setting.',
       {path,orig_name:img.name,mime_type:img.type,meta:{_type:'gradio.FileData'}},
-      512,512,2.0,42,'conv',false,false,false
+      512,512,j.duration_s??2,42,'conv',Boolean(j.auto_len),false,false
     ]
     gpuAttempted=true
     const resp=await fetch(SPACE+'/gradio_api/call'+ENDPOINT,{
@@ -121,7 +143,7 @@ async function submit(env:LtxEnv,j:Job){
     const result=await resp.json() as {event_id?:unknown}
     if(typeof result.event_id!=='string'||!/^[A-Za-z0-9_-]{5,120}$/.test(result.event_id))throw new Error('No valid Gradio event ID')
     await env.MEMORY_DB.prepare("UPDATE hf_ltx25_jobs SET status='running',event_id=?,updated_at=unixepoch() WHERE id=?").bind(result.event_id,j.id).run()
-    await send(env,j.chat_id,'LTX-2.5 accepted the image-to-video request. Waiting for a 2-second clip with generated sound.').catch(()=>{})
+    await send(env,j.chat_id,'LTX-2.5 accepted the image-to-video request. Requested '+(j.auto_len?'automatic length (up to 15s)':String(j.duration_s??2)+'s')+' with generated sound.').catch(()=>{})
   }catch(e){
     await fail(env,j,gpuAttempted?'Submission outcome unknown; not resubmitting automatically':e instanceof Error?e.message:'Submission failed',gpuAttempted?'uncertain':'failed')
   }
@@ -154,7 +176,7 @@ async function deliver(env:LtxEnv,j:Job,url:string){
     const video=await resp.arrayBuffer()
     if(video.byteLength<1024||video.byteLength>MAX_VIDEO)throw new Error('Invalid or oversized video output')
     const form=new FormData();form.set('chat_id',j.chat_id)
-    form.set('caption','LTX-2.5 ZeroGPU • image-to-video + native sound')
+    form.set('caption','LTX-2.5 ZeroGPU • image-to-video + native sound • '+(j.auto_len?'auto':String(j.duration_s??2)+'s'))
     form.set('video',new File([video],'ltx25-audio-video.mp4',{type:'video/mp4'}))
     const sent=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendVideo',{method:'POST',body:form,signal:AbortSignal.timeout(28000)})
     if(!sent.ok)throw new Error('Telegram sendVideo HTTP '+sent.status)

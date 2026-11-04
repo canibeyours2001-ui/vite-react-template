@@ -7,6 +7,7 @@ import {pollModelScopeImages,modelScopeCommand} from './modelscope-image'
 import {pollExternalImages,checkImageProviders} from './external-image'
 import {pollZeroImages,zeroStatus} from './hf-zerogpu'
 import {handleLtxCommand,pollLtxJobs} from './hf-ltx-video'
+import {handleH3Command,pollH3Jobs} from './minimax-h3'
 import {pollImageUp} from './imageup-generation'
 import {pollWanAuto} from './wan-auto'
 import {hfWanIntercept,hfWanScheduled} from './hf-wan-zerogpu'
@@ -49,6 +50,7 @@ type Bindings = {
   MODELSCOPE_API_TOKEN?: string
   HUGGINGFACE_API_TOKEN?: string
   HUGGINGFACE2_API_TOKEN?: string
+  MINIMAX_API_KEY?: string
   AI: AIClient
   DUB_UPLOADS: import('./pyvt-upload').UploadEnv['DUB_UPLOADS']
   MEMORY_DB: {
@@ -316,6 +318,7 @@ app.post('/telegram/webhook', async (c) => {
       if(/^\/imageproviders(?:@\w+)?$/i.test(text)){await checkImageProviders(c.env,key);return}
       if(/^\/hfzerostatus(?:@\w+)?$/i.test(text)){await zeroStatus(c.env,key);return}
       if(await handleLtxCommand(c.env,msg,key,text))return
+      if(await handleH3Command(c.env,msg,key,text))return
       if(await modelScopeCommand(c.env,key,text)) return
       if(/^\/aimodel(?:@[A-Za-z0-9_]+)?$/i.test(text)) {
         await handleAiModelCommand(c.env,key)
@@ -686,7 +689,10 @@ app.post('/telegram/webhook', async (c) => {
           '/hfimage PROMPT — Hugging Face FLUX\n' +
           '/hfzero PROMPT — Hugging Face ZeroGPU free minutes\n' +
           '/hfzerostatus — status of ZeroGPU image\n' +
-          '/ltx — photo to a 2-second video with native sound (ZeroGPU)\n' +
+          '/ltx 5 PROMPT — photo to 5s video + sound (free ZeroGPU)\n' +
+          '/ltx auto PROMPT — automatic duration up to 15s (quota permitting)\n' +
+          '/h3 10 PROMPT — MiniMax-H3 up to 15s (paid key needed)\n' +
+          '/h3_status — latest H3 video job\n' +
           '/ltxprobe — check the LTX-2.5 Space API\n' +
           '/ltx_status — your latest LTX video job\n' +
           '/gpuquota — HF ZeroGPU quota for token 2\n' +
@@ -1027,7 +1033,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'hfimage',description:'Generate Hugging Face FLUX image'},
         {command:'hfzero',description:'Generate image using free ZeroGPU time'},
         {command:'hfzerostatus',description:'Check HF ZeroGPU image status'},
-        {command:'ltx',description:'Image to video with native sound on HF ZeroGPU'},
+        {command:'ltx',description:'Image to video with sound (1-5s or auto up to 15s)'},
+        {command:'h3',description:'MiniMax-H3 video 4-15s (paid API)'},
+        {command:'h3_status',description:'Check MiniMax-H3 video progress'},
         {command:'ltxprobe',description:'Check HF LTX-2.5 image-to-video Space'},
         {command:'ltx_status',description:'Check LTX-2.5 video progress'},
         {command:'gpuquota',description:'Check free Hugging Face ZeroGPU quota'},
@@ -1095,7 +1103,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'hfimage',description:'Generate Hugging Face FLUX image'},
         {command:'hfzero',description:'Generate image using free ZeroGPU time'},
         {command:'hfzerostatus',description:'Check HF ZeroGPU image status'},
-        {command:'ltx',description:'Image to video with native sound on HF ZeroGPU'},
+        {command:'ltx',description:'Image to video with sound (1-5s or auto up to 15s)'},
+        {command:'h3',description:'MiniMax-H3 video 4-15s (paid API)'},
+        {command:'h3_status',description:'Check MiniMax-H3 video progress'},
         {command:'ltxprobe',description:'Check HF LTX-2.5 image-to-video Space'},
         {command:'ltx_status',description:'Check LTX-2.5 video progress'},
         {command:'gpuquota',description:'Check free Hugging Face ZeroGPU quota'},
@@ -1151,7 +1161,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollLtxJobs(env),hfWanScheduled(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollLtxJobs(env),pollH3Jobs(env),hfWanScheduled(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }
