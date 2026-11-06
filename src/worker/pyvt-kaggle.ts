@@ -396,6 +396,12 @@ export async function pyvtTranslate(env:VideoEnv,request:Request):Promise<Respon
      const a=cleaned.split('\n').map(x=>x.trim().replace(/^\d+[.)-]\s*/,''))
      if(a.length===count&&a.every(x=>x.length>0))output=a
     }
+    // Qwen can emit Burmese lines with JSON-like numbering outside quoted strings.
+    // Recover exactly N quoted translations, never silently drop or merge lines.
+    if(!output){
+      const quoted=[...cleaned.matchAll(/"([^"]+)"/g)].map(m=>m[1].trim().replace(/\\n/g,' '))
+      if(quoted.length===count&&quoted.every(x=>x.length>0))output=quoted
+    }
     if(output&&target==='my'&&
        output.filter(x=>/[\u1000-\u109f]/.test(x)).length<Math.ceil(count*0.6))return null
     return output
@@ -435,7 +441,7 @@ export async function pyvtTranslate(env:VideoEnv,request:Request):Promise<Respon
    const translated:string[]=[]
    for(let start=0;start<lines.length;start+=3){
     const part=lines.slice(start,start+3)
-    const max_tokens=10+part.length*90 // 3 lines: 280, 1 line: 100; reserve input+output quota
+    const max_tokens=Math.max(400,200+part.length*200) // Burmese JSON output needs more room than English (3 lines: 800)
     if(!await reserve(max_tokens+180))return err(429,'FreeLLM subtitle budget still cooling down')
     const instruction='Translate this JSON array of '+part.length+
      ' Chinese, Spanish, English or other subtitle lines into natural fluent '+
