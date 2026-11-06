@@ -372,8 +372,9 @@ export async function pyvtTranslate(env:VideoEnv,request:Request):Promise<Respon
  try{
   if(provider==='freellm'){
    // Keep FreeLLM selected: a fast Qwen model has been verified for Chinese →
-   // Burmese. Pin Groq explicitly so the FreeLLM router never silently falls back to slow OVH. Groq's 1000-output-token/minute cap requires serialized requests
-   // and a per-job shared cooldown across pyVideoTrans's 10-line batches.
+   // Burmese. Pin Groq explicitly so the FreeLLM router never silently falls back to slow OVH.
+   // Qwen3.8's published free-tier rate is 8k tokens/minute: reserve at most 7.6k locally
+   // to avoid causing 60-second in-request cooldowns on ordinary 10-line subtitle batches.
    const parse=(response:string,count:number):string[]|null=>{
     const cleaned=response.trim().replace(/^\x60\x60\x60(?:json)?\s*/i,'').replace(/\s*\x60\x60\x60$/,'')
     let output:string[]|null=null
@@ -420,7 +421,7 @@ export async function pyvtTranslate(env:VideoEnv,request:Request):Promise<Respon
       ).bind(now,id).run()
      }
      const claim=await env.MEMORY_DB.prepare(
-      'UPDATE pyvt_llm_budget SET used_tokens=used_tokens+? WHERE job_id=? AND used_tokens+?<=950'
+      'UPDATE pyvt_llm_budget SET used_tokens=used_tokens+? WHERE job_id=? AND used_tokens+?<=7600'
      ).bind(tokens,id,tokens).run()
      if(claim.meta.changes===1)return true
      if(cooled)return false
