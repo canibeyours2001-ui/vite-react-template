@@ -655,7 +655,7 @@ function renderKernel(job:Job,inputUrl:string,voiceB64:string,translateUrl:strin
  "    subprocess.run(vsr_cmd,check=True,cwd=str(vsr),timeout=3000)",
  "    if not clean.exists() or clean.stat().st_size<4096:raise RuntimeError('VSR subtitle cleanup failed')",
  "    # Save a persistent intermediate to Kaggle Outputs for manual recovery without rerunning VSR.",
- "    shutil.copy2(clean,'/kaggle/working/pyvt_cleaned_video.'+TASK['ext'])",
+ "    if clean.stat().st_size<=550*1024*1024 and shutil.disk_usage(clean.parent).free>clean.stat().st_size*2+100*1024*1024: shutil.copy2(clean,'/kaggle/working/pyvt_cleaned_video.'+TASK['ext'])",
  "    video=clean",
  "    print('PYVT_VSR_CLEAN_READY',str(clean),flush=True)",
  "else:",

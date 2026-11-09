@@ -30,7 +30,12 @@ try:
             import regex
             chars=regex.findall(r'\X',token)
         except ImportError:
-            chars=list(token)
+            # Keep Myanmar combining marks attached even if regex is not installed.
+            chars=[]
+            for ch in token:
+                if chars and unicodedata.category(ch).startswith('M'):
+                    chars[-1]+=ch
+                else:chars.append(ch)
         out=[];buf=''
         for ch in chars:
             if buf and units(buf+ch)>max_units*0.65:
@@ -52,6 +57,10 @@ try:
             content=path.read_text(encoding='utf-8-sig',errors='replace')
             n=(sum('\u1000'<=c<='\u109f' for c in content) if TASK['target']=='my'
                else sum(c.isascii() and c.isalpha() for c in content))
+            if TASK['target']=='my':
+                chinese=sum('\u4e00'<=c<='\u9fff' for c in content)
+                # Never pick the Chinese source SRT merely because its name says target.
+                return n*4-chinese*5+(5 if 'target' in path.name.lower() else 0)
             return n+(100 if 'target' in path.name.lower() else 0)
         except OSError:
             return -1
@@ -74,7 +83,7 @@ try:
                 for token,weight in zip(tokens,weights):
                     nxt=min(b,t+(b-a)*weight/total)
                     maybe.append((t,max(t+0.06,nxt),token));t=nxt
-            if maybe and (TASK['target']!='my' or score(path)>2):
+            if maybe and (TASK['target']!='my' or sum('\u1000'<=c<='\u109f' for _,_,token in maybe for c in token)>=3):
                 words=maybe
                 print('PYVT_KARAOKE_REUSED_TARGET_SRT',len(words),flush=True)
                 break
@@ -170,7 +179,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         rendered.replace(result)
         print('PYVT_KARAOKE_SAFEFRAME_WORDS',len(words),'GROUPS',len(groups),'SIZE',width,height,flush=True)
     pathlib.Path('/kaggle/working/pyvt_stage.json').write_text(json.dumps({
-        'dubbed':True,'captions_burned':bool(words),'original_subtitles_removed':bool(TASK.get('remove_subtitles',True)),
+        'dubbed':True,'captions_burned':bool(words),'subtitle_removal_requested':bool(TASK.get('remove_subtitles',True)),
         'output':'pyvideotrans_result.mp4'},indent=2))
     print('PYVIDEOTRANS_VIDEO_READY',flush=True)
 except Exception as exc:
