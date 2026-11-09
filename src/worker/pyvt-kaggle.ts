@@ -624,6 +624,8 @@ function renderKernel(job:Job,inputUrl:string,voiceB64:string,translateUrl:strin
  "TASK=json.loads("+JSON.stringify(JSON.stringify(task))+")",
  "ROOT=pathlib.Path('/kaggle/temp/pyvideotrans-job')",
  "ROOT.mkdir(parents=True,exist_ok=True)",
+ "import time",
+ "PYVT_STARTED_AT=time.monotonic()",
  "subprocess.run([sys.executable,'-m','pip','install','-q','requests','uv'],check=True)",
  "import requests",
  "video=ROOT/('source.'+TASK['ext'])",
@@ -640,7 +642,20 @@ function renderKernel(job:Job,inputUrl:string,voiceB64:string,translateUrl:strin
  "if TASK.get('remove_subtitles',True):",
  "    # VSR runs in its own Python 3.12 environment in this Kaggle job.",
  "    vsr=ROOT/'video-subtitle-remover'",
- "    subprocess.run(['git','clone','--quiet','--depth','1','https://github.com/canibeyours2001-ui/video-subtitle-remover.git',str(vsr)],check=True,timeout=140)",
+ "    # Kaggle automatically expands uploaded tar.gz files into /kaggle/input/<dataset>/<archive-name>.",
+ "    expanded=pathlib.Path('/kaggle/input/pyvt-vsr-runtime-cache/vsr-runtime')",
+ "    cache=pathlib.Path('/kaggle/input/pyvt-vsr-runtime-cache/vsr-runtime.tar.gz')",
+ "    if (expanded/'backend/main.py').is_file() and (expanded/'backend/models/sttn-det/sttn.pth').is_file():",
+ "        shutil.copytree(expanded,vsr,dirs_exist_ok=True)",
+ "        print('PYVT_CACHE_HIT_VSR_EXPANDED',round(time.monotonic()-PYVT_STARTED_AT,1),flush=True)",
+ "    elif cache.is_file() and cache.stat().st_size>200_000_000:",
+ "        vsr.mkdir(parents=True,exist_ok=True)",
+ "        subprocess.run(['tar','-xzf',str(cache),'-C',str(vsr)],check=True,timeout=300)",
+ "        assert (vsr/'backend/main.py').is_file() and (vsr/'backend/models/sttn-det/sttn.pth').stat().st_size>60_000_000, 'VSR cache incomplete'",
+ "        print('PYVT_CACHE_HIT_VSR_ARCHIVE',round(time.monotonic()-PYVT_STARTED_AT,1),flush=True)",
+ "    else:",
+ "        print('PYVT_CACHE_MISS_VSR_CLONE',flush=True)",
+ "        subprocess.run(['git','clone','--quiet','--depth','1','https://github.com/canibeyours2001-ui/video-subtitle-remover.git',str(vsr)],check=True,timeout=200)",
  "    subprocess.run(['uv','python','install','3.12'],check=True,timeout=260)",
  "    subprocess.run(['uv','venv','--python','3.12',str(ROOT/'vsr-venv')],check=True,timeout=120)",
  "    vsrpy=str(ROOT/'vsr-venv/bin/python')",
@@ -673,6 +688,12 @@ function renderKernel(job:Job,inputUrl:string,voiceB64:string,translateUrl:strin
  "    subprocess.run(['uv','pip','install','--python',str(python),'voxcpm==2.0.3','setuptools'],check=True,timeout=900)",
  "    subprocess.run([str(python),'-c','from voxcpm import VoxCPM'],check=True,cwd=str(repo),timeout=90)",
  "    print('PYVT_VOXCPM_IMPORT_READY',flush=True)",
+ "    vox_cache=pathlib.Path('/kaggle/input/voxcpm2-cache/VoxCPM2')",
+ "    if vox_cache.is_dir() and (vox_cache/'model.safetensors').stat().st_size>2_000_000_000 and (vox_cache/'config.json').is_file():",
+ "        os.environ['PYVT_VOXCPM_MODEL_DIR']=str(vox_cache)",
+ "        print('PYVT_CACHE_HIT_VOXCPM2',flush=True)",
+ "    else:",
+ "        print('PYVT_CACHE_MISS_VOXCPM2_DOWNLOAD',flush=True)",
  "# Translation uses the selected Worker-signed bridge; API keys stay in Cloudflare.",
  "if TASK['target'] in ('my','en'):",
  "    setup='from videotrans.configure.config import params; import os; params.save({\"trans_api_url\":os.environ[\"PYVT_TRANS_URL\"]})'",
@@ -730,7 +751,9 @@ function renderKernel(job:Job,inputUrl:string,voiceB64:string,translateUrl:strin
   "'--tts',('ttsapi' if TASK['provider']=='gemini' else 'voxcpm2' if TASK['provider']=='vox' else TASK['provider']),'--voice-role',TASK['voice'],'--source-language-code',TASK['source'],"+
   "'--target-language-code',TASK['target'],'--translate-type','24','--whisper-model','small',"+
   "'--recogn-type','0','--temp-output',str(ROOT/'results'),'--final-output','/kaggle/working/pyvideotrans_result.mp4','--voice-autorate']",
- "if TASK['provider']=='vox': command.append('--cuda')",
+ "if TASK['provider']=='vox':",
+ "    command.append('--cuda')",
+ "    if os.environ.get('PYVT_VOXCPM_MODEL_DIR'): command.extend(['--voxcpm-model-dir',os.environ['PYVT_VOXCPM_MODEL_DIR']])",
  "if TASK.get('voice_ref_b64'):",
  "    blob=base64.b64decode(TASK['voice_ref_b64'],validate=True)",
  "    if len(blob)<1500 or len(blob)>180000: raise ValueError('Bad saved voice reference')",
@@ -739,7 +762,9 @@ function renderKernel(job:Job,inputUrl:string,voiceB64:string,translateUrl:strin
  "    refmp3.write_bytes(blob)",
  "    subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(refmp3),'-ac','1','-ar','48000',str(refwav)],check=True,timeout=40)",
  "    command.extend(['--reference-wav',str(refwav)])",
+ "print('PYVT_STAGE_DUB_START_S',round(time.monotonic()-PYVT_STARTED_AT,1),flush=True)",
  "subprocess.run(command,check=True,cwd=str(repo),timeout=3200)",
+ "print('PYVT_STAGE_DUB_FINISH_S',round(time.monotonic()-PYVT_STARTED_AT,1),flush=True)",
  "assert pathlib.Path('/kaggle/working/pyvideotrans_result.mp4').stat().st_size>4096",
  karaokePython
  ].join('\n')
@@ -994,7 +1019,10 @@ export async function pollPyvt(env:VideoEnv):Promise<void>{
      next.id+'&expire='+expires+'&sig='+await signature(env.TELEGRAM_WEBHOOK_SECRET,next.id,expires,'tts'):''),
    language:'python',kernelType:'script',isPrivate:true,enableGpu:next.engine==='vox'||next.remove_subtitles===1,
    enableInternet:true,...((next.engine==='vox'||next.remove_subtitles===1)?{machineShape:'NvidiaTeslaT4'}:{}),sessionTimeoutSeconds:3600,
-   datasetDataSources:[],competitionDataSources:[],kernelDataSources:[],modelDataSources:[]
+   datasetDataSources:[
+    ...(next.engine==='vox'?['cyawzin/voxcpm2-cache']:[]),
+    ...(next.remove_subtitles===1?['cyawzin/pyvt-vsr-runtime-cache']:[])
+   ],competitionDataSources:[],kernelDataSources:[],modelDataSources:[]
   })
   const version=Number(response.versionNumber||response.version_number||0)
   if(!Number.isSafeInteger(version)||version<1)throw Error('Kaggle submission not confirmed')
