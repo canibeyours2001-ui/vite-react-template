@@ -24,7 +24,7 @@ type Media={file_id:string;file_size?:number;file_name?:string;mime_type?:string
 type Message={message_id:number;video?:Media;document?:Media;
  reply_to_message?:{video?:Media;document?:Media}}
 type Job={id:number;chat_id:string;file_id:string;file_ext:string;source_lang:string;target_lang:string;
- engine:string;voice:string;translation_provider:string;voice_slot:number;status:string;version_number:number|null;created_at:number;error_message:string|null}
+ engine:string;voice:string;translation_provider:string;remove_subtitles:number;voice_slot:number;status:string;version_number:number|null;created_at:number;error_message:string|null}
 const KERNEL='cyawzin/pyvideotrans-telegram-edge-or-voxcpm2'
 const OWNER='cyawzin'
 const SLUG='pyvideotrans-telegram-edge-or-voxcpm2'
@@ -45,7 +45,7 @@ async function isReady(env:VideoEnv):Promise<boolean>{
  return r.results[0]?.enabled===1
 }
 const HELP='Video translation + dubbing (private Kaggle jobs):\n'+
- '/dub — target language, translation provider, engine (Edge / VoxCPM2 / Gemini / Kokoro), voice.\n'+
+ '/dub — target language, remove original subtitles (Yes/No), translation provider, engine, voice.\n'+
  '/dub edge auto en — auto-detect the original spoken language and dub into English.\n'+
  '/dub edge auto my my-MM-NilarNeural freellm — auto-detect speech, FreeLLM translation.\n'+
  '/dub vox auto my — optional VoxCPM2 dubbing on Kaggle T4 GPU.\n'+
@@ -69,6 +69,7 @@ async function init(db:DB){
   "UNIQUE(chat_id,message_id))"
  ).bind().run()
  await db.prepare('ALTER TABLE pyvt_kaggle_jobs ADD COLUMN translation_provider TEXT NOT NULL DEFAULT "gemini"').bind().run().catch(()=>undefined)
+ await db.prepare('ALTER TABLE pyvt_kaggle_jobs ADD COLUMN remove_subtitles INTEGER NOT NULL DEFAULT 1 CHECK(remove_subtitles IN (0,1))').bind().run().catch(()=>undefined)
 }
 async function reply(env:VideoEnv,chat:string,text:string){
  const r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendMessage',{
@@ -132,7 +133,7 @@ export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:stri
    await send('Video dubbing on Kaggle is in compatibility testing. No GPU job submitted. '+HELP)
    return true
   }
-  const parsed=text.trim().match(/^\/dub(?:@[a-zA-Z0-9_]+)?\s+(edge|vox|gemini|kokoro)\s+(auto|[a-z]{2,3}(?:-[a-z]{2,3})?)\s+(en|my)(?:\s+([a-zA-Z0-9_-]{1,80}))?(?:\s+(freellm|gemini|google))?$/i)
+  const parsed=text.trim().match(/^\/dub(?:@[a-zA-Z0-9_]+)?\s+(edge|vox|gemini|kokoro)\s+(auto|[a-z]{2,3}(?:-[a-z]{2,3})?)\s+(en|my)(?:\s+([a-zA-Z0-9_-]{1,80}))?(?:\s+(freellm|gemini|google))?(?:\s+(remove|keep))?$/i)
   if(!parsed){await send(HELP);return true}
   const engine=parsed[1].toLowerCase(),inputLang=parsed[2].toLowerCase(),targetLang=parsed[3].toLowerCase()
   const sourceLang=['ch','cn','zh','zh-cn'].includes(inputLang)?'zh-cn':inputLang
@@ -140,6 +141,7 @@ export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:stri
    await send('Source language must be auto or a supported two-letter language code.');return true
   }
   const translateProvider=(parsed[5]||'freellm').toLowerCase()
+  const removeSubtitles=parsed[6]!=='keep'?1:0
   if(!['freellm','gemini','google'].includes(translateProvider)){
    await send('Invalid translation provider. Select FreeLLM, Gemini, or Google Translate from /dub.');return true
   }
@@ -195,13 +197,13 @@ export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:stri
   ).bind(chat).all<{total:number}>()
   if((existing.results[0]?.total||0)>=1){await send('One video dubbing job is already active for your account. Check /dub_status.');return true}
   await env.MEMORY_DB.prepare(
-   'INSERT OR IGNORE INTO pyvt_kaggle_jobs(chat_id,message_id,file_id,file_ext,file_size,source_lang,target_lang,engine,voice,voice_slot,translation_provider) VALUES(?,?,?,?,?,?,?,?,?,?,?)'
-  ).bind(chat,msg.message_id,media.file_id,ext,media.file_size,sourceLang,targetLang,engine,voice,slot,translateProvider).run()
+   'INSERT OR IGNORE INTO pyvt_kaggle_jobs(chat_id,message_id,file_id,file_ext,file_size,source_lang,target_lang,engine,voice,voice_slot,translation_provider,remove_subtitles) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)'
+  ).bind(chat,msg.message_id,media.file_id,ext,media.file_size,sourceLang,targetLang,engine,voice,slot,translateProvider,removeSubtitles).run()
   const result=await env.MEMORY_DB.prepare(
    'SELECT id FROM pyvt_kaggle_jobs WHERE chat_id=? AND message_id=?'
   ).bind(chat,msg.message_id).all<{id:number}>()
   await send('Video job #'+result.results[0]?.id+' queued: '+engine.toUpperCase()+
-   ' TTS, '+(sourceLang==='auto'?'auto-detect':sourceLang)+' → '+targetLang+' ('+translateProvider+' translation)'+'. Kaggle will process when available. /dub_status')
+   ' TTS, '+(sourceLang==='auto'?'auto-detect':sourceLang)+' → '+targetLang+' ('+translateProvider+' translation, original subtitles '+(removeSubtitles?'remove':'keep')+')'+'. Kaggle will process when available. /dub_status')
  }catch(e){
   console.error('pyVideoTrans Telegram request failed',e instanceof Error?e.name:'unknown')
   await send('The video dubbing queue is unavailable. No new Kaggle GPU job was confirmed.').catch(()=>undefined)
@@ -615,7 +617,7 @@ export async function pyvtGeminiHealth(env:VideoEnv):Promise<void>{
 }
 function renderKernel(job:Job,inputUrl:string,voiceB64:string,translateUrl:string,ttsUrl:string):string{
  const task={url:inputUrl,source:job.source_lang,target:job.target_lang,
-  provider:job.engine,voice:job.voice,translation_provider:job.translation_provider,ext:job.file_ext,voice_ref_b64:voiceB64,translate_url:translateUrl,tts_url:ttsUrl}
+  provider:job.engine,voice:job.voice,translation_provider:job.translation_provider,remove_subtitles:job.remove_subtitles===1,ext:job.file_ext,voice_ref_b64:voiceB64,translate_url:translateUrl,tts_url:ttsUrl}
  // Generated script embeds an expiring URL only, never a Telegram token or Kaggle credential.
  return [
  'import json, os, sys, subprocess, pathlib, shutil, base64',
@@ -634,25 +636,30 @@ function renderKernel(job:Job,inputUrl:string,voiceB64:string,translateUrl:strin
  "            if total>1024*1024*1024: raise ValueError('Video >1GiB')",
  "            dst.write(chunk)",
  "if video.stat().st_size<4096: raise ValueError('Video empty')",
- "# VSR uses its own Python 3.12 venv, inside THIS SAME Kaggle notebook.",
- "vsr=ROOT/'video-subtitle-remover'",
- "subprocess.run(['git','clone','--quiet','--depth','1','https://github.com/canibeyours2001-ui/video-subtitle-remover.git',str(vsr)],check=True,timeout=140)",
- "subprocess.run(['uv','python','install','3.12'],check=True,timeout=260)",
- "subprocess.run(['uv','venv','--python','3.12',str(ROOT/'vsr-venv')],check=True,timeout=120)",
- "vsrpy=str(ROOT/'vsr-venv/bin/python')",
- "subprocess.run(['uv','pip','install','--python',vsrpy,'paddlepaddle==3.0.0','torch==2.7.0','torchvision==0.22.0','onnxruntime==1.22.0'],check=True,timeout=1100)",
- "subprocess.run(['uv','pip','install','--python',vsrpy,'-r',str(vsr/'requirements.txt')],check=True,timeout=1300)",
- "info=subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries','stream=width,height','-of','json',str(video)],capture_output=True,text=True,check=True,timeout=40)",
- "stream=json.loads(info.stdout)['streams'][0]",
- "width,height=int(stream['width']),int(stream['height'])",
- "if not(16<=width<=7680 and 16<=height<=7680):raise ValueError('Invalid video dimensions')",
- "# Limit removal to subtitle band; do not erase random text throughout the video.",
- "clean=ROOT/('clean.'+TASK['ext'])",
- "vsr_cmd=[vsrpy,str(vsr/'backend/main.py'),'-i',str(video),'-o',str(clean),'-c',str(int(height*0.55)),str(int(height*0.98)),'0',str(width), '--inpaint-mode','sttn-auto']",
- "subprocess.run(vsr_cmd,check=True,cwd=str(vsr),timeout=3000)",
- "if not clean.exists() or clean.stat().st_size<4096:raise RuntimeError('VSR subtitle cleanup failed')",
- "video=clean",
- "print('PYVT_VSR_CLEAN_READY',str(clean),flush=True)",
+ "# Remove burned-in subtitles only when the user selected Yes; skip expensive VSR otherwise.",
+ "if TASK.get('remove_subtitles',True):",
+ "    # VSR runs in its own Python 3.12 environment in this Kaggle job.",
+ "    vsr=ROOT/'video-subtitle-remover'",
+ "    subprocess.run(['git','clone','--quiet','--depth','1','https://github.com/canibeyours2001-ui/video-subtitle-remover.git',str(vsr)],check=True,timeout=140)",
+ "    subprocess.run(['uv','python','install','3.12'],check=True,timeout=260)",
+ "    subprocess.run(['uv','venv','--python','3.12',str(ROOT/'vsr-venv')],check=True,timeout=120)",
+ "    vsrpy=str(ROOT/'vsr-venv/bin/python')",
+ "    subprocess.run(['uv','pip','install','--python',vsrpy,'paddlepaddle==3.0.0','torch==2.7.0','torchvision==0.22.0','onnxruntime==1.22.0'],check=True,timeout=1100)",
+ "    subprocess.run(['uv','pip','install','--python',vsrpy,'-r',str(vsr/'requirements.txt')],check=True,timeout=1300)",
+ "    info=subprocess.run(['ffprobe','-v','error','-select_streams','v:0','-show_entries','stream=width,height','-of','json',str(video)],capture_output=True,text=True,check=True,timeout=40)",
+ "    stream=json.loads(info.stdout)['streams'][0]",
+ "    width,height=int(stream['width']),int(stream['height'])",
+ "    if not(16<=width<=7680 and 16<=height<=7680):raise ValueError('Invalid video dimensions')",
+ "    clean=ROOT/('clean.'+TASK['ext'])",
+ "    vsr_cmd=[vsrpy,str(vsr/'backend/main.py'),'-i',str(video),'-o',str(clean),'-c',str(int(height*0.43)),str(int(height*0.96)),str(int(width*0.02)),str(int(width*0.98)),'--inpaint-mode','sttn-det']",
+ "    subprocess.run(vsr_cmd,check=True,cwd=str(vsr),timeout=3000)",
+ "    if not clean.exists() or clean.stat().st_size<4096:raise RuntimeError('VSR subtitle cleanup failed')",
+ "    # Save a persistent intermediate to Kaggle Outputs for manual recovery without rerunning VSR.",
+ "    shutil.copy2(clean,'/kaggle/working/pyvt_cleaned_video.'+TASK['ext'])",
+ "    video=clean",
+ "    print('PYVT_VSR_CLEAN_READY',str(clean),flush=True)",
+ "else:",
+ "    print('PYVT_VSR_SKIPPED_BY_SELECTION',flush=True)",
  "repo=ROOT/'pyvideotrans'",
  "subprocess.run(['git','clone','--quiet','--depth','1','--branch','main','https://github.com/canibeyours2001-ui/pyvideotrans.git',str(repo)],check=True,timeout=120)",
  "subprocess.run(['uv','python','install','3.10'],check=True,timeout=240)",
@@ -892,7 +899,7 @@ export async function pollPyvt(env:VideoEnv):Promise<void>{
   return
  }
  const active=await env.MEMORY_DB.prepare(
-  "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,translation_provider,voice_slot,status,version_number,created_at,error_message "+
+  "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,translation_provider,remove_subtitles,voice_slot,status,version_number,created_at,error_message "+
   "FROM pyvt_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain') ORDER BY id LIMIT 1"
  ).bind().all<Job>()
  const job=active.results[0]
@@ -959,7 +966,7 @@ export async function pollPyvt(env:VideoEnv):Promise<void>{
  ).bind().run()
  if(!locked.meta.changes)return
  const first=await env.MEMORY_DB.prepare(
-  "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,translation_provider,voice_slot,status,version_number,created_at,error_message "+
+  "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,translation_provider,remove_subtitles,voice_slot,status,version_number,created_at,error_message "+
   "FROM pyvt_kaggle_jobs WHERE status='submitting' ORDER BY id LIMIT 1"
  ).bind().all<Job>()
  const next=first.results[0]
@@ -985,8 +992,8 @@ export async function pollPyvt(env:VideoEnv):Promise<void>{
     next.engine==='gemini'?
      'https://vite-react-template.canibeyours2001.workers.dev/telegram/webhook?pvtts='+
      next.id+'&expire='+expires+'&sig='+await signature(env.TELEGRAM_WEBHOOK_SECRET,next.id,expires,'tts'):''),
-   language:'python',kernelType:'script',isPrivate:true,enableGpu:true,
-   enableInternet:true,machineShape:'NvidiaTeslaT4',sessionTimeoutSeconds:3600,
+   language:'python',kernelType:'script',isPrivate:true,enableGpu:next.engine==='vox'||next.remove_subtitles===1,
+   enableInternet:true,...((next.engine==='vox'||next.remove_subtitles===1)?{machineShape:'NvidiaTeslaT4'}:{}),sessionTimeoutSeconds:3600,
    datasetDataSources:[],competitionDataSources:[],kernelDataSources:[],modelDataSources:[]
   })
   const version=Number(response.versionNumber||response.version_number||0)

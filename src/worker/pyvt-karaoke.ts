@@ -1,147 +1,181 @@
-/** Python appended to the private Kaggle job to burn timed, word-by-word captions.
- * Transcribes the final DUBBED audio (not the source) so timing matches speech.
- * It uses CPU-based faster-whisper and FFmpeg; API keys never appear here. */
+/** Aspect-safe karaoke captions; prefer pyVideoTrans's aligned target SRT to a second ASR pass. */
 export const karaokePython = String.raw`
 try:
-    import re, subprocess, pathlib, sys
-    # Strictly run on the output audio so words match the actual generated dubbing.
-    subprocess.run([sys.executable,'-m','pip','install','-q','faster-whisper'],check=True,timeout=360)
-    from faster_whisper import WhisperModel
+    import re, pathlib, subprocess, sys, json, shutil, unicodedata
     result=pathlib.Path('/kaggle/working/pyvideotrans_result.mp4')
-    model=WhisperModel('small',device='cpu',compute_type='int8')
-    # Feed an ndarray, not an MP4 path. Kaggle's PyAV build lacks the
-    # metadata_errors argument used by faster-whisper's path decoder.
-    import numpy as np
-    wav_bytes=subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-i',str(result),
-        '-vn','-ac','1','-ar','16000','-f','f32le','pipe:1'],check=True,
-        stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=180).stdout
-    audio=np.frombuffer(wav_bytes,dtype=np.float32)
-    if audio.size<16000: raise RuntimeError('Dubbed audio could not be decoded for karaoke')
-    segments,_=model.transcribe(audio,language=TASK['target'],word_timestamps=True,vad_filter=True,beam_size=2)
-    words=[]
-    for seg in segments:
-        for w in (seg.words or []):
-            value=w.word.strip()
-            if value and w.start is not None and w.end is not None and w.end>w.start:
-                words.append((float(w.start),float(w.end),value))
-    if not words:
-        print('PYVT_KARAOKE_RETRY_NO_VAD',flush=True)
+    if not result.exists() or result.stat().st_size<4096:
+        raise RuntimeError('Missing dubbed MP4')
+    meta=json.loads(subprocess.run(['ffprobe','-v','error','-select_streams','v:0',
+        '-show_entries','stream=width,height','-of','json',str(result)],
+        stdout=subprocess.PIPE,text=True,check=True,timeout=40).stdout)['streams'][0]
+    width,height=int(meta['width']),int(meta['height'])
+    if not(64<=width<=7680 and 64<=height<=7680):
+        raise ValueError('Invalid output dimensions')
+    # ASS coordinates match the ORIGINAL output's aspect ratio, including portrait video.
+    fontsize=max(24,min(52,int(width*0.052)))
+    margin_x=max(16,int(width*0.075))
+    margin_y=max(25,int(height*0.085))
+    def at(t):
+        cent=int(max(0,t)*100)
+        return str(cent//360000)+':'+str(cent//6000%60).zfill(2)+':'+str(cent//100%60).zfill(2)+'.'+str(cent%100).zfill(2)
+    def clean(t):
+        return re.sub(r'[{}\\]','',str(t)).replace('\n',' ').replace('\r',' ').strip()
+    def units(t):
+        return sum(0 if unicodedata.category(c).startswith('M') else (0.5 if c.isascii() else 1.0)
+                   for c in t)
+    max_units=max(12,(width-2*margin_x)/(fontsize*0.72))
+    def parts(token):
+        # Split unusually long unspaced Myanmar phrases without cutting combining marks.
         try:
-            segments,_=model.transcribe(audio,language=TASK['target'],
-                 word_timestamps=True,vad_filter=False,beam_size=2,
-                 condition_on_previous_text=False)
-            for seg in segments:
-                for w in (seg.words or []):
-                    token=w.word.strip()
-                    if token and w.start is not None and w.end is not None and w.end>w.start:
-                        words.append((float(w.start),float(w.end),token))
+            import regex
+            chars=regex.findall(r'\X',token)
+        except ImportError:
+            chars=list(token)
+        out=[];buf=''
+        for ch in chars:
+            if buf and units(buf+ch)>max_units*0.65:
+                out.append(buf);buf=''
+            buf+=ch
+        if buf:out.append(buf)
+        return out
+    def srt_time(t):
+        try:
+            h,m,s=t.replace(',','.').split(':')
+            return float(h)*3600+float(m)*60+float(s)
+        except ValueError:
+            return 0.0
+    words=[]
+    root=pathlib.Path('/kaggle/temp/pyvideotrans-job/results')
+    paths=list(root.rglob('*.srt')) if root.exists() else []
+    def score(path):
+        try:
+            content=path.read_text(encoding='utf-8-sig',errors='replace')
+            n=(sum('\u1000'<=c<='\u109f' for c in content) if TASK['target']=='my'
+               else sum(c.isascii() and c.isalpha() for c in content))
+            return n+(100 if 'target' in path.name.lower() else 0)
+        except OSError:
+            return -1
+    # Reuse already-produced translated SRT instead of transcribing the same audio again.
+    for path in sorted(paths,key=score,reverse=True):
+        maybe=[]
+        try:
+            srt=path.read_text(encoding='utf-8-sig',errors='replace')
+            for block in re.split(r'\n\s*\n',srt.replace('\r\n','\n')):
+                match=re.search(r'(\d\d:\d\d:\d\d[,.]\d+)\s*-->\s*(\d\d:\d\d:\d\d[,.]\d+)',block)
+                if not match:continue
+                a,b=srt_time(match.group(1)),srt_time(match.group(2))
+                line=re.sub(r'<[^>]*>|\{\\[^}]*\}',' ',block[match.end():]).strip()
+                tokens=[]
+                for token in line.split():
+                    tokens.extend(parts(clean(token)))
+                if b<=a or not tokens:continue
+                weights=[max(0.2,units(token)) for token in tokens]
+                t=a;total=sum(weights)
+                for token,weight in zip(tokens,weights):
+                    nxt=min(b,t+(b-a)*weight/total)
+                    maybe.append((t,max(t+0.06,nxt),token));t=nxt
+            if maybe and (TASK['target']!='my' or score(path)>2):
+                words=maybe
+                print('PYVT_KARAOKE_REUSED_TARGET_SRT',len(words),flush=True)
+                break
         except Exception as exc:
-            print('PYVT_KARAOKE_RETRY_ERROR',type(exc).__name__,flush=True)
+            print('PYVT_KARAOKE_SRT_READ_FAILED',type(exc).__name__,flush=True)
     if not words:
-        # Fall back to the translated subtitles produced by pyVideoTrans,
-        # approximating individual word timings within each SRT caption.
-        srt_files=list((pathlib.Path('/kaggle/temp/pyvideotrans-job/results')).rglob('*.srt'))
-        def srt_score(path):
-            try:
-                body=path.read_text(encoding='utf-8-sig',errors='replace')
-            except Exception:
-                return -1
-            letters=(sum('\u1000'<=ch<='\u109f' for ch in body) if TASK['target']=='my'
-                     else sum(ch.isascii() and ch.isalpha() for ch in body))
-            return letters + (len(body)//500 if 'target' in path.name.lower() else 0)
-        def srt_time(s):
-            pieces=s.strip().replace(',', '.').split(':')
-            try:
-                return float(pieces[-1])+60*int(pieces[-2])+3600*int(pieces[-3])
-            except (IndexError,ValueError):
-                return 0.0
-        for path in sorted(srt_files,key=srt_score,reverse=True):
-            try:
-                text=path.read_text(encoding='utf-8-sig',errors='replace')
-                for block in re.split(r'\n\s*\n',text.replace('\r\n','\n')):
-                    match=re.search(r'(\d\d:\d\d:\d\d[,.]\d+)\s*-->\s*(\d\d:\d\d:\d\d[,.]\d+)',block)
-                    if not match:continue
-                    start,end=srt_time(match.group(1)),srt_time(match.group(2))
-                    caption=block[match.end():]
-                    caption=re.sub(r'<[^>]*>|\{\\[^}]*\}',' ',caption)
-                    tokens=[w for w in re.split(r'\s+',caption.strip()) if w and w!='-']
-                    if end<=start or not tokens:continue
-                    weights=[max(1,len(w)) for w in tokens];total=sum(weights)
-                    t=start
-                    for token,weight in zip(tokens,weights):
-                        next_t=min(end,t+(end-start)*weight/total)
-                        words.append((t,max(t+0.09,next_t),token));t=next_t
-                if words:
-                    print('PYVT_KARAOKE_APPROX_WORDS_FROM_SRT',len(words),flush=True)
-                    break
-            except Exception as exc:
-                print('PYVT_KARAOKE_SRT_ERROR',type(exc).__name__,flush=True)
+        print('PYVT_KARAOKE_SRT_MISSING_TRANSCRIBE_FALLBACK',flush=True)
+        subprocess.run([sys.executable,'-m','pip','install','-q','faster-whisper'],check=True,timeout=360)
+        from faster_whisper import WhisperModel
+        import numpy as np
+        blob=subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-i',str(result),
+            '-vn','-ac','1','-ar','16000','-f','f32le','pipe:1'],
+            check=True,stdout=subprocess.PIPE,timeout=180).stdout
+        audio=np.frombuffer(blob,dtype=np.float32)
+        if audio.size<16000:raise RuntimeError('Dubbed audio too short')
+        model=WhisperModel('base',device='cpu',compute_type='int8')
+        segments,_=model.transcribe(audio,language=TASK['target'],
+            word_timestamps=True,vad_filter=True,beam_size=2)
+        for seg in segments:
+            for word in seg.words or []:
+                if word.word.strip() and word.start is not None and word.end is not None and word.end>word.start:
+                    for sub in parts(clean(word.word)):
+                        words.append((float(word.start),float(word.end),sub))
+        print('PYVT_KARAOKE_TRANSCRIBED_WORDS',len(words),flush=True)
     if not words:
-        print('PYVT_KARAOKE_SKIPPED_NO_WORDS_OR_SUBTITLES; DUBBED_MP4_KEPT',flush=True)
-    if words:
-        def at(t):
-            cent=int(max(0,t)*100)
-            return str(cent//360000)+':'+str(cent//6000%60).zfill(2)+':'+str(cent//100%60).zfill(2)+'.'+str(cent%100).zfill(2)
-        def safe(t):
-            return re.sub(r'[{}\\\\]','',t).replace('\\\\N',' ').replace('\\n',' ').strip()
-        header='''[Script Info]
-        ScriptType: v4.00+
-        PlayResX: 1280
-        PlayResY: 720
-        WrapStyle: 2
-        ScaledBorderAndShadow: yes
-        [V4+ Styles]
-        Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-        Style: Karaoke,Noto Sans,52,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,28,28,68,1
-        [Events]
-        Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-        '''
-        lines=[header]
-        for i,(start,end,token) in enumerate(words):
-            first=(i//5)*5
-            section=words[first:min(first+5,len(words))]
-            parts=[]
-            for j,(_,__,word) in enumerate(section):
-                current=first+j==i
-                txt=safe(word)
-                if current: parts.append(r'{\c&H0000D7FF&\fscx108\fscy108}'+txt+r'{\c&H00FFFFFF&\fscx100\fscy100}')
-                else: parts.append(txt)
-            caption=' '.join(parts)
-            lines.append('Dialogue: 0,'+at(start)+','+at(max(end,start+0.13))+',Karaoke,,0,0,0,,'+caption+'\n')
-        # Use an OFL-licensed Myanmar font for correct script shaping.
-        # A download problem is non-fatal; FFmpeg can fall back to installed fonts.
+        print('PYVT_KARAOKE_SKIPPED_NO_WORDS; DUBBED_MP4_KEPT',flush=True)
+    else:
+        # Pre-group captions by actual rendered width: never one unbounded 5-word line.
+        groups=[];group=[];weight=0.0;start=0.0
+        for item in words:
+            w=units(item[2])+(0.5 if group else 0)
+            if group and (weight+w>max_units or len(group)>=4 or item[1]-start>3.2):
+                groups.append(group);group=[];weight=0.0
+            if not group:start=item[0]
+            group.append(item);weight+=w
+        if group:groups.append(group)
         fontdir=pathlib.Path('/kaggle/temp/pyvt_karaoke_fonts')
         fontdir.mkdir(parents=True,exist_ok=True)
+        fontname='Noto Sans'
         fontfile=fontdir/'NotoSansMyanmar.ttf'
         if TASK['target']=='my':
-            try:
-                import urllib.request
-                fonturl='https://raw.githubusercontent.com/google/fonts/main/ofl/notosansmyanmar/NotoSansMyanmar%5Bwdth%2Cwght%5D.ttf'
-                with urllib.request.urlopen(fonturl,timeout=20) as src:
-                    blob=src.read(1200000)
-                if len(blob)<100000 or blob[:4] not in (b'\x00\x01\x00\x00',b'OTTO'):
-                    raise ValueError('Font download invalid')
-                fontfile.write_bytes(blob)
-            except Exception:
-                print('PYVT_MYANMAR_FONT_FALLBACK',flush=True)
-        if TASK['target']=='my' and fontfile.exists():
-            lines[0]=header.replace('Style: Karaoke,Noto Sans,','Style: Karaoke,Noto Sans Myanmar,')
+            if not fontfile.exists():
+                try:
+                    import urllib.request
+                    url='https://raw.githubusercontent.com/google/fonts/main/ofl/notosansmyanmar/NotoSansMyanmar%5Bwdth%2Cwght%5D.ttf'
+                    with urllib.request.urlopen(url,timeout=12) as resp:
+                        blob=resp.read(1200000)
+                    if len(blob)<100000 or blob[:4] not in (b'\x00\x01\x00\x00',b'OTTO'):
+                        raise ValueError('Invalid font')
+                    fontfile.write_bytes(blob)
+                except Exception:
+                    print('PYVT_MYANMAR_FONT_FALLBACK',flush=True)
+            if fontfile.exists():fontname='Noto Sans Myanmar'
+        header=f'''[Script Info]
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Karaoke,{fontname},{fontsize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,{margin_x},{margin_x},{margin_y},1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+'''
+        lines=[header]
+        for group in groups:
+            for index,(a,b,_) in enumerate(group):
+                fragments=[]
+                for j,(_,__,token) in enumerate(group):
+                    token=clean(token)
+                    if j==index:
+                        fragments.append(r'{\c&H0000D7FF&}'+token+r'{\c&H00FFFFFF&}')
+                    else:fragments.append(token)
+                caption=' '.join(fragments)
+                lines.append('Dialogue: 0,'+at(a)+','+at(max(b,a+0.12))+',Karaoke,,0,0,0,,'+caption+'\n')
         ass=pathlib.Path('/kaggle/working/pyvt_karaoke.ass')
         ass.write_text(''.join(lines),encoding='utf-8')
-        rendered=pathlib.Path('/kaggle/working/pyvt_karaoke_render.mp4')
+        # Keep an output checkpoint before final re-encode when disk space allows.
         try:
-            subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(result),
-                        '-vf','ass='+str(ass)+(':fontsdir='+str(fontdir) if fontfile.exists() else ''),'-map','0:v:0','-map','0:a?','-c:v','libx264',
-                        '-preset','veryfast','-crf','21','-c:a','copy','-movflags','+faststart',str(rendered)],
-                           check=True,timeout=1800)
-            if rendered.stat().st_size<4096:raise RuntimeError('Karaoke video render empty')
-            rendered.replace(result)
-            print('PYVT_KARAOKE_WORDS',len(words),flush=True)
-        except Exception as exc:
-            print('PYVT_KARAOKE_RENDER_FAILED_KEEPING_DUB',type(exc).__name__,flush=True)
+            if result.stat().st_size<=350*1024*1024 and shutil.disk_usage(result.parent).free>result.stat().st_size*2+100*1024*1024:
+                shutil.copy2(result,'/kaggle/working/pyvt_dubbed_before_captions.mp4')
+        except OSError:
+            pass
+        rendered=pathlib.Path('/kaggle/working/pyvt_karaoke_render.mp4')
+        vf='ass='+str(ass)+(':fontsdir='+str(fontdir) if fontfile.exists() else '')
+        subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(result),
+            '-vf',vf,'-map','0:v:0','-map','0:a?','-sn','-dn','-c:v','libx264',
+            '-preset','veryfast','-crf','21','-pix_fmt','yuv420p',
+            '-c:a','copy','-movflags','+faststart',str(rendered)],
+            check=True,timeout=1800)
+        if rendered.stat().st_size<4096:raise RuntimeError('Karaoke video render empty')
+        rendered.replace(result)
+        print('PYVT_KARAOKE_SAFEFRAME_WORDS',len(words),'GROUPS',len(groups),'SIZE',width,height,flush=True)
+    pathlib.Path('/kaggle/working/pyvt_stage.json').write_text(json.dumps({
+        'dubbed':True,'captions_burned':bool(words),'original_subtitles_removed':bool(TASK.get('remove_subtitles',True)),
+        'output':'pyvideotrans_result.mp4'},indent=2))
     print('PYVIDEOTRANS_VIDEO_READY',flush=True)
 except Exception as exc:
     print('PYVT_KARAOKE_SKIPPED_KEEPING_DUB',type(exc).__name__,str(exc)[:180],flush=True)
     assert pathlib.Path('/kaggle/working/pyvideotrans_result.mp4').stat().st_size>4096
     print('PYVIDEOTRANS_VIDEO_READY',flush=True)
+
 `;

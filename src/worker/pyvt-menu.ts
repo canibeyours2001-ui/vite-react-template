@@ -8,7 +8,7 @@ export type DubMenuEnv={MEMORY_DB:DB;TELEGRAM_BOT_TOKEN:string}
 export type DubCallback={id:string;data?:string;from:{id:number};
  message?:{chat:{id:number;type?:string};message_id:number}}
 type Selection={chat_id:string;source_lang:string;target_lang:string;engine:string;
- voice:string;voice_slot:number;translation_provider:string;stage:string;updated_at:number}
+ voice:string;voice_slot:number;translation_provider:string;remove_subtitles:number;stage:string;updated_at:number}
 type Button={text:string;callback_data:string}
 const edgeVoices:Record<string,{name:string;code:string}[]>={
  en:[
@@ -59,6 +59,15 @@ export async function ensureDubMenu(db:DB):Promise<void>{
   'voice_slot INTEGER NOT NULL DEFAULT 0,translation_provider TEXT NOT NULL DEFAULT "freellm",stage TEXT NOT NULL DEFAULT "target",'+
   'updated_at INTEGER NOT NULL DEFAULT (unixepoch()))').bind().run()
  await db.prepare('ALTER TABLE pyvt_dub_selections ADD COLUMN translation_provider TEXT NOT NULL DEFAULT "freellm"').bind().run().catch(()=>undefined)
+ await db.prepare('ALTER TABLE pyvt_dub_selections ADD COLUMN remove_subtitles INTEGER NOT NULL DEFAULT 1 CHECK(remove_subtitles IN (0,1))').bind().run().catch(()=>undefined)
+}
+async function removeMenu(env:DubMenuEnv,chat:string,target:'en'|'my'){
+ await send(env,'sendMessage',{chat_id:chat,
+  text:'Step 2 — '+(target==='my'?'Burmese':'English')+' dubbing: remove the original subtitles embedded in the video?\n\n✅ Yes — AI removal (slower, best for Chinese hard subtitles).\n⚡ No — skip AI removal (faster, original picture unchanged).',
+  reply_markup:buttons([
+   [{text:'✅ Yes — remove original subtitles',callback_data:'pd:remove:yes'}],
+   [{text:'⚡ No — keep original picture',callback_data:'pd:remove:no'}]
+  ])})
 }
 async function translatorMenu(env:DubMenuEnv,chat:string){
  await send(env,'sendMessage',{chat_id:chat,
@@ -84,14 +93,14 @@ async function engineMenu(env:DubMenuEnv,chat:string,target:'en'|'my'){
 }
 export async function startDubMenu(env:DubMenuEnv,chat:string,target?:'en'|'my'):Promise<void>{
  await ensureDubMenu(env.MEMORY_DB)
- const stage=target?(target==='my'?'translator':'engine'):'target'
+ const stage=target?'remove':'target'
  await env.MEMORY_DB.prepare(
   'INSERT INTO pyvt_dub_selections(chat_id,stage,source_lang,target_lang,engine,voice,voice_slot,translation_provider) '+
   "VALUES(?,?,'auto',?,'edge','',0,'freellm') "+
   "ON CONFLICT(chat_id) DO UPDATE SET stage=excluded.stage,source_lang='auto',"+
-  'target_lang=excluded.target_lang,translation_provider=\'freellm\',voice=\'\',voice_slot=0,updated_at=unixepoch()'
+  'target_lang=excluded.target_lang,translation_provider=\'freellm\',remove_subtitles=1,voice=\'\',voice_slot=0,updated_at=unixepoch()'
  ).bind(chat,stage,target||'my').run()
- if(target){if(target==='my')await translatorMenu(env,chat);else await engineMenu(env,chat,target);return}
+ if(target){await removeMenu(env,chat,target);return}
  await send(env,'sendMessage',{chat_id:chat,
   text:'🎬 Dub my video\nChoose only the TARGET language; original speech is detected automatically.',
   reply_markup:buttons([
@@ -102,26 +111,27 @@ export async function startDubMenu(env:DubMenuEnv,chat:string,target?:'en'|'my')
 export async function selectedDubCommand(env:DubMenuEnv,chat:string):Promise<string|null>{
  await ensureDubMenu(env.MEMORY_DB)
  const r=await env.MEMORY_DB.prepare(
-  'SELECT source_lang,target_lang,engine,voice,voice_slot,translation_provider,stage FROM pyvt_dub_selections WHERE chat_id=?'
+  'SELECT source_lang,target_lang,engine,voice,voice_slot,translation_provider,remove_subtitles,stage FROM pyvt_dub_selections WHERE chat_id=?'
  ).bind(chat).all<Selection>()
  const s=r.results[0]
  if(!s||s.stage!=='ready'||s.source_lang!=='auto'||!['en','my'].includes(s.target_lang))return null
+ const mode=s.remove_subtitles===0?' keep':' remove'
  if(s.engine==='vox'){
   if(!Number.isInteger(s.voice_slot)||s.voice_slot<0||s.voice_slot>5)return null
-  return '/dub vox auto '+s.target_lang+' '+s.voice_slot+' '+s.translation_provider
+  return '/dub vox auto '+s.target_lang+' '+s.voice_slot+' '+s.translation_provider+mode
  }
  if(s.engine==='edge'){
   if(!(edgeVoices[s.target_lang]||[]).some(v=>v.code===s.voice))return null
-  return '/dub edge auto '+s.target_lang+' '+s.voice+' '+s.translation_provider
+  return '/dub edge auto '+s.target_lang+' '+s.voice+' '+s.translation_provider+mode
  }
  if(s.engine==='gemini'){
   const [model,voice]=s.voice.split('-')
   if(!['flash','lite'].includes(model)||!geminiVoices.some(v=>v.code===voice)||
    (s.target_lang==='my'&&model!=='flash'))return null
-  return '/dub gemini auto '+s.target_lang+' '+s.voice+' '+s.translation_provider
+  return '/dub gemini auto '+s.target_lang+' '+s.voice+' '+s.translation_provider+mode
  }
  if(s.engine==='kokoro'&&s.target_lang==='en'&&kokoroVoices.some(v=>v.code===s.voice))
-  return '/dub kokoro auto en '+s.voice+' '+s.translation_provider
+  return '/dub kokoro auto en '+s.voice+' '+s.translation_provider+mode
  return null
 }
 export async function dubMenuCallback(env:DubMenuEnv,cb:DubCallback):Promise<boolean|void>{
@@ -130,7 +140,7 @@ export async function dubMenuCallback(env:DubMenuEnv,cb:DubCallback):Promise<boo
   if(!chat||String(cb.from.id)!==chat||!cb.data?.startsWith('pd:'))return
   await ensureDubMenu(env.MEMORY_DB)
   const current=(await env.MEMORY_DB.prepare(
-   'SELECT chat_id,source_lang,target_lang,engine,voice,voice_slot,translation_provider,stage,updated_at FROM pyvt_dub_selections WHERE chat_id=?'
+   'SELECT chat_id,source_lang,target_lang,engine,voice,voice_slot,translation_provider,remove_subtitles,stage,updated_at FROM pyvt_dub_selections WHERE chat_id=?'
   ).bind(chat).all<Selection>()).results[0]
   if(!current)throw new Error('Selection expired')
   const [_,action,value]=cb.data.split(':')
@@ -138,9 +148,17 @@ export async function dubMenuCallback(env:DubMenuEnv,cb:DubCallback):Promise<boo
    await env.MEMORY_DB.prepare(
     "UPDATE pyvt_dub_selections SET target_lang=?,source_lang='auto',stage=?,translation_provider='freellm',updated_at=unixepoch() "+
     "WHERE chat_id=? AND stage='target'"
-   ).bind(value,value==='my'?'translator':'engine',chat).run()
-   if(value==='my')await translatorMenu(env,chat)
-   else await engineMenu(env,chat,value)
+   ).bind(value,'remove',chat).run()
+   await removeMenu(env,chat,value)
+   return
+  }
+  if(action==='remove'&&current.stage==='remove'&&['yes','no'].includes(value)){
+   const stage=current.target_lang==='my'?'translator':'engine'
+   await env.MEMORY_DB.prepare(
+    "UPDATE pyvt_dub_selections SET remove_subtitles=?,stage=?,updated_at=unixepoch() WHERE chat_id=? AND stage='remove'"
+   ).bind(value==='yes'?1:0,stage,chat).run()
+   if(current.target_lang==='my')await translatorMenu(env,chat)
+   else await engineMenu(env,chat,'en')
    return
   }
   if(action==='translator'&&current.stage==='translator'&&['freellm','gemini','google'].includes(value)){
@@ -237,6 +255,7 @@ export async function dubMenuCallback(env:DubMenuEnv,cb:DubCallback):Promise<boo
     '\n🎧 Source: auto-detected'+
     '\n🎙 Engine: '+(current.engine==='edge'?'Microsoft Edge':current.engine==='vox'?'VoxCPM2':current.engine==='kokoro'?'Kokoro':'Gemini TTS')+
     '\n🔊 Voice/model: '+label+
+    '\n🧹 Original subtitles: '+(current.remove_subtitles===1?'Remove':'Keep')+
     '\n🌐 Translation: '+(current.translation_provider==='freellm'?'FreeLLM':current.translation_provider==='google'?'Google free':'Gemini')+
     '\n\nSend a video up to 20 MB, or use /dub_upload for larger files. Your recent video is reused automatically.'
    })
