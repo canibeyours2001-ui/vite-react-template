@@ -51,6 +51,7 @@ const HELP='Video translation + dubbing (private Kaggle jobs):\n'+
  '/dub vox auto my — optional VoxCPM2 dubbing on Kaggle T4 GPU.\n'+
  '/dub vox auto my 1 — optional saved VoxCPM2 voice slot 1.\n'+
  '/dub_status — latest dubbing job status.\n'+
+ '/dub_recover — resend already-generated MP4 from a failed Kaggle run without starting GPU.\n'+
  '/dub_upload — private browser upload for videos over 300 MB (up to 1 GiB).\n'+
  'Attach a video <=20MB with /dub ... as its caption, or reply to a video with the command. Use /dub_upload for larger files.\n'+
  'Input must have audible speech. Speech detection may reject silent or music-only videos.'
@@ -82,7 +83,7 @@ function selectMedia(msg:Message):Media|null{
 export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:string,
  send:(text:string)=>Promise<void>):Promise<boolean>{
  const command=text.trim().split(/\s+/,1)[0]?.split('@')[0].toLowerCase()
- if(!['/dub','/dub_help','/dub_status','/dub_upload'].includes(command))return false
+ if(!['/dub','/dub_help','/dub_status','/dub_upload','/dub_recover'].includes(command))return false
  try{
   await init(env.MEMORY_DB)
   if(command==='/dub_help'){await send(HELP);return true}
@@ -103,6 +104,20 @@ export async function pyvtCommand(env:VideoEnv,msg:Message,chat:string,text:stri
     (j.error_message?'\n'+j.error_message:'')+
     (['submitted','running'].includes(j.status)?'\nKaggle run: '+KERNEL:''):
     'No dubbing job yet. Use /dub_help for the supported commands.')
+   return true
+  }
+  if(command==='/dub_recover'){
+   const found=await env.MEMORY_DB.prepare(
+    "SELECT id,version_number,status FROM pyvt_kaggle_jobs WHERE chat_id=? AND status='failed' AND version_number IS NOT NULL ORDER BY id DESC LIMIT 1"
+   ).bind(chat).all<{id:number;version_number:number;status:string}>()
+   const j=found.results[0]
+   if(!j){await send('No failed Kaggle dub with an existing version is available for recovery.');return true}
+   const claim=await env.MEMORY_DB.prepare(
+    "UPDATE pyvt_kaggle_jobs SET status='recovery-queued',updated_at=unixepoch() WHERE id=? AND status='failed'"
+   ).bind(j.id).run()
+   await send(claim.meta.changes?
+    'Checking saved Kaggle output for dubbing #'+j.id+' (version '+j.version_number+'). No GPU job will be restarted. Delivery will be attempted only once; see /dub_status.':
+    'Recovery was already requested for this dub. Check /dub_status.')
    return true
   }
   // /dub alone opens the language → engine → voice menu. If a video is
@@ -641,6 +656,8 @@ function renderKernel(job:Job,inputUrl:string,voiceB64:string,translateUrl:strin
  "repo=ROOT/'pyvideotrans'",
  "subprocess.run(['git','clone','--quiet','--depth','1','--branch','main','https://github.com/canibeyours2001-ui/pyvideotrans.git',str(repo)],check=True,timeout=120)",
  "subprocess.run(['uv','python','install','3.10'],check=True,timeout=240)",
+ "# Chatterbox TTS is not used by this dubbing pipeline. Its mutable GitHub master.tar.gz",
+ "# breaks uv.lock hash verification; skip only that package, keep hashes for everything else.",
  "subprocess.run(['uv','sync','--frozen','--python','3.10','--no-dev','--no-install-package','chatterbox-tts','--project',str(repo)],check=True,timeout=2100)",
  "python=repo/'.venv/bin/python'",
  "# VoxCPM is an optional provider and is NOT part of the pyVideoTrans uv.lock.",
@@ -842,6 +859,38 @@ export async function pyvtPreflight(env:VideoEnv):Promise<void>{
 export async function pollPyvt(env:VideoEnv):Promise<void>{
  if(!env.KAGGLE_API_TOKEN||!env.MEMORY_DB||!await isReady(env))return
  await init(env.MEMORY_DB)
+ // Recovery only reads outputs from an existing Kaggle version (including an
+ // ERROR run whose MP4 was already written); it never re-submits GPU work.
+ const recover=await env.MEMORY_DB.prepare(
+  "SELECT id,chat_id,version_number,engine,created_at FROM pyvt_kaggle_jobs WHERE status='recovery-queued' ORDER BY id DESC LIMIT 1"
+ ).bind().all<Job>()
+ const existing=recover.results[0]
+ if(existing&&existing.version_number){
+  let startedDelivery=false
+  try{
+   const files=await kaggle(env,'output',{userName:OWNER,kernelSlug:SLUG,versionLabel:'v'+existing.version_number})
+   const url=resultUrl(files)
+   if(!url){
+    await env.MEMORY_DB.prepare("UPDATE pyvt_kaggle_jobs SET status='recovery-unavailable',error_message='Kaggle output URL unavailable; use Kaggle notebook Outputs page',updated_at=unixepoch() WHERE id=? AND status='recovery-queued'").bind(existing.id).run()
+    await reply(env,existing.chat_id,'Kaggle saved MP4 may exist, but the output API did not return a downloadable URL. Open '+KERNEL+' Outputs in Kaggle. No GPU run started.').catch(()=>undefined)
+    return
+   }
+   const claim=await env.MEMORY_DB.prepare(
+    "UPDATE pyvt_kaggle_jobs SET status='recovery-delivering',updated_at=unixepoch() WHERE id=? AND status='recovery-queued'"
+   ).bind(existing.id).run()
+   if(!claim.meta.changes)return
+   startedDelivery=true
+   await sendVideo(env,existing,url)
+   await env.MEMORY_DB.prepare("UPDATE pyvt_kaggle_jobs SET status='done',error_message=NULL,updated_at=unixepoch() WHERE id=? AND status='recovery-delivering'").bind(existing.id).run()
+  }catch(e){
+   const reason=e instanceof Error?e.message:'Kaggle output retrieval failed'
+   await env.MEMORY_DB.prepare(
+    "UPDATE pyvt_kaggle_jobs SET status=?,error_message=?,updated_at=unixepoch() WHERE id=? AND status IN ('recovery-queued','recovery-delivering')"
+   ).bind(startedDelivery?'recovery-uncertain':'recovery-unavailable',reason.slice(0,250),existing.id).run()
+   await reply(env,existing.chat_id,'Dub output recovery could not be confirmed: '+reason.slice(0,130)+'. No GPU re-run was started.').catch(()=>undefined)
+  }
+  return
+ }
  const active=await env.MEMORY_DB.prepare(
   "SELECT id,chat_id,file_id,file_ext,source_lang,target_lang,engine,voice,translation_provider,voice_slot,status,version_number,created_at,error_message "+
   "FROM pyvt_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain') ORDER BY id LIMIT 1"
@@ -906,7 +955,7 @@ export async function pollPyvt(env:VideoEnv):Promise<void>{
   "UPDATE pyvt_kaggle_jobs SET status='submitting',updated_at=unixepoch() WHERE id=("+
   "SELECT id FROM pyvt_kaggle_jobs WHERE status='queued' ORDER BY id LIMIT 1) "+
   "AND NOT EXISTS (SELECT 1 FROM pyvt_kaggle_jobs WHERE status IN "+
-  "('submitting','submitted','running','delivering','submit-uncertain'))"
+  "('submitting','submitted','running','delivering','submit-uncertain','recovery-queued','recovery-delivering'))"
  ).bind().run()
  if(!locked.meta.changes)return
  const first=await env.MEMORY_DB.prepare(

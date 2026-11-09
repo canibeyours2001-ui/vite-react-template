@@ -43,18 +43,34 @@ async function tg(env,method,data) {
 }
 const message = (env,id,text,keyboard) => tg(env,'sendMessage',{chat_id:id,text:truncate(text,4000),reply_markup:keyboard,disable_web_page_preview:true});
 async function media(env,chatId,url,type='document',extra={}) {
-  // Forward verified provider-origin media as a file; never send provider keys to Telegram.
+  // Inspect the actual bytes rather than guessing from provider URLs such as /tts/result.
   if(!safeHost(url,'mvsep.com')&&!safeHost(url,'image-upscaling.net'))throw Error('Untrusted media URL');
   const r=await fetch(url,{headers:extra.cookie?{Cookie:extra.cookie}:{}});
   if(!r.ok)throw Error('Download failed ('+r.status+')');
   const b=await r.blob();
-  if(b.size>48*1024*1024)throw Error('Result exceeds Telegram bot upload size; use the provider link');
+  if(!b.size||b.size>48*1024*1024)throw Error('Invalid result size or exceeds Telegram upload limit');
+  const h=new Uint8Array(await b.slice(0,32).arrayBuffer());
+  const tag=(a,z)=>String.fromCharCode(...h.slice(a,z));
+  let audio=null;
+  if(tag(0,4)==='RIFF'&&tag(8,12)==='WAVE')audio={ext:'wav',mime:'audio/wav'};
+  else if(tag(0,3)==='ID3'||(h.length>2&&h[0]===255&&(h[1]&224)===224&&(h[1]&22)!==16))audio={ext:'mp3',mime:'audio/mpeg'};
+  else if(tag(0,4)==='OggS')audio={ext:'ogg',mime:'audio/ogg'};
+  else if(tag(0,4)==='fLaC')audio={ext:'flac',mime:'audio/flac'};
+  else if(tag(4,8)==='ftyp')audio={ext:'m4a',mime:'audio/mp4'};
+  else if(h.length>2&&h[0]===255&&(h[1]&246)===240)audio={ext:'aac',mime:'audio/aac'};
+  // A provider response labelled application/octet-stream may still contain valid audio.
+  // A text/html or JSON error must never be relabelled .mp3 or sent as a fake .bin.
+  const requiresAudio=type==='audio'||extra.requireAudio===true;
+  if(requiresAudio&&!audio)throw Error('TTS output does not contain a recognized audio header. Not sending result.bin.');
+  const suffix=(new URL(url).pathname.match(/\.([a-z0-9]{2,5})$/i)||[])[1]?.toLowerCase();
+  const suffixExt=['mp3','wav','flac','m4a','aac','png','jpg','jpeg','webp','mp4','zip','ogg'].includes(suffix)?suffix:null;
+  const ext=audio?.ext||suffixExt||(b.type.includes('png')?'png':b.type.includes('jpeg')?'jpg':'bin');
+  const mime=audio?.mime||(ext==='png'?'image/png':ext==='jpg'||ext==='jpeg'?'image/jpeg':b.type||'application/octet-stream');
+  const field=requiresAudio?(['mp3','m4a'].includes(ext)?'audio':'document'):type;
   const form=new FormData();
   form.set('chat_id',String(chatId));
-  const suffix=(new URL(url).pathname.match(/\.([a-z0-9]{2,5})$/i)||[])[1]?.toLowerCase();
-  const ext=['mp3','wav','flac','m4a','png','jpg','jpeg','webp','mp4','zip','ogg'].includes(suffix)?suffix:(type==='audio'||b.type.includes('audio/mpeg')?'mp3':b.type.includes('png')?'png':b.type.includes('jpeg')?'jpg':'bin');
-  form.set(type,new File([b],'result.'+ext,{type:b.type||'application/octet-stream'}));
-  return tg(env,type==='audio'?'sendAudio':type==='photo'?'sendPhoto':'sendDocument',form);
+  form.set(field,new File([b],'result.'+ext,{type:mime}));
+  return tg(env,field==='audio'?'sendAudio':field==='photo'?'sendPhoto':'sendDocument',form);
 }
 async function session(env,id) {
   const row=await env.MEMORY_DB.prepare('SELECT state FROM studio_sessions WHERE chat_id=?').bind(String(id)).first();
@@ -388,7 +404,7 @@ async function deliverResult(env,j,urls) {
   if(!unique.length)throw Error('No supported output URLs in provider result');
   let sent=0;
   for(const u of unique.slice(0,8)) {
-    try {await media(env,j.chat_id,u,/\.(mp3|m4a)(\?|$)/i.test(u)?'audio':'document',{cookie:j.client_slot==null?null:'client_id='+imageIds(env)[j.client_slot]});sent++;}
+    try {await media(env,j.chat_id,u,j.kind==='tts'||/\.(mp3|m4a)(\?|$)/i.test(u)?'audio':'document',{cookie:j.client_slot==null?null:'client_id='+imageIds(env)[j.client_slot],requireAudio:j.kind==='tts'});sent++;}
     catch(err) {if(sent===0)throw err;await message(env,j.chat_id,'Additional output: '+truncate(u,500));}
   }
   if(!sent)throw Error('Could not send result');
