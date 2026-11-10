@@ -343,7 +343,61 @@ async function submitMv(env,chat,s,file,reference) {
   await setSession(env,chat,{step:'home'});
   return;
 }
+async function removeBgWithProviders(env, chat, state, file) {
+  // Claim this Telegram image job exactly once before requesting quota-bearing APIs.
+  const originalState = { ...state, step: 'file' };
+  const lock = await env.MEMORY_DB.prepare(
+    "UPDATE studio_sessions SET state=?,updated_at=? WHERE chat_id=? AND json_extract(state,'$.kind')='removebg' AND json_extract(state,'$.step')='file'"
+  ).bind(JSON.stringify({ ...state, step: 'processing' }), epoch(), String(chat)).run();
+  if (!lock.meta?.changes) return message(env, chat, '⏳ Background removal is already processing.');
+  try {
+    if (!file || !file.size || file.size > LIMIT || !/^image\/(jpeg|png|webp)$/.test(file.type))
+      throw Error('Please send a JPG, PNG, or WebP image under 10 MB.');
+
+    // Keys are private Cloudflare Worker secret bindings, never source/config.
+    const providers = [
+      { name: 'Poof', url: 'https://api.poof.bg/v1/remove', key: env.POOF_API_KEY, header: 'x-api-key', field: 'file' },
+      { name: 'FAPIhub', url: 'https://fapihub.com/v2/rembg/', key: env.FAPIHUB_API_KEY, header: 'ApiKey', field: 'image' },
+    ];
+    const failures = [];
+    for (const provider of providers) {
+      if (!provider.key) { failures.push(provider.name + ' unconfigured'); continue; }
+      const form = new FormData();
+      form.set(provider.field, file, file.name || 'photo.png');
+      if (provider.name === 'Poof') form.set('format', 'png');
+      const response = await fetch(provider.url, {
+        method: 'POST', headers: { [provider.header]: provider.key },
+        body: form, signal: AbortSignal.timeout(45_000),
+      });
+      if (!response.ok) {
+        failures.push(provider.name + ' HTTP ' + response.status);
+        // Fail closed on possibly billed attempts; fallback only on clear rejection.
+        if (response.status >= 500 || response.status === 408) break;
+        continue;
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const png = bytes.length > 8 &&
+        bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71 &&
+        bytes[4] === 13 && bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10;
+      if (!png) throw Error(provider.name + ' returned an unexpected output format; did not retry to avoid consuming credits twice.');
+      if (bytes.length > 18_000_000) throw Error('Processed image is too large for Telegram document delivery.');
+      const out = new FormData();
+      out.set('chat_id', String(chat));
+      out.set('document', new File([bytes], 'background-removed.png', { type: 'image/png' }));
+      out.set('caption', '🧽 Background removed • ' + provider.name + '\nTransparent PNG (original resolution)');
+      await tg(env, 'sendDocument', out);
+      await setSession(env, chat, { step: 'home' });
+      return;
+    }
+    throw Error('Background removal unavailable (' + failures.join(', ') + '). Your image was not processed.');
+  } catch (err) {
+    await setSession(env, chat, originalState);
+    throw err;
+  }
+}
+
 async function uploadImage(env,chat,s,file) {
+  if (s.kind === 'removebg') return removeBgWithProviders(env,chat,s,file);
   const slot=slotFor(env,chat);
   const form=new FormData();
   form.set('image',file);
