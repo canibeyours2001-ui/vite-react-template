@@ -1,4 +1,5 @@
 import {handleAiModelCommand,handleAiModelCallback,getAiModel} from './ai-models'
+import {handleAvatarStaging,pollAvatarGguf} from './avatar-staging'
 import {handleNaturalMessage,handleNaturalCallback,reviewDirectPrompt,pollNaturalActions} from './natural-actions'
 import {streamAIToTelegram} from './stream-telegram-ai'
 import {completeFreeLlm} from './free-llm'
@@ -318,6 +319,8 @@ app.post('/telegram/webhook', async (c) => {
         return
       }
       // Review prompts (including /video) before any billable generation.
+      // Isolated LongCat GGUF staging route; leaves existing WAN commands unchanged.
+      if (await handleAvatarStaging(c.env,msg))return
       if(await reviewDirectPrompt(c.env,msg))return
       if (await handleMediaStudioMessage(c.env,msg)) return
       // Route plain-language media requests to real, allowlisted providers.
@@ -1126,7 +1129,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollAvatarGguf(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }
