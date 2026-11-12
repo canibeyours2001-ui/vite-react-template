@@ -22,8 +22,8 @@ async function quota(env:LtxEnv):Promise<number> {
     headers:auth(env),signal:AbortSignal.timeout(12000)
   })
   if(!response.ok)throw new Error('HF quota check unavailable (HTTP '+response.status+'); no free GPU job started')
-  const data=await response.json() as {current?:unknown}
-  const left=Number(data.current)
+  const data=await response.json() as {remaining?:unknown}
+  const left=Number(data.remaining)
   if(!Number.isFinite(left)||left<0)throw new Error('Invalid HF ZeroGPU quota response')
   if(left<MIN_GPU_QUOTA)throw new Error('LTX-2.5 requires at least 120 free ZeroGPU seconds. Wait for the quota reset.')
   return left
