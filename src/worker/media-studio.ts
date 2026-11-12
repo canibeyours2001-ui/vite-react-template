@@ -1,5 +1,6 @@
 // @ts-nocheck
 import {providerReceipt,duration,aiFooter} from './usage-receipts'
+import {completeFreeLlm} from './free-llm'
 import {UPGEN_MODELS,UPGEN_ASPECTS} from './imageup-generation'
 // CYAW Media Studio: existing Hono/Telegram integration, no second webhook.
 
@@ -8,9 +9,12 @@ const MV = 'https://de.mvsep.com/api';
 const MV_FALLBACK = ['https://de2.mvsep.com/api', 'https://sg.mvsep.com/api'];
 const UP = 'https://image-upscaling.net';
 const IMAGE_MODELS=[
- {id:'@cf/black-forest-labs/flux-1-schnell',name:'FLUX.1 Schnell',steps:4,output:'base64'},
- {id:'@cf/bytedance/stable-diffusion-xl-lightning',name:'SDXL Lightning',steps:4,output:'stream'},
- {id:'@cf/stabilityai/stable-diffusion-xl-base-1.0',name:'SDXL Base 1.0',steps:20,output:'stream'}
+ {id:'@cf/black-forest-labs/flux-1-schnell',name:'FLUX.1 Schnell · fast',steps:4,maxSteps:8,stepChoices:[4,6,8],output:'base64',sizes:false},
+ {id:'@cf/bytedance/stable-diffusion-xl-lightning',name:'SDXL Lightning · fast',steps:4,maxSteps:20,stepChoices:[4,8,12,20],output:'stream',sizes:true},
+ {id:'@cf/stabilityai/stable-diffusion-xl-base-1.0',name:'SDXL Base 1.0 · detail',steps:20,maxSteps:20,stepChoices:[10,15,20],output:'stream',sizes:true},
+ {id:'@cf/black-forest-labs/flux-2-klein-9b',name:'FLUX.2 Klein 9B · balanced',steps:4,maxSteps:4,stepChoices:[4],output:'multipart',sizes:true,fixed:true},
+ {id:'@cf/leonardo/lucid-origin',name:'Leonardo Lucid Origin · high quality, higher Neurons',steps:30,maxSteps:40,stepChoices:[20,30,40],output:'base64',sizes:true,highCost:true},
+ {id:'@cf/black-forest-labs/flux-2-dev',name:'FLUX.2 Dev · high quality, higher Neurons',steps:25,maxSteps:35,stepChoices:[15,25,35],output:'multipart',sizes:true,highCost:true}
 ];
 const LIMIT = 10_000_000;
 const epoch = () => Math.floor(Date.now()/1000);
@@ -130,6 +134,145 @@ function optFields(algo) {
     required:f.required===1||f.required===true, defaultKey:f.default_key??null,
     inputType:f.input_type||'text'
   })).sort((a,b)=>Number(a.name.replace(/\D/g,''))-Number(b.name.replace(/\D/g,'')));
+}
+const imageSizes={
+ square:[1024,1024],landscape:[1024,576],portrait:[576,1024],
+ photo:[1024,768],photo_portrait:[768,1024]
+};
+const imageSizeKeyboard=()=>keys([
+ [btn('◻ HD Square 1024×1024','imgsize:square')],
+ [btn('▭ Wide 1024×576','imgsize:landscape'),btn('▯ Tall 576×1024','imgsize:portrait')],
+ [btn('▭ Photo 1024×768','imgsize:photo'),btn('▯ Photo 768×1024','imgsize:photo_portrait')],
+ [btn('🏠 Home','home')]
+]);
+async function imageAfterSteps(env,chat,s) {
+ const model=IMAGE_MODELS.find(x=>x.id===s.model);
+ if(!model)throw Error('Choose an image model first');
+ if(!model.sizes) {
+  s.step='prompt';await setSession(env,chat,s);
+  return message(env,chat,'✅ '+model.name+' · '+s.steps+' steps. Send an image prompt (1–2048 characters).');
+ }
+ s.step='imgsize';await setSession(env,chat,s);
+ return message(env,chat,'✅ '+model.name+' · '+s.steps+' steps. Choose image dimensions:',imageSizeKeyboard());
+}
+
+/** The picture stays on Telegram. Persist its returned document file_id, not image bytes.
+ * Every generated image receives an explicit opt-in before starting chargeable Modal rendering.
+ */
+const animationActions=()=>keys([
+ [btn('✨ Improve with AI','animate:improve'),btn('✏️ Edit myself','animate:edit')],
+ [btn('🎬 Generate video','animate:generate'),btn('❌ Cancel','animate:no')]
+]);
+const motionTemplate=(imageDescription)=>(
+ 'Animate the existing image faithfully: '+String(imageDescription||'the original scene').slice(0,480)+
+ '. Preserve the exact appearance, wardrobe, identity, lighting, objects and background. '+
+ 'Use physically plausible, subtle subject motion and ambient movement, with a gentle cinematic camera push-in. '+
+ 'Keep composition and character count unchanged. No morphing, new subjects, cuts, text, or camera shake.'
+).slice(0,1350);
+
+async function aiMotionDraft(env,imageDescription,current=''){
+ const fallback=current||motionTemplate(imageDescription);
+ if(!env.FREE_LLM_API_KEY)return fallback;
+ try {
+  const output=await completeFreeLlm(env,[
+   {role:'system',content:'You are an expert image-to-video director creating high-quality WAN image-to-video motion prompts from one still. Do not change the depicted subjects, identity, clothing, props, environment, composition, lighting, or number of characters. Design subtle realistic motion and tasteful camera movement achievable from a still; no new objects, cuts, morphing, text or complicated character actions. Return ONLY a specific positive-language image-to-video prompt, 45–95 words, no headings, no markdown.'},
+   {role:'user',content:'Still-image generation description: '+String(imageDescription||'Cinematic image').slice(0,1100)+'\n'+
+     (current?'Rewrite and meaningfully improve this existing motion draft while keeping the image stable: '+current.slice(0,1200):
+      'Write an original scene-appropriate motion prompt.')}
+  ],{max_tokens:260,temperature:0.4});
+  return output.trim().slice(0,1400)||fallback;
+ }catch(e){
+  console.warn('AI motion prompt unavailable; retaining safe draft');
+  return fallback;
+ }
+}
+async function showAnimationDraft(env,chat,s,note=''){
+ return message(env,chat,
+   (note?note+'\n\n':'')+'🎬 Image-to-video motion prompt:\n\n'+s.motion_prompt+
+   '\n\nReuse the generated photo; no re-upload required. Modal GPU usage may be billable. Choose an option:',
+   animationActions());
+}
+async function submitGeneratedAnimation(env,chat,s,sourceMessageId) {
+ const baseValue=env.MODAL_WAN_API_BASE;
+ if(!baseValue)throw Error('Modal WAN image-to-video API is not configured');
+ const base=new URL(baseValue);
+ if(base.protocol!=='https:'||!base.hostname.endsWith('.modal.run')||base.username||base.password||base.search||base.hash||base.pathname!=='/')
+  throw Error('Modal WAN API address is invalid');
+ const prompt=String(s.motion_prompt||'').trim();
+ if(!prompt||prompt.length>1500)throw Error('Motion prompt must contain 1–1500 characters');
+ if(!/^[A-Za-z0-9_-]{1,250}$/.test(s.image_file_id||''))throw Error('Generated image reference is unavailable');
+ if(!Number.isSafeInteger(sourceMessageId)||sourceMessageId<=0)throw Error('Missing Telegram confirmation message ID');
+
+ // Reserve the confirmation before making any possibly billable GPU request.
+ const before=JSON.stringify(s);
+ const claimed={...s,step:'animate_submitting'};
+ const claim=await env.MEMORY_DB.prepare(
+  'UPDATE studio_sessions SET state=?,updated_at=unixepoch() WHERE chat_id=? AND state=?'
+ ).bind(JSON.stringify(claimed),String(chat),before).run();
+ if(claim.meta?.changes!==1)return message(env,chat,'This image-to-video request was already claimed. Check /video_status before retrying.');
+ const record=await env.MEMORY_DB.prepare(
+  "INSERT OR IGNORE INTO wan_video_jobs (chat_id,telegram_message_id,status) VALUES (?,?,'submitting')"
+ ).bind(String(chat),sourceMessageId).run();
+ if(record.meta?.changes!==1)return message(env,chat,'This animation was already submitted. Use /video_status.');
+
+ let contactedModal=false;
+ let accepted=false;
+ try{
+  const source=await tg(env,'getFile',{file_id:s.image_file_id});
+  const remotePath=String(source?.file_path||'');
+  const limit=4*1024*1024;
+  if(!remotePath||remotePath.startsWith('/')||remotePath.includes('..'))throw Error('Telegram cannot retrieve the saved image');
+  if(Number(source?.file_size||0)>limit)throw Error('The original image exceeds the existing 4 MB WAN image-upload limit');
+  const imageResponse=await fetch('https://api.telegram.org/file/bot'+env.TELEGRAM_BOT_TOKEN+'/'+remotePath,{signal:AbortSignal.timeout(15000)});
+  if(!imageResponse.ok)throw Error('Could not fetch saved Telegram image');
+  const bytes=await imageResponse.arrayBuffer();
+  if(!bytes.byteLength||bytes.byteLength>limit)throw Error('Saved image is empty or too large for WAN');
+  const first=new Uint8Array(bytes.slice(0,12));
+  const png=first.length>=8&&[137,80,78,71,13,10,26,10].every((v,i)=>v===first[i]);
+  const jpeg=first[0]===255&&first[1]===216&&first[2]===255;
+  if(!png&&!jpeg)throw Error('Saved photo is not PNG or JPEG');
+  const portrait=Number(s.image_height||0)>Number(s.image_width||0);
+  const form=new FormData();
+  form.set('prompt',prompt);form.set('width',portrait?'704':'1280');form.set('height',portrait?'1280':'704');form.set('seed','-1');
+  form.set('image',new Blob([bytes],{type:png?'image/png':'image/jpeg'}),png?'generated.png':'generated.jpg');
+  const headers=env.MODAL_WAN_API_KEY?{Authorization:'Bearer '+env.MODAL_WAN_API_KEY}:{};
+  contactedModal=true;
+  const r=await fetch(base.origin+'/v1/generations',{method:'POST',headers,body:form,signal:AbortSignal.timeout(20000)});
+  if(!r.ok){contactedModal=false;throw Error('Modal WAN rejected request (HTTP '+r.status+')');}
+  const data=await r.json();
+  const id=typeof data?.id==='string'?data.id:typeof data?.job_id==='string'?data.job_id:'';
+  if(!/^[a-f0-9]{32}$/.test(id))throw Error('Modal WAN returned an invalid generation ID');
+  accepted=true;
+  await env.MEMORY_DB.prepare(
+   'UPDATE wan_video_jobs SET job_id=?,status=?,updated_at=unixepoch() WHERE chat_id=? AND telegram_message_id=?'
+  ).bind(id,String(data.status||'submitted'),String(chat),sourceMessageId).run();
+  await setSession(env,chat,{step:'home'});
+  return message(env,chat,'✅ Image-to-video submitted using your generated photo.\nJob ID: '+id+
+   '\nYour video will be delivered automatically. Use /video_status to check progress.');
+ }catch(e){
+  const uncertain=contactedModal||accepted;
+  await env.MEMORY_DB.prepare(
+   'UPDATE wan_video_jobs SET status=?,updated_at=unixepoch() WHERE chat_id=? AND telegram_message_id=?'
+  ).bind(uncertain?'uncertain':'failed',String(chat),sourceMessageId).run();
+  await setSession(env,chat,uncertain?{step:'home'}:{...s,step:'animate_review'});
+  const reason=e instanceof Error?e.message:'Unknown error';
+  return message(env,chat,uncertain?
+   '⚠️ The Modal submission result is uncertain. Check the Modal dashboard before trying again to prevent duplicate GPU charges.':
+   '⚠️ Animation was not started: '+reason+'\nYour saved photo and motion prompt remain available.');
+ }
+}
+
+async function imageStepMenu(env,chat,s) {
+ const model=IMAGE_MODELS.find(x=>x.id===s.model);
+ if(!model)throw Error('Choose an image model first');
+ s.step='imgsteps';await setSession(env,chat,s);
+ const rows=[model.stepChoices.map(n=>btn(n+' steps'+(n===model.steps?' ✓':''),'imgsteps:'+n))];
+ if(!model.fixed)rows.push([btn('✏️ Custom 1–'+model.maxSteps+' steps','imgsteps:custom')]);
+ rows.push([btn('🏠 Home','home')]);
+ return message(env,chat,'🎛 '+model.name+' — choose generation steps.'+
+  (model.id.includes('lightning')?'\n4 steps is the recommended fast preset. Higher steps are experimental.':'')+
+  (model.highCost?'\n⚠️ Higher-quality models can use considerably more daily Cloudflare Neurons.':''),
+  keys(rows));
 }
 const home=keys([
  [btn('🎨 Generate image','provider:menu'),btn('🔎 Upscale','i:upscale')],
@@ -541,34 +684,87 @@ async function handleMessage(env,m) {
     s.text=text;s.step='tts_confirm';await setSession(env,chat,s);
     return message(env,chat,'🎙 '+(s.voice||'am_michael')+' · '+(s.speed||1)+'× speed\n\nText: '+truncate(text,700)+'\n\nUse the site’s free daily quota or available balance?',keys([[btn('✅ Generate speech','tts:submit'),btn('Cancel','home')]]));
   }
+  if(s.step==='imgsteps_custom'&&s.kind==='generate'){
+    const model=IMAGE_MODELS.find(x=>x.id===s.model);
+    if(!model||model.fixed)throw Error('Choose a supported adjustable-step image model');
+    const count=Number(text.trim());
+    if(!/^\\d+$/.test(text.trim())||!Number.isInteger(count)||count<1||count>model.maxSteps)
+      return message(env,chat,'Send a whole-number step count from 1 to '+model.maxSteps+'.');
+    s.steps=count;
+    return imageAfterSteps(env,chat,s);
+  }
+  if(s.step==='animate_edit'&&s.kind==='image-animation'){
+    if(!text.trim()||text.length>1500)return message(env,chat,'Send the edited motion prompt (1–1500 characters).');
+    s.motion_prompt=text.trim();
+    s.step='animate_review';
+    await setSession(env,chat,s);
+    return showAnimationDraft(env,chat,s,'✅ Your edited motion prompt is saved.');
+  }
   if(s.step==='prompt'&&s.kind==='generate'){
     if(!text||text.length>2048)return message(env,chat,'Send a prompt of 1–2048 characters.');
     if(!env.AI)throw Error('Workers AI is not enabled');
     const model=IMAGE_MODELS.find(x=>x.id===s.model);
     if(!model)throw Error('Choose an image model first');
+    const count=Number(s.steps??model.steps);
+    if(!Number.isInteger(count)||count<1||count>model.maxSteps||(model.fixed&&count!==model.steps))
+      throw Error('Invalid steps for selected image model');
+    if(model.sizes&&(!Number.isInteger(s.width)||!Number.isInteger(s.height)||
+      !Object.values(imageSizes).some(d=>d[0]===s.width&&d[1]===s.height)))
+      throw Error('Choose a supported image size first');
     const started=Date.now();
-    const params={prompt:text};
-    if(model.output==='base64')params.steps=model.steps;
-    else {
+    let params={prompt:text};
+    if(model.output==='multipart'){
+      const form=new FormData();
+      form.append('prompt',text);
+      if(!model.fixed)form.append('steps',String(count));
+      if(model.sizes){
+        form.append('width',String(s.width));
+        form.append('height',String(s.height));
+      }
+      const encoded=new Response(form);
+      params={multipart:{body:encoded.body,contentType:encoded.headers.get('content-type')}};
+    }else if(model.output==='base64'){
+      params.steps=count;
+      if(model.sizes){params.width=s.width;params.height=s.height;}
+    }else{
       params.seed=Math.floor(Math.random()*1000000);
-      params.num_steps=model.steps;
-      if(s.width&&s.height){params.width=s.width;params.height=s.height;}
+      params.num_steps=count;
+      if(model.sizes){params.width=s.width;params.height=s.height;}
     }
     const data=await env.AI.run(model.id,params);
-    let bytes,type;
+    let bytes;
     if(data?.image&&typeof data.image==='string'){
-      bytes=Uint8Array.from(atob(data.image),c=>c.charCodeAt(0));type='image/jpeg';
+      bytes=Uint8Array.from(atob(data.image),c=>c.charCodeAt(0));
     }else if(data instanceof ReadableStream){
-      bytes=new Uint8Array(await new Response(data).arrayBuffer());type='image/png';
+      bytes=new Uint8Array(await new Response(data).arrayBuffer());
     }else if(data instanceof Uint8Array||data instanceof ArrayBuffer){
-      bytes=data instanceof Uint8Array?data:new Uint8Array(data);type='image/png';
+      bytes=data instanceof Uint8Array?data:new Uint8Array(data);
     }else throw Error('Cloudflare image model returned an unsupported format');
     if(!bytes.length||bytes.length>9*1024*1024)throw Error('Generated image unavailable or exceeds 9 MB');
+    const png=bytes.length>8&&[137,80,78,71,13,10,26,10].every((b,i)=>bytes[i]===b);
+    const jpg=bytes.length>2&&bytes[0]===255&&bytes[1]===216&&bytes[2]===255;
+    if(!png&&!jpg)throw Error('Cloudflare returned an unknown image format');
+    const type=png?'image/png':'image/jpeg';
     const sec=duration(Math.ceil((Date.now()-started)/1000));
-    const form=new FormData();form.set('chat_id',String(chat));
-    form.set('caption','🎨 '+model.name+' · '+sec+' processing time\nWorkers AI quota: see Cloudflare dashboard (neuron usage is not returned per request)');
-    form.set('photo',new File([bytes],'generated.'+(type==='image/jpeg'?'jpg':'png'),{type}));
-    await tg(env,'sendPhoto',form);await setSession(env,chat,{step:'home'});return;
+    const form=new FormData();
+    form.set('chat_id',String(chat));
+    form.set('caption','🎨 '+model.name+' · '+count+' steps'+(model.sizes?' · '+s.width+'×'+s.height:'')+
+      ' · '+sec+' processing time\nOriginal image file (not Telegram-compressed).'+
+      '\nWorkers AI quota: check Cloudflare dashboard; per-request Neurons are not returned.');
+    form.set('document',new File([bytes],'generated.'+(png?'png':'jpg'),{type}));
+    const delivered=await tg(env,'sendDocument',form);
+    const imageId=delivered?.document?.file_id;
+    if(imageId){
+      await setSession(env,chat,{step:'animate_offer',kind:'image-animation',
+        image_file_id:imageId,image_prompt:text,image_width:s.width||0,image_height:s.height||0});
+      try{
+        await message(env,chat,'🎬 Your image is ready. Animate this photo with AI?\nI can create a motion prompt and reuse the image without another upload.',
+          keys([[btn('✅ Yes, animate','animate:yes'),btn('Not now','animate:no')]]));
+      }catch(e){console.warn('Image sent but animate offer could not be delivered');}
+    }else{
+      await setSession(env,chat,{step:'home'});
+    }
+    return;
   }
   if(s.step==='upgen_file' && (m.photo?.length||m.document)){
     const file=m.photo?.at(-1)||m.document;
@@ -656,29 +852,73 @@ async function handleCallback(env,q) {
     return message(env,chat,'Selected: '+name+'.\n\nSend your image prompt. I will offer to improve it, let you review it, and ask for confirmation before generating.');
   }
   if(d.startsWith('i:'))return pickImage(env,chat,d.slice(2));
+  if(d==='animate:no'){
+    const old=await session(env,chat);
+    if(old.kind==='image-animation')await setSession(env,chat,{step:'home'});
+    return message(env,chat,'✅ Animation skipped. Your generated photo is still in this chat.');
+  }
+  if(d==='animate:yes'){
+    const s=await session(env,chat);
+    if(s.kind!=='image-animation'||s.step!=='animate_offer'||!s.image_file_id)
+      return message(env,chat,'That animation offer expired; generate another photo to start over.');
+    s.motion_prompt=await aiMotionDraft(env,s.image_prompt);
+    s.step='animate_review';await setSession(env,chat,s);
+    return showAnimationDraft(env,chat,s,'✅ Motion prompt created for the generated photo.');
+  }
+  if(d==='animate:improve'){
+    const s=await session(env,chat);
+    if(s.kind!=='image-animation'||s.step!=='animate_review')
+      return message(env,chat,'No editable motion prompt is active.');
+    const previous=String(s.motion_prompt||'');
+    s.motion_prompt=await aiMotionDraft(env,s.image_prompt,previous);
+    await setSession(env,chat,s);
+    return showAnimationDraft(env,chat,s,s.motion_prompt===previous?'AI service unavailable; original draft retained.':'✨ AI improved your motion prompt.');
+  }
+  if(d==='animate:edit'){
+    const s=await session(env,chat);
+    if(s.kind!=='image-animation'||s.step!=='animate_review')
+      return message(env,chat,'No active motion prompt to edit.');
+    s.step='animate_edit';await setSession(env,chat,s);
+    return message(env,chat,'✏️ Send your replacement motion prompt as a normal Telegram message (1–1500 characters).\n\nCurrent draft:\n'+s.motion_prompt);
+  }
+  if(d==='animate:generate'){
+    const s=await session(env,chat);
+    if(s.kind!=='image-animation'||s.step!=='animate_review')
+      return message(env,chat,'No approved motion prompt is active. Create a new photo to start again.');
+    return submitGeneratedAnimation(env,chat,s,Number(q.message?.message_id));
+  }
   if(d.startsWith('imgmodel:')){
     const i=Number(d.slice('imgmodel:'.length)),model=IMAGE_MODELS[i];
     if(!model)throw Error('Unsupported image model');
-    const state={step:model.output==='base64'?'prompt':'imgsize',kind:'generate',model:model.id,steps:model.steps};
-    await setSession(env,chat,state);
-    if(model.output==='base64')return message(env,chat,'✅ FLUX.1 Schnell selected. Send a detailed image prompt (max 2048 characters).');
-    return message(env,chat,model.name+' — choose aspect ratio:',keys([
-      [btn('◻ Square 768×768','imgsize:square')],
-      [btn('▭ Landscape 1024×576','imgsize:landscape')],
-      [btn('▯ Portrait 576×1024','imgsize:portrait')],
-      [btn('🏠 Home','home')]
-    ]));
+    const state={step:'imgsteps',kind:'generate',model:model.id,steps:model.steps};
+    if(model.fixed)return imageAfterSteps(env,chat,state);
+    return imageStepMenu(env,chat,state);
+  }
+  if(d.startsWith('imgsteps:')){
+    const s=await session(env,chat);
+    const model=IMAGE_MODELS.find(x=>x.id===s.model);
+    if(s.kind!=='generate'||s.step!=='imgsteps'||!model)throw Error('Choose an image model first');
+    const selected=d.slice('imgsteps:'.length);
+    if(selected==='custom'){
+      if(model.fixed)throw Error('This model has a fixed inference step count');
+      s.step='imgsteps_custom';await setSession(env,chat,s);
+      return message(env,chat,'Send a whole-number step count from 1 to '+model.maxSteps+'.');
+    }
+    const count=Number(selected);
+    if(!Number.isInteger(count)||!model.stepChoices.includes(count))throw Error('Unsupported image step preset');
+    s.steps=count;
+    return imageAfterSteps(env,chat,s);
   }
   if(d.startsWith('imgsize:')){
     const s=await session(env,chat);
-    if(s.kind!=='generate'||!IMAGE_MODELS.some(x=>x.id===s.model))throw Error('Choose image model first');
-    const sizes={square:[768,768],landscape:[1024,576],portrait:[576,1024]};
-    const dimensions=sizes[d.slice('imgsize:'.length)];
+    const model=IMAGE_MODELS.find(x=>x.id===s.model);
+    if(s.kind!=='generate'||s.step!=='imgsize'||!model?.sizes)throw Error('Choose an image model and steps first');
+    const dimensions=imageSizes[d.slice('imgsize:'.length)];
     if(!dimensions)throw Error('Invalid image dimensions');
     s.width=dimensions[0];s.height=dimensions[1];s.step='prompt';
     await setSession(env,chat,s);
-    return message(env,chat,'✅ '+IMAGE_MODELS.find(x=>x.id===s.model).name+' · '+s.width+'×'+s.height+
-      '\nSend your prompt (1–2048 characters).');
+    return message(env,chat,'✅ '+model.name+' · '+s.steps+' steps · '+s.width+'×'+s.height+
+      '\nSend your image prompt (1–2048 characters).');
   }
   if(d.startsWith('upmodel:'))return startScale(env,chat,d.slice(8));
   if(d.startsWith('scale:'))return finishScale(env,chat,d.slice(6));
