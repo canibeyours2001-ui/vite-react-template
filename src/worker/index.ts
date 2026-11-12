@@ -722,6 +722,10 @@ app.post('/telegram/webhook', async (c) => {
           '/cancel — cancel voice selection\n' +
           '/separate 26 — reply to audio for MVSEP separation\n' +
           '/sep_status — check separation progress\n' +
+          '/ltx auto PROMPT — LTX-2.5 ZeroGPU text-to-video with audio (auto length)\n' +
+          '/ltx 5 PROMPT — LTX fixed 5s; attach photo for image-to-video\n' +
+          '/ltx_status — check LTX job\n' +
+          '/ltxprobe — verify LTX Space API\n' +
           '/video your prompt — WAN text-to-video\n' +
           '/video_status — check WAN generation\n' +
           '/motion — WAN animation instructions\n' +
@@ -1046,6 +1050,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'cancel',description:'Cancel voice selection'},
         {command:'separate',description:'Separate audio with MVSEP'},
         {command:'sep_status',description:'Check MVSEP separation status'},
+        {command:'ltx',description:'LTX-2.5 text-to-video or photo animation'},
+        {command:'ltx_status',description:'Check LTX video status'},
+        {command:'ltxprobe',description:'Check LTX Space API'},
         {command:'video',description:'Generate video with WAN 2.2'},
         {command:'video_status',description:'Check WAN video status'},
         {command:'motion',description:'Animate a character with WAN'},
@@ -1107,6 +1114,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'cancel',description:'Cancel voice selection'},
         {command:'separate',description:'Separate audio with MVSEP'},
         {command:'sep_status',description:'Check MVSEP separation status'},
+        {command:'ltx',description:'LTX-2.5 text-to-video or photo animation'},
+        {command:'ltx_status',description:'Check LTX video status'},
+        {command:'ltxprobe',description:'Check LTX Space API'},
         {command:'video',description:'Generate video with WAN 2.2'},
         {command:'video_status',description:'Check WAN video status'},
         {command:'motion',description:'Animate a character with WAN'},
