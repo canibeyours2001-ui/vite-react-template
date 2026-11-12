@@ -8,9 +8,12 @@ const MV = 'https://de.mvsep.com/api';
 const MV_FALLBACK = ['https://de2.mvsep.com/api', 'https://sg.mvsep.com/api'];
 const UP = 'https://image-upscaling.net';
 const IMAGE_MODELS=[
- {id:'@cf/black-forest-labs/flux-1-schnell',name:'FLUX.1 Schnell',steps:4,output:'base64'},
- {id:'@cf/bytedance/stable-diffusion-xl-lightning',name:'SDXL Lightning',steps:4,output:'stream'},
- {id:'@cf/stabilityai/stable-diffusion-xl-base-1.0',name:'SDXL Base 1.0',steps:20,output:'stream'}
+ {id:'@cf/black-forest-labs/flux-1-schnell',name:'FLUX.1 Schnell · fast',steps:4,maxSteps:8,stepChoices:[4,6,8],output:'base64',sizes:false},
+ {id:'@cf/bytedance/stable-diffusion-xl-lightning',name:'SDXL Lightning · fast',steps:4,maxSteps:20,stepChoices:[4,8,12,20],output:'stream',sizes:true},
+ {id:'@cf/stabilityai/stable-diffusion-xl-base-1.0',name:'SDXL Base 1.0 · detail',steps:20,maxSteps:20,stepChoices:[10,15,20],output:'stream',sizes:true},
+ {id:'@cf/black-forest-labs/flux-2-klein-9b',name:'FLUX.2 Klein 9B · balanced',steps:4,maxSteps:4,stepChoices:[4],output:'multipart',sizes:true,fixed:true},
+ {id:'@cf/leonardo/lucid-origin',name:'Leonardo Lucid Origin · high quality, higher Neurons',steps:30,maxSteps:40,stepChoices:[20,30,40],output:'base64',sizes:true,highCost:true},
+ {id:'@cf/black-forest-labs/flux-2-dev',name:'FLUX.2 Dev · high quality, higher Neurons',steps:25,maxSteps:35,stepChoices:[15,25,35],output:'multipart',sizes:true,highCost:true}
 ];
 const LIMIT = 10_000_000;
 const epoch = () => Math.floor(Date.now()/1000);
@@ -130,6 +133,38 @@ function optFields(algo) {
     required:f.required===1||f.required===true, defaultKey:f.default_key??null,
     inputType:f.input_type||'text'
   })).sort((a,b)=>Number(a.name.replace(/\D/g,''))-Number(b.name.replace(/\D/g,'')));
+}
+const imageSizes={
+ square:[1024,1024],landscape:[1024,576],portrait:[576,1024],
+ photo:[1024,768],photo_portrait:[768,1024]
+};
+const imageSizeKeyboard=()=>keys([
+ [btn('◻ HD Square 1024×1024','imgsize:square')],
+ [btn('▭ Wide 1024×576','imgsize:landscape'),btn('▯ Tall 576×1024','imgsize:portrait')],
+ [btn('▭ Photo 1024×768','imgsize:photo'),btn('▯ Photo 768×1024','imgsize:photo_portrait')],
+ [btn('🏠 Home','home')]
+]);
+async function imageAfterSteps(env,chat,s) {
+ const model=IMAGE_MODELS.find(x=>x.id===s.model);
+ if(!model)throw Error('Choose an image model first');
+ if(!model.sizes) {
+  s.step='prompt';await setSession(env,chat,s);
+  return message(env,chat,'✅ '+model.name+' · '+s.steps+' steps. Send an image prompt (1–2048 characters).');
+ }
+ s.step='imgsize';await setSession(env,chat,s);
+ return message(env,chat,'✅ '+model.name+' · '+s.steps+' steps. Choose image dimensions:',imageSizeKeyboard());
+}
+async function imageStepMenu(env,chat,s) {
+ const model=IMAGE_MODELS.find(x=>x.id===s.model);
+ if(!model)throw Error('Choose an image model first');
+ s.step='imgsteps';await setSession(env,chat,s);
+ const rows=[model.stepChoices.map(n=>btn(n+' steps'+(n===model.steps?' ✓':''),'imgsteps:'+n))];
+ if(!model.fixed)rows.push([btn('✏️ Custom 1–'+model.maxSteps+' steps','imgsteps:custom')]);
+ rows.push([btn('🏠 Home','home')]);
+ return message(env,chat,'🎛 '+model.name+' — choose generation steps.'+
+  (model.id.includes('lightning')?'\n4 steps is the recommended fast preset. Higher steps are experimental.':'')+
+  (model.highCost?'\n⚠️ Higher-quality models can use considerably more daily Cloudflare Neurons.':''),
+  keys(rows));
 }
 const home=keys([
  [btn('🎨 Generate image','provider:menu'),btn('🔎 Upscale','i:upscale')],
@@ -541,34 +576,70 @@ async function handleMessage(env,m) {
     s.text=text;s.step='tts_confirm';await setSession(env,chat,s);
     return message(env,chat,'🎙 '+(s.voice||'am_michael')+' · '+(s.speed||1)+'× speed\n\nText: '+truncate(text,700)+'\n\nUse the site’s free daily quota or available balance?',keys([[btn('✅ Generate speech','tts:submit'),btn('Cancel','home')]]));
   }
+  if(s.step==='imgsteps_custom'&&s.kind==='generate'){
+    const model=IMAGE_MODELS.find(x=>x.id===s.model);
+    if(!model||model.fixed)throw Error('Choose a supported adjustable-step image model');
+    const count=Number(text.trim());
+    if(!/^\\d+$/.test(text.trim())||!Number.isInteger(count)||count<1||count>model.maxSteps)
+      return message(env,chat,'Send a whole-number step count from 1 to '+model.maxSteps+'.');
+    s.steps=count;
+    return imageAfterSteps(env,chat,s);
+  }
   if(s.step==='prompt'&&s.kind==='generate'){
     if(!text||text.length>2048)return message(env,chat,'Send a prompt of 1–2048 characters.');
     if(!env.AI)throw Error('Workers AI is not enabled');
     const model=IMAGE_MODELS.find(x=>x.id===s.model);
     if(!model)throw Error('Choose an image model first');
+    const count=Number(s.steps??model.steps);
+    if(!Number.isInteger(count)||count<1||count>model.maxSteps||(model.fixed&&count!==model.steps))
+      throw Error('Invalid steps for selected image model');
+    if(model.sizes&&(!Number.isInteger(s.width)||!Number.isInteger(s.height)||
+      !Object.values(imageSizes).some(d=>d[0]===s.width&&d[1]===s.height)))
+      throw Error('Choose a supported image size first');
     const started=Date.now();
-    const params={prompt:text};
-    if(model.output==='base64')params.steps=model.steps;
-    else {
+    let params={prompt:text};
+    if(model.output==='multipart'){
+      const form=new FormData();
+      form.append('prompt',text);
+      if(!model.fixed)form.append('steps',String(count));
+      if(model.sizes){
+        form.append('width',String(s.width));
+        form.append('height',String(s.height));
+      }
+      const encoded=new Response(form);
+      params={multipart:{body:encoded.body,contentType:encoded.headers.get('content-type')}};
+    }else if(model.output==='base64'){
+      params.steps=count;
+      if(model.sizes){params.width=s.width;params.height=s.height;}
+    }else{
       params.seed=Math.floor(Math.random()*1000000);
-      params.num_steps=model.steps;
-      if(s.width&&s.height){params.width=s.width;params.height=s.height;}
+      params.num_steps=count;
+      if(model.sizes){params.width=s.width;params.height=s.height;}
     }
     const data=await env.AI.run(model.id,params);
-    let bytes,type;
+    let bytes;
     if(data?.image&&typeof data.image==='string'){
-      bytes=Uint8Array.from(atob(data.image),c=>c.charCodeAt(0));type='image/jpeg';
+      bytes=Uint8Array.from(atob(data.image),c=>c.charCodeAt(0));
     }else if(data instanceof ReadableStream){
-      bytes=new Uint8Array(await new Response(data).arrayBuffer());type='image/png';
+      bytes=new Uint8Array(await new Response(data).arrayBuffer());
     }else if(data instanceof Uint8Array||data instanceof ArrayBuffer){
-      bytes=data instanceof Uint8Array?data:new Uint8Array(data);type='image/png';
+      bytes=data instanceof Uint8Array?data:new Uint8Array(data);
     }else throw Error('Cloudflare image model returned an unsupported format');
     if(!bytes.length||bytes.length>9*1024*1024)throw Error('Generated image unavailable or exceeds 9 MB');
+    const png=bytes.length>8&&[137,80,78,71,13,10,26,10].every((b,i)=>bytes[i]===b);
+    const jpg=bytes.length>2&&bytes[0]===255&&bytes[1]===216&&bytes[2]===255;
+    if(!png&&!jpg)throw Error('Cloudflare returned an unknown image format');
+    const type=png?'image/png':'image/jpeg';
     const sec=duration(Math.ceil((Date.now()-started)/1000));
-    const form=new FormData();form.set('chat_id',String(chat));
-    form.set('caption','🎨 '+model.name+' · '+sec+' processing time\nWorkers AI quota: see Cloudflare dashboard (neuron usage is not returned per request)');
-    form.set('photo',new File([bytes],'generated.'+(type==='image/jpeg'?'jpg':'png'),{type}));
-    await tg(env,'sendPhoto',form);await setSession(env,chat,{step:'home'});return;
+    const form=new FormData();
+    form.set('chat_id',String(chat));
+    form.set('caption','🎨 '+model.name+' · '+count+' steps'+(model.sizes?' · '+s.width+'×'+s.height:'')+
+      ' · '+sec+' processing time\nOriginal image file (not Telegram-compressed).'+
+      '\nWorkers AI quota: check Cloudflare dashboard; per-request Neurons are not returned.');
+    form.set('document',new File([bytes],'generated.'+(png?'png':'jpg'),{type}));
+    await tg(env,'sendDocument',form);
+    await setSession(env,chat,{step:'home'});
+    return;
   }
   if(s.step==='upgen_file' && (m.photo?.length||m.document)){
     const file=m.photo?.at(-1)||m.document;
@@ -659,26 +730,35 @@ async function handleCallback(env,q) {
   if(d.startsWith('imgmodel:')){
     const i=Number(d.slice('imgmodel:'.length)),model=IMAGE_MODELS[i];
     if(!model)throw Error('Unsupported image model');
-    const state={step:model.output==='base64'?'prompt':'imgsize',kind:'generate',model:model.id,steps:model.steps};
-    await setSession(env,chat,state);
-    if(model.output==='base64')return message(env,chat,'✅ FLUX.1 Schnell selected. Send a detailed image prompt (max 2048 characters).');
-    return message(env,chat,model.name+' — choose aspect ratio:',keys([
-      [btn('◻ Square 768×768','imgsize:square')],
-      [btn('▭ Landscape 1024×576','imgsize:landscape')],
-      [btn('▯ Portrait 576×1024','imgsize:portrait')],
-      [btn('🏠 Home','home')]
-    ]));
+    const state={step:'imgsteps',kind:'generate',model:model.id,steps:model.steps};
+    if(model.fixed)return imageAfterSteps(env,chat,state);
+    return imageStepMenu(env,chat,state);
+  }
+  if(d.startsWith('imgsteps:')){
+    const s=await session(env,chat);
+    const model=IMAGE_MODELS.find(x=>x.id===s.model);
+    if(s.kind!=='generate'||s.step!=='imgsteps'||!model)throw Error('Choose an image model first');
+    const selected=d.slice('imgsteps:'.length);
+    if(selected==='custom'){
+      if(model.fixed)throw Error('This model has a fixed inference step count');
+      s.step='imgsteps_custom';await setSession(env,chat,s);
+      return message(env,chat,'Send a whole-number step count from 1 to '+model.maxSteps+'.');
+    }
+    const count=Number(selected);
+    if(!Number.isInteger(count)||!model.stepChoices.includes(count))throw Error('Unsupported image step preset');
+    s.steps=count;
+    return imageAfterSteps(env,chat,s);
   }
   if(d.startsWith('imgsize:')){
     const s=await session(env,chat);
-    if(s.kind!=='generate'||!IMAGE_MODELS.some(x=>x.id===s.model))throw Error('Choose image model first');
-    const sizes={square:[768,768],landscape:[1024,576],portrait:[576,1024]};
-    const dimensions=sizes[d.slice('imgsize:'.length)];
+    const model=IMAGE_MODELS.find(x=>x.id===s.model);
+    if(s.kind!=='generate'||s.step!=='imgsize'||!model?.sizes)throw Error('Choose an image model and steps first');
+    const dimensions=imageSizes[d.slice('imgsize:'.length)];
     if(!dimensions)throw Error('Invalid image dimensions');
     s.width=dimensions[0];s.height=dimensions[1];s.step='prompt';
     await setSession(env,chat,s);
-    return message(env,chat,'✅ '+IMAGE_MODELS.find(x=>x.id===s.model).name+' · '+s.width+'×'+s.height+
-      '\nSend your prompt (1–2048 characters).');
+    return message(env,chat,'✅ '+model.name+' · '+s.steps+' steps · '+s.width+'×'+s.height+
+      '\nSend your image prompt (1–2048 characters).');
   }
   if(d.startsWith('upmodel:'))return startScale(env,chat,d.slice(8));
   if(d.startsWith('scale:'))return finishScale(env,chat,d.slice(6));
