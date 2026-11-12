@@ -8,6 +8,7 @@ import {pollExternalImages,checkImageProviders} from './external-image'
 import {pollZeroImages,zeroStatus} from './hf-zerogpu'
 import {pollImageUp} from './imageup-generation'
 import {pollWanAuto} from './wan-auto'
+import {handleLtxCommand,pollLtxJobs} from './hf-ltx-video'
 import { handleMediaStudioMessage, handleMediaStudioCallback, pollMediaStudio, mediaStudioCommands } from './media-studio'
 import { Hono } from 'hono'
 import { handleAudioTelegram, pollAudioJobs, mvsepStatus, checkMvsepAccount } from './audio-tools'
@@ -46,6 +47,7 @@ type Bindings = {
   GEMINI_API_KEY?: string
   MODELSCOPE_API_TOKEN?: string
   HUGGINGFACE_API_TOKEN?: string
+  HUGGINGFACE2_API_TOKEN?: string
   AI: AIClient
   DUB_UPLOADS: import('./pyvt-upload').UploadEnv['DUB_UPLOADS']
   MEMORY_DB: {
@@ -317,6 +319,9 @@ app.post('/telegram/webhook', async (c) => {
         await handleAiModelCommand(c.env,key)
         return
       }
+      // LTX-2.5 ZeroGPU explicit commands take priority over the generic AI router.
+      // This remains isolated from the existing WAN and dubbing handlers.
+      if(await handleLtxCommand(c.env,msg,key,text))return
       // Review prompts (including /video) before any billable generation.
       if(await reviewDirectPrompt(c.env,msg))return
       if (await handleMediaStudioMessage(c.env,msg)) return
@@ -1126,7 +1131,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollLtxJobs(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }
