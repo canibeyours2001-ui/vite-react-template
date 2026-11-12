@@ -8,6 +8,7 @@ import {pollExternalImages,checkImageProviders} from './external-image'
 import {pollZeroImages,zeroStatus} from './hf-zerogpu'
 import {pollImageUp} from './imageup-generation'
 import {pollWanAuto} from './wan-auto'
+import {handleLtxCommand,pollLtxJobs} from './hf-ltx-video'
 import { handleMediaStudioMessage, handleMediaStudioCallback, pollMediaStudio, mediaStudioCommands } from './media-studio'
 import { Hono } from 'hono'
 import { handleAudioTelegram, pollAudioJobs, mvsepStatus, checkMvsepAccount } from './audio-tools'
@@ -46,6 +47,7 @@ type Bindings = {
   GEMINI_API_KEY?: string
   MODELSCOPE_API_TOKEN?: string
   HUGGINGFACE_API_TOKEN?: string
+  HUGGINGFACE2_API_TOKEN?: string
   AI: AIClient
   DUB_UPLOADS: import('./pyvt-upload').UploadEnv['DUB_UPLOADS']
   MEMORY_DB: {
@@ -317,6 +319,9 @@ app.post('/telegram/webhook', async (c) => {
         await handleAiModelCommand(c.env,key)
         return
       }
+      // LTX-2.5 ZeroGPU explicit commands take priority over the generic AI router.
+      // This remains isolated from the existing WAN and dubbing handlers.
+      if(await handleLtxCommand(c.env,msg,key,text))return
       // Review prompts (including /video) before any billable generation.
       if(await reviewDirectPrompt(c.env,msg))return
       if (await handleMediaStudioMessage(c.env,msg)) return
@@ -717,6 +722,10 @@ app.post('/telegram/webhook', async (c) => {
           '/cancel — cancel voice selection\n' +
           '/separate 26 — reply to audio for MVSEP separation\n' +
           '/sep_status — check separation progress\n' +
+          '/ltx auto PROMPT — LTX-2.5 ZeroGPU text-to-video with audio (auto length)\n' +
+          '/ltx 5 PROMPT — LTX fixed 5s; attach photo for image-to-video\n' +
+          '/ltx_status — check LTX job\n' +
+          '/ltxprobe — verify LTX Space API\n' +
           '/video your prompt — WAN text-to-video\n' +
           '/video_status — check WAN generation\n' +
           '/motion — WAN animation instructions\n' +
@@ -1041,6 +1050,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'cancel',description:'Cancel voice selection'},
         {command:'separate',description:'Separate audio with MVSEP'},
         {command:'sep_status',description:'Check MVSEP separation status'},
+        {command:'ltx',description:'LTX-2.5 text-to-video or photo animation'},
+        {command:'ltx_status',description:'Check LTX video status'},
+        {command:'ltxprobe',description:'Check LTX Space API'},
         {command:'video',description:'Generate video with WAN 2.2'},
         {command:'video_status',description:'Check WAN video status'},
         {command:'motion',description:'Animate a character with WAN'},
@@ -1102,6 +1114,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'cancel',description:'Cancel voice selection'},
         {command:'separate',description:'Separate audio with MVSEP'},
         {command:'sep_status',description:'Check MVSEP separation status'},
+        {command:'ltx',description:'LTX-2.5 text-to-video or photo animation'},
+        {command:'ltx_status',description:'Check LTX video status'},
+        {command:'ltxprobe',description:'Check LTX Space API'},
         {command:'video',description:'Generate video with WAN 2.2'},
         {command:'video_status',description:'Check WAN video status'},
         {command:'motion',description:'Animate a character with WAN'},
@@ -1126,7 +1141,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollLtxJobs(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }
