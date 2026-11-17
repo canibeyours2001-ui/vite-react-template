@@ -10,6 +10,7 @@ import {pollImageUp} from './imageup-generation'
 import {pollWanAuto} from './wan-auto'
 import {handleLtxCommand,pollLtxJobs} from './hf-ltx-video'
 import { handleMediaStudioMessage, handleMediaStudioCallback, pollMediaStudio, mediaStudioCommands } from './media-studio'
+import {vsrCommand,vsrSignedFile,pollSeedVsr} from './seedvr2-kaggle'
 import { Hono } from 'hono'
 import { handleAudioTelegram, pollAudioJobs, mvsepStatus, checkMvsepAccount } from './audio-tools'
 import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAssistantContext } from './voice-profiles'
@@ -212,7 +213,7 @@ for(const path of ['/dub/u/init','/dub/u/part','/dub/u/finish']){
 app.get('/dub/u',c=>handleDubUpload(c.env,c.req.raw,(chat,key,size,ext)=>pyvtQueueUploaded(c.env,chat,key,size,ext)))
 
 // GET is the signed file download for private Kaggle jobs; POST is the existing Telegram webhook.
-app.get('/telegram/webhook',c=>c.req.query('pvtrans')?pyvtTranslate(c.env,c.req.raw):pyvtSignedFile(c.env,c.req.raw))
+app.get('/telegram/webhook',c=>c.req.query('vsrfile')?vsrSignedFile(c.env,c.req.raw):c.req.query('pvtrans')?pyvtTranslate(c.env,c.req.raw):pyvtSignedFile(c.env,c.req.raw))
 app.post('/telegram/webhook/tts',c=>pyvtGeminiTts(c.env,c.req.raw))
 app.post('/telegram/webhook', async (c) => {
   if(c.req.query('pvtts'))return pyvtGeminiTts(c.env,c.req.raw)
@@ -321,6 +322,7 @@ app.post('/telegram/webhook', async (c) => {
       }
       // LTX-2.5 ZeroGPU explicit commands take priority over the generic AI router.
       // This remains isolated from the existing WAN and dubbing handlers.
+      if (await vsrCommand(c.env,msg,key,text,send)) return
       if(await handleLtxCommand(c.env,msg,key,text))return
       // Review prompts (including /video) before any billable generation.
       if(await reviewDirectPrompt(c.env,msg))return
@@ -712,6 +714,8 @@ app.post('/telegram/webhook', async (c) => {
           '/dub — choose English/Burmese target, TTS engine and voice\n' +
           '/dub_help — pyVideoTrans video dubbing with Edge or VoxCPM2\n' +
           '/dub_status — last Kaggle video dubbing status\n' +
+          '/vsr — SeedVR2 video upscaling on free Kaggle GPU\n' +
+          '/vsr_status — SeedVR2 job status\n' +
           '/dub_upload — upload large videos up to 1 GiB in your browser\n' +
           '/voxvoices — show five saved VoxCPM2 voices\n' +
           '/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n' +
@@ -1038,6 +1042,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'dub_help',description:'pyVideoTrans video dubbing help'},
         {command:'dub_upload',description:'Upload videos up to 1 GiB'},
         {command:'dub_status',description:'Check pyVideoTrans dubbing status'},
+        {command:'vsr',description:'SeedVR2 video upscaling on Kaggle'},
+        {command:'vsr_status',description:'Check video upscale job'},
+        {command:'vsr_help',description:'Video upscaling input limits'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
         {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
@@ -1102,6 +1109,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'dub_help',description:'pyVideoTrans video dubbing help'},
         {command:'dub_upload',description:'Upload videos up to 1 GiB'},
         {command:'dub_status',description:'Check pyVideoTrans dubbing status'},
+        {command:'vsr',description:'SeedVR2 video upscaling on Kaggle'},
+        {command:'vsr_status',description:'Check video upscale job'},
+        {command:'vsr_help',description:'Video upscaling input limits'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
         {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
@@ -1141,7 +1151,7 @@ export default {
     } catch (error) {
       console.error('Telegram webhook registration check failed:', error instanceof Error ? error.name : 'unknown')
     }
-    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollLtxJobs(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
+    const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pollSeedVsr(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollLtxJobs(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
     }
