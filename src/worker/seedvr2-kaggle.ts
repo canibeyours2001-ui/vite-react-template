@@ -147,7 +147,7 @@ export async function vsrCommand(env:VsrEnv,msg:Msg,chat:string,text:string,
   if(!env.KAGGLE_API_TOKEN){await send('Kaggle integration is not configured.');return true}
   const name=String(media.file_name||'video.mp4').toLowerCase()
   const type=String(media.mime_type||'')
-  if(media.document&&!/\.(mp4|mov|webm)$/i.test(name)&&
+  if((media===msg.document||media===msg.reply_to_message?.document)&&!/\.(mp4|mov|webm)$/i.test(name)&&
      !['video/mp4','video/quicktime','video/webm'].includes(type)){
     await send('Send MP4, MOV or WebM video.');return true
   }
