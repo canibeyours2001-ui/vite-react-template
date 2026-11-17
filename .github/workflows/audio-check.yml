@@ -19,6 +19,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: python3 tools/test_vox_longform.py
+      - run: python3 tools/test-seedvr2-probe.py
+      - run: node tools/test-seedvr2.mjs
       - run: npx tsc --noEmit -p tsconfig.worker.json
       - run: npm run build
       - name: Preserve compiled Worker for safe direct Cloudflare deployment
