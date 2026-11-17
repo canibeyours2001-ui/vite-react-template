@@ -29,7 +29,7 @@ const HELP = '🎬 SeedVR2 3B FP16 on Kaggle GPU\n' +
   'Beta: <=20 MiB input, <=10 seconds, <=720p short edge, <=30 FPS.\n' +
   'GPU jobs use free Kaggle quota when enabled. Results over Telegram 49 MiB ' +
   'remain available from the private Kaggle notebook output instead.\n' +
-  'The upscale queue is disabled until a separate test enables its private control flag.'
+  'For the first test, use a 1–2 second MP4; larger clips can take much longer.'
 
 async function schema(db:DB){
   await db.prepare('CREATE TABLE IF NOT EXISTS seedvr2_config ('+
@@ -124,7 +124,7 @@ export async function vsrCommand(env:VsrEnv,msg:Msg,chat:string,text:string,
   const m=text.match(/^\/(vsr|vsr_status|vsr_help)(?:@[A-Za-z0-9_]+)?(?:\s+(\S+))?\s*$/i)
   if(!m)return false
   const command=m[1].toLowerCase()
-  if(command==='vsr_help'){await send(HELP);return true}
+  if(command==='vsr_help'){await send(HELP+'\nGPU submission: '+(await enabled(env)?'ENABLED ✅':'DISABLED pending validation'));return true}
   await schema(env.MEMORY_DB)
   if(command==='vsr_status'){
     const rows=await env.MEMORY_DB.prepare(
@@ -139,7 +139,7 @@ export async function vsrCommand(env:VsrEnv,msg:Msg,chat:string,text:string,
   const resolution=m[2]?Number(m[2]):1080
   if(![720,1080].includes(resolution)){await send('Choose /vsr 720 or /vsr 1080.');return true}
   const media=msg.video||msg.document||msg.reply_to_message?.video||msg.reply_to_message?.document
-  if(!media){await send(HELP);return true}
+  if(!media){await send(HELP+'\nGPU submission: '+(await enabled(env)?'ENABLED ✅':'DISABLED pending validation'));return true}
   if(!await enabled(env)){
     await send('SeedVR2 is staged but GPU submissions are disabled until the Kaggle end-to-end test passes. /vsr_help')
     return true
