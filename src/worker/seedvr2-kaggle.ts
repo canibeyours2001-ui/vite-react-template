@@ -285,7 +285,7 @@ export async function pollSeedVsr(env:VsrEnv):Promise<void>{
   try{
     const url=signedUrl(next.id,expire,await signature(env.TELEGRAM_WEBHOOK_SECRET,next.id,expire))
     const response=await kaggle(env,'push',{
-      slug:KERNEL,newTitle:'Private SeedVR2 Telegram video upscaler',
+      slug:KERNEL,newTitle:'SeedVR2 Telegram Video Upscaler',
       text:renderKernel(url,next.resolution),
       language:'python',kernelType:'script',isPrivate:true,enableGpu:true,
       enableInternet:true,machineShape:'NvidiaTeslaT4',sessionTimeoutSeconds:3600,
