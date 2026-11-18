@@ -44,3 +44,6 @@ npm run check
 The unit test tests disabled gating, bad signatures, private kernel settings, generated Python syntax; it does **not** prove actual GPU inference.
 
 Official project: https://github.com/ByteDance-Seed/SeedVR ; T4 CLI: https://github.com/delvilo/SeedVR2-CLI
+## Maximum Kaggle batch runtime
+
+New SeedVR2 submissions request a **12-hour** Kaggle CPU/GPU batch session (`43200` seconds), which is the platform maximum. The model subprocess has an **11-hour** limit (`39600` seconds) to reserve remaining time for dependencies, model loading and MP4 export. Kaggle can still stop work earlier due to quota, resource limits, or session errors. These settings **do not extend running notebooks** or bypass weekly GPU allocation; do not cancel/resubmit an in-progress video to adopt them.

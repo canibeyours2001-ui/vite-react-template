@@ -24,6 +24,9 @@ assert abs(simulated_probe('N/A','10.026667')[3]-10.0)<1e-5
 print('PASS: stream duration, frame-count fallback, format-duration tolerance and 11s rejection')
 
 assert 0.2 < simulated_probe(None,'10.026667',frames='N/A')[3] <= 10.25
-assert 'run(command, timeout=12600, cwd=str(repo))' in py
-assert 'sessionTimeoutSeconds:14400' in raw
+assert 'run(command, timeout=39600, cwd=str(repo))' in py
+assert 'sessionTimeoutSeconds:43200' in raw
 print('PASS: extended T4 processing and Kaggle session timeout validated')
+assert 43200 == 12*60*60
+assert 39600 == 11*60*60
+print("PASS: Kaggle session capped at 12h with 1h setup/finishing headroom")
