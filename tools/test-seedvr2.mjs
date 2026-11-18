@@ -25,7 +25,7 @@ const send=async s=>output.push(s);
 assert.equal(await vsrCommand(env,{message_id:1},'123','/vsr_help',send),true);
 assert.match(output.pop(),/10 seconds/);
 assert.equal(await vsrCommand(env,{message_id:2},'123','/vsr 1080',send),true);
-assert.match(output.pop(),/Reply to an MP4/);
+assert.match(output.pop(),/Reply to a video/);
 assert.equal(await vsrCommand(env,{message_id:3,video:{file_id:'fake',file_size:50000}},'123','/vsr 1080',send),true);
 assert.match(output.pop(),/disabled until/);
 assert.equal(calls.some(q=>q.startsWith('INSERT OR IGNORE INTO seedvr2_jobs')),false,'no GPU queue when disabled');

@@ -30,3 +30,16 @@ print('PASS: extended T4 processing and Kaggle session timeout validated')
 assert 43200 == 12*60*60
 assert 39600 == 11*60*60
 print("PASS: Kaggle session capped at 12h with 1h setup/finishing headroom")
+
+# T4 memory-safe regression checks: quantization, 720p model inference,
+# resumable 9-frame chunks, and honest 1080p CPU finishing.
+assert "'seedvr2_ema_3b-Q8_0.gguf'" in py
+assert "'--resolution', '720'" in py
+assert "'--batch_size', '1'" in py
+assert "'--chunk_size', '9'" in py
+assert "'--temporal_overlap', '1'" in py
+assert "'--resume'" in py
+assert "ai_output = INTERMEDIATE if target == 1080 else OUTPUT" in py
+assert "scale={out_w}:{out_h}:flags=lanczos" in py
+assert "1080p safe mode: AI enhances at 720p" in raw
+print("PASS: memory-safe SeedVR2 Q8 / 720p AI / resumable chunking / 1080p Lanczos")
