@@ -11,6 +11,7 @@ import {pollWanAuto} from './wan-auto'
 import {handleLtxCommand,pollLtxJobs} from './hf-ltx-video'
 import { handleMediaStudioMessage, handleMediaStudioCallback, pollMediaStudio, mediaStudioCommands } from './media-studio'
 import {vsrCommand,vsrSignedFile,pollSeedVsr} from './seedvr2-kaggle'
+import {qwenImageCommand,pollQwenImage21} from './qwen-image21-kaggle'
 import { Hono } from 'hono'
 import { handleAudioTelegram, pollAudioJobs, mvsepStatus, checkMvsepAccount } from './audio-tools'
 import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAssistantContext } from './voice-profiles'
@@ -45,6 +46,7 @@ type Bindings = {
   MVSEP_API_TOKEN?: string
   IMAGE_CLIENT_IDS?: string
   KAGGLE_API_TOKEN?: string
+  QWEN_KAGGLE_ENABLED?: string
   GEMINI_API_KEY?: string
   MODELSCOPE_API_TOKEN?: string
   HUGGINGFACE_API_TOKEN?: string
@@ -323,6 +325,7 @@ app.post('/telegram/webhook', async (c) => {
       // LTX-2.5 ZeroGPU explicit commands take priority over the generic AI router.
       // This remains isolated from the existing WAN and dubbing handlers.
       if (await vsrCommand(c.env,msg,key,text,send)) return
+      if (await qwenImageCommand(c.env,key,msg.message_id,text,send)) return
       if(await handleLtxCommand(c.env,msg,key,text))return
       // Review prompts (including /video) before any billable generation.
       if(await reviewDirectPrompt(c.env,msg))return
@@ -716,6 +719,8 @@ app.post('/telegram/webhook', async (c) => {
           '/dub_status — last Kaggle video dubbing status\n' +
           '/vsr — SeedVR2 video upscaling on free Kaggle GPU\n' +
           '/vsr_status — SeedVR2 job status\n' +
+          '/qwenimage PROMPT — research Qwen-Image-2.1 on Kaggle\n' +
+          '/qwenimage_status — check research image job\n' +
           '/dub_upload — upload large videos up to 1 GiB in your browser\n' +
           '/voxvoices — show five saved VoxCPM2 voices\n' +
           '/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n' +
@@ -1045,6 +1050,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'vsr',description:'SeedVR2 video upscaling on Kaggle'},
         {command:'vsr_status',description:'Check video upscale job'},
         {command:'vsr_help',description:'Video upscaling input limits'},
+        {command:'qwenimage',description:'Qwen 2.1 research image on Kaggle'},
+        {command:'qwenimage_status',description:'Check Qwen research image job'},
+        {command:'qwenimage_help',description:'Qwen Kaggle image limitations'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
         {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
@@ -1112,6 +1120,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'vsr',description:'SeedVR2 video upscaling on Kaggle'},
         {command:'vsr_status',description:'Check video upscale job'},
         {command:'vsr_help',description:'Video upscaling input limits'},
+        {command:'qwenimage',description:'Qwen 2.1 research image on Kaggle'},
+        {command:'qwenimage_status',description:'Check Qwen research image job'},
+        {command:'qwenimage_help',description:'Qwen Kaggle image limitations'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
         {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
@@ -1154,6 +1165,10 @@ export default {
     const results = await Promise.allSettled([processQueuedMotion(env), pollAudioJobs(env), processQwenVoiceJobs(env), checkMvsepAccount(env), checkKaggleConnection(env), pollVoxKaggle(env),probeKaggleReadMethods(env),pollPyvt(env),pollSeedVsr(env),pyvtPreflight(env),pyvtGeminiHealth(env),pollMediaStudio(env),pollWanAuto(env),pollLtxJobs(env),pollNaturalActions(env),pollModelScopeImages(env),pollExternalImages(env),pollZeroImages(env),pollImageUp(env),runFreeLlmRecoveryCheck(env)])
     for (const r of results) {
       if (r.status === 'rejected') console.error('Scheduled processing failed', String(r.reason).slice(0,160))
+    }
+    // Run after other Kaggle processors to reduce GPU submission races.
+    try { await pollQwenImage21(env) } catch (error) {
+      console.error('Qwen Kaggle poll failed',error instanceof Error?error.name:'unknown')
     }
   }
 }
