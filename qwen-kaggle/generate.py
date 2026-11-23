@@ -22,7 +22,7 @@ COMFY = Path("/tmp/qwen-comfy")
 RESULT = OUT / "qwen_image21_result.png"
 REPORT = OUT / "qwen_image21_result.json"
 GGUF = "qwen-image-2.1-UC-Q4_K_M.gguf"
-LORA = "Qwen-Image-2.1-viggle-turbo-v0.3-6step-lora-r256.safetensors"
+LORA = "Qwen-Image-2.1-viggle-turbo-v0.3-6step-lora-r128.safetensors"
 CHECKSUM = "e79c8a009f2ecbdb6c70fd663d9aea9ee304a0d91f347e4169a756b8ad141b41"
 SIGMAS = "1.0, 0.9375, 0.875, 0.75, 0.5, 0.25"
 
