@@ -3,11 +3,13 @@ import { qwenImageCommand, pollQwenImage21, normalizePrompt } from '../src/worke
 
 function envFor(flag='0', token=undefined) {
   const calls=[];
+  const bindings=[];
   const db={
     prepare(sql) {
       calls.push(sql);
       return {
         bind(...args) {
+          bindings.push({sql,args});
           return {
             async run() { return {meta:{changes:1}}; },
             async all() { return {results:[]}; }
@@ -17,7 +19,7 @@ function envFor(flag='0', token=undefined) {
     }
   };
   return { env:{MEMORY_DB:db,TELEGRAM_BOT_TOKEN:'unused-test-bot-token',
-                 QWEN_KAGGLE_ENABLED:flag,KAGGLE_API_TOKEN:token}, calls };
+                 QWEN_KAGGLE_ENABLED:flag,KAGGLE_API_TOKEN:token}, calls, bindings };
 }
 async function main() {
   assert.equal(normalizePrompt('A {argument name="nationality" default="Japanese"} girl with {argument name="hair style" default="long black hair"}'), 'A Japanese girl with long black hair');
@@ -39,6 +41,17 @@ async function main() {
   assert.match(sent.pop(),/between 3 and 1400/i);
   await pollQwenImage21(env);
   assert.equal(calls.filter(s=>s.includes('INSERT INTO')).length,0);
-  console.log('PASS: 7 command cases, feature gate prevents insert/submit, idle polling safe');
+  const enabled=envFor('1','test-kaggle-token');
+  const enabledSent=[];
+  assert.equal(await qwenImageCommand(enabled.env,'user',8,
+    '/qwenimage --size=768 A {argument name="nationality" default="Japanese"} adult portrait',
+    async t=>enabledSent.push(t)),true);
+  assert.match(enabledSent[0],/queued on Kaggle/);
+  const insert=enabled.bindings.find(x=>x.sql.includes('INSERT OR IGNORE INTO qwen_image21_jobs'));
+  assert.ok(insert);
+  assert.equal(insert.args[2],'A Japanese adult portrait');
+  assert.equal(insert.args[3],768);
+  assert.equal(insert.args[4],768);
+  console.log('PASS: disabled gate, enabled D1 queue, prompt template expansion, size parsing, status/help and validation');
 }
 await main();
