@@ -32,17 +32,12 @@ def sh(*args, timeout=900, cwd=None):
     subprocess.run(list(map(str, args)), check=True, cwd=cwd, timeout=timeout)
 
 
-def get_task():
-    raw = os.environ.get("QWEN_TASK_JSON", "")
-    if not raw:
-        return {"prompt": "A detailed photograph of a red ceramic teacup beside a rainy window, soft studio lighting",
-                "width": 1024, "height": 1024, "seed": 42}
-    task = json.loads(raw)
+def validate_task(task):
     if not isinstance(task, dict):
-        raise ValueError("Task must be JSON object")
+        raise ValueError("Each task must be a JSON object")
     prompt = task.get("prompt")
     if not isinstance(prompt, str) or not 3 <= len(prompt) <= 1400:
-        raise ValueError("Prompt must contain 3 to 1400 characters")
+        raise ValueError("Each prompt must contain 3 to 1400 characters")
     width, height = int(task.get("width", 1024)), int(task.get("height", 1024))
     if width not in (512, 768, 1024) or height not in (512, 768, 1024):
         raise ValueError("Allowed dimensions: 512/768/1024")
@@ -52,6 +47,21 @@ def get_task():
     if seed < 0 or seed >= 2**32:
         raise ValueError("Invalid random seed")
     return {"prompt": prompt, "width": width, "height": height, "seed": seed}
+
+
+def get_tasks():
+    raw_batch = os.environ.get("QWEN_TASKS_JSON", "")
+    if raw_batch:
+        tasks = json.loads(raw_batch)
+        if not isinstance(tasks, list) or not 2 <= len(tasks) <= 4:
+            raise ValueError("Batch must contain between 2 and 4 images")
+        return [validate_task(task) for task in tasks]
+    raw = os.environ.get("QWEN_TASK_JSON", "")
+    if not raw:
+        return [validate_task({
+            "prompt": "A detailed photograph of a red ceramic teacup beside a rainy window, soft studio lighting",
+            "width": 1024, "height": 1024, "seed": 42})]
+    return [validate_task(json.loads(raw))]
 
 
 def setup():
@@ -111,7 +121,7 @@ def setup():
     print("GGUF_SHA256_VERIFIED", flush=True)
 
 
-def graph(task):
+def graph(task, filename_prefix):
     # Matches Viggle v0.3 ComfyUI T2I's native unmerged LoRA path.
     return {
       "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": GGUF}},
@@ -126,7 +136,7 @@ def graph(task):
       "10": {"class_type": "ViggleTurboSigmas", "inputs": {"latent": ["6",0], "nodes": SIGMAS}},
       "11": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["8",0], "guider": ["7",0], "sampler": ["9",0], "sigmas": ["10",0], "latent_image": ["6",0]}},
       "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11",0], "vae": ["4",0]}},
-      "13": {"class_type": "SaveImage", "inputs": {"images": ["12",0], "filename_prefix": "qwen_image21/result"}},
+      "13": {"class_type": "SaveImage", "inputs": {"images": ["12",0], "filename_prefix": filename_prefix}},
     }
 
 
@@ -140,14 +150,15 @@ def api_request(method, path, payload=None, timeout=30):
 
 
 def main():
-    task = get_task()
-    print("CONFIG", {k: v for k,v in task.items() if k != "prompt"}, "steps=6",
-          "model=uncensored-Q4_K_M", "lora=viggle-v0.3", flush=True)
+    tasks = get_tasks()
+    print("CONFIG", {"count": len(tasks), "dimensions": tasks[0]["width"],
+          "steps": 6, "model": "uncensored-Q4_K_M", "lora": "viggle-v0.3-r128"}, flush=True)
     setup()
     server_log = (OUT / "qwen_comfy.log").open("w")
     cmd = [sys.executable, str(COMFY / "main.py"), "--listen", "127.0.0.1", "--port", "8188",
            "--lowvram", "--cpu-vae"]
     proc = subprocess.Popen(cmd, cwd=str(COMFY), stdout=server_log, stderr=subprocess.STDOUT)
+    results = []
     try:
         started = time.monotonic()
         while time.monotonic() - started < 180:
@@ -163,46 +174,71 @@ def main():
                 time.sleep(2)
         else:
             raise TimeoutError("ComfyUI start timeout")
-        response = api_request("POST", "/prompt", {"prompt": graph(task), "client_id": "kaggle-qwen21"})
-        if response.get("node_errors"):
-            raise RuntimeError("Invalid ComfyUI graph: " + str(response["node_errors"])[:1000])
-        pid = response.get("prompt_id")
-        if not pid:
-            raise RuntimeError("ComfyUI did not accept prompt: " + str(response)[:1000])
-        deadline = time.monotonic() + 4800
-        while time.monotonic() < deadline:
-            history = api_request("GET", "/history/" + pid, timeout=20).get(pid)
-            if history:
-                status = history.get("status", {})
-                if status.get("status_str") == "error" or not status.get("completed"):
-                    raise RuntimeError("ComfyUI inference failed: " + str(status.get("messages",[]))[-1200:])
-                images = history.get("outputs",{}).get("13",{}).get("images",[])
-                if not images:
-                    raise RuntimeError("No image produced")
-                image = images[0]
-                from urllib.parse import urlencode
-                url = "http://127.0.0.1:8188/view?" + urlencode({
-                    "filename": image["filename"],
-                    "subfolder": image.get("subfolder",""),
-                    "type": image.get("type","output")})
-                urllib.request.urlretrieve(url, RESULT)
-                from PIL import Image
-                with Image.open(RESULT) as im:
-                    im.verify()
-                with Image.open(RESULT) as im:
-                    size = im.size
-                REPORT.write_text(json.dumps({"status":"ok","width":size[0],"height":size[1],
-                                              "bytes":RESULT.stat().st_size,"seed":task["seed"],
-                                              "steps":6,"format":"PNG","model":"Uncensored Q4_K_M",
-                                              "lora":"Viggle Turbo v0.3 r128"}, indent=2))
-                print("QWEN_COMPLETE", RESULT, size, RESULT.stat().st_size, flush=True)
-                return
-            time.sleep(8)
-        raise TimeoutError("Image generation timed out")
+
+        # Keep ComfyUI and all model weights loaded for the complete batch.
+        # Only the latent graph is submitted again for each image.
+        for index, task in enumerate(tasks, 1):
+            print("QWEN_IMAGE_START", index, "OF", len(tasks), "SEED", task["seed"], flush=True)
+            response = api_request("POST", "/prompt", {
+                "prompt": graph(task, "qwen_image21_batch/image_" + str(index).zfill(2)),
+                "client_id": "kaggle-qwen21-batch"})
+            if response.get("node_errors"):
+                raise RuntimeError("Invalid ComfyUI graph: " + str(response["node_errors"])[:1000])
+            pid = response.get("prompt_id")
+            if not pid:
+                raise RuntimeError("ComfyUI did not accept prompt: " + str(response)[:1000])
+            deadline = time.monotonic() + 4800
+            while time.monotonic() < deadline:
+                history = api_request("GET", "/history/" + pid, timeout=20).get(pid)
+                if history:
+                    status = history.get("status", {})
+                    if status.get("status_str") == "error" or not status.get("completed"):
+                        raise RuntimeError("ComfyUI inference failed: " + str(status.get("messages",[]))[-1200:])
+                    images = history.get("outputs",{}).get("13",{}).get("images",[])
+                    if not images:
+                        raise RuntimeError("No image produced for batch item " + str(index))
+                    image = images[0]
+                    from urllib.parse import urlencode
+                    url = "http://127.0.0.1:8188/view?" + urlencode({
+                        "filename": image["filename"],
+                        "subfolder": image.get("subfolder",""),
+                        "type": image.get("type","output")})
+                    target = OUT / ("qwen_image21_result.png" if len(tasks) == 1 else
+                                    "qwen_image21_" + str(index).zfill(2) + ".png")
+                    urllib.request.urlretrieve(url, target)
+                    from PIL import Image
+                    with Image.open(target) as im:
+                        im.verify()
+                    with Image.open(target) as im:
+                        size = im.size
+                    if size != (task["width"], task["height"]):
+                        raise RuntimeError("Unexpected image dimensions for batch item " + str(index))
+                    results.append({"index": index, "file": target.name,
+                                    "width": size[0], "height": size[1],
+                                    "bytes": target.stat().st_size, "seed": task["seed"]})
+                    print("QWEN_IMAGE_COMPLETE", index, target.name, size,
+                          target.stat().st_size, flush=True)
+                    break
+                time.sleep(8)
+            else:
+                raise TimeoutError("Image " + str(index) + " timed out")
+
+        report = {"status": "ok", "count": len(results), "images": results,
+                  "steps": 6, "format": "PNG", "model": "Uncensored Q4_K_M",
+                  "lora": "Viggle Turbo v0.3 r128"}
+        report_path = OUT / ("qwen_image21_result.json" if len(tasks) == 1 else
+                             "qwen_image21_batch_result.json")
+        report_path.write_text(json.dumps(report, indent=2))
+        if len(results) == 1:
+            print("QWEN_COMPLETE", OUT / results[0]["file"], flush=True)
+        else:
+            print("QWEN_BATCH_COMPLETE", len(results), "images", flush=True)
     finally:
         proc.terminate()
-        try: proc.wait(timeout=10)
-        except subprocess.TimeoutExpired: proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
         server_log.close()
         log = OUT / "qwen_comfy.log"
         if log.exists():
