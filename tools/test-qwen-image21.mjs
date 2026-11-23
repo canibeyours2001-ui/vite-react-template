@@ -22,7 +22,7 @@ function envFor(flag='0', token=undefined) {
                  QWEN_KAGGLE_ENABLED:flag,KAGGLE_API_TOKEN:token}, calls, bindings };
 }
 
-function schedulerEnv(activeJob=null, queuedJob=null) {
+function schedulerEnv(activeJob=null, queuedJob=null, watchRecord=null) {
   const statements=[];
   const job=queuedJob||activeJob||{
     id:1,chat_id:'5293769874',message_id:1352,
@@ -46,6 +46,9 @@ function schedulerEnv(activeJob=null, queuedJob=null) {
               }
               if(sql.includes("FROM qwen_image21_jobs WHERE status='submitting'")) {
                 return {results:[job]};
+              }
+              if(sql.includes('FROM qwen_image21_queue_watch WHERE job_id=?')){
+                return {results:watchRecord?[watchRecord]:[]};
               }
               return {results:[]};
             }
@@ -255,6 +258,72 @@ async function main() {
   assert.ok(batchActive.statements.some(x=>
     x.sql.includes("SET status='done'")&&x.args[0]===3));
 
+  // Stale queue without a real Kaggle session ID: one alert, zero duplicate pushes.
+  const oldQueued=schedulerEnv({
+    id:4,chat_id:'5293769874',message_id:1355,prompt:'A cinematic red fox',
+    width:1024,height:1024,seed:101,status:'kaggle-queued',
+    version_number:50,created_at:1795409882,error_message:null
+  },null,{
+    job_id:4,version_number:50,queued_since:Math.floor(Date.now()/1000)-360,
+    alerted:0,cancel_state:'none',retry_count:0
+  });
+  const alerts=[];
+  try{
+    globalThis.fetch=async (input,init={})=>{
+      const url=String(input);
+      if(url.includes('/kernels/status')){
+        return new Response(JSON.stringify({status:'QUEUED'}),{status:200,
+          headers:{'content-type':'application/json'}});
+      }
+      if(url.includes('/sendMessage')){
+        alerts.push(JSON.parse(init.body).text);
+        return new Response(JSON.stringify({ok:true}),{status:200,
+          headers:{'content-type':'application/json'}});
+      }
+      throw Error('Unexpected network request on queue watchdog: '+url);
+    };
+    await pollQwenImage21(oldQueued.env);
+  } finally {
+    globalThis.fetch=originalFetch;
+  }
+  assert.equal(alerts.length,1);
+  assert.match(alerts[0],/Automatic queue reset is blocked/);
+  assert.ok(oldQueued.statements.some(x=>x.sql.includes('SET alerted=1')));
+  assert.equal(oldQueued.statements.some(x=>x.sql.includes("SET status='queued',version_number=NULL")),false);
+
+  // A genuine backend cancellation acknowledgment after the watchdog alert may
+  // requeue the same D1 job, but no more than once.
+  const cancelled=schedulerEnv({
+    id:5,chat_id:'5293769874',message_id:1356,prompt:'A cinematic red fox',
+    width:1024,height:1024,seed:111,status:'kaggle-queued',
+    version_number:51,created_at:1795409882,error_message:null
+  },null,{
+    job_id:5,version_number:51,queued_since:Math.floor(Date.now()/1000)-400,
+    alerted:1,cancel_state:'requested',retry_count:0
+  });
+  const retryNotices=[];
+  try{
+    globalThis.fetch=async (input,init={})=>{
+      const url=String(input);
+      if(url.includes('/kernels/status')){
+        return new Response(JSON.stringify({status:'CANCEL_ACKNOWLEDGED'}),{status:200,
+          headers:{'content-type':'application/json'}});
+      }
+      if(url.includes('/sendMessage')){
+        retryNotices.push(JSON.parse(init.body).text);
+        return new Response(JSON.stringify({ok:true}),{status:200,
+          headers:{'content-type':'application/json'}});
+      }
+      throw Error('Unexpected network request after confirmed cancellation: '+url);
+    };
+    await pollQwenImage21(cancelled.env);
+  } finally {
+    globalThis.fetch=originalFetch;
+  }
+  assert.equal(retryNotices.length,1);
+  assert.match(retryNotices[0],/Requeued the same image request once/);
+  assert.ok(cancelled.statements.some(x=>x.sql.includes("SET status='queued',version_number=NULL")));
+  assert.ok(cancelled.statements.some(x=>x.sql.includes('SET retry_count=?')&&x.args[0]===1));
   console.log('PASS: command validation, D1 enqueue, prompt normalization, Kaggle submission, GPU queue state batch submission, Telegram album delivery and deadlock regression');
 }
 await main();

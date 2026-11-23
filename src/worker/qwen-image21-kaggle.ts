@@ -39,6 +39,10 @@ async function schema(db:Db){
    "status TEXT NOT NULL DEFAULT 'queued',version_number INTEGER,error_message TEXT,"+
    'created_at INTEGER NOT NULL DEFAULT (unixepoch()),updated_at INTEGER NOT NULL DEFAULT (unixepoch()),'+
    'UNIQUE(chat_id,message_id))').bind().run()
+  await db.prepare('CREATE TABLE IF NOT EXISTS qwen_image21_queue_watch ('+
+    'job_id INTEGER PRIMARY KEY,version_number INTEGER NOT NULL,'+
+    'queued_since INTEGER NOT NULL,alerted INTEGER NOT NULL DEFAULT 0,'+
+    "cancel_state TEXT NOT NULL DEFAULT 'none',retry_count INTEGER NOT NULL DEFAULT 0)").bind().run()
 }
 async function tell(env:QwenEnv,chat:string,message:string){
   const r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendMessage',{
@@ -67,6 +71,104 @@ async function kaggle(env:QwenEnv,method:'push'|'status'|'output',data:Record<st
   if(!r.ok||v.error)throw Error('Kaggle '+method+' HTTP '+r.status)
   return v
 }
+type QueueWatch={job_id:number;version_number:number;queued_since:number;alerted:number;
+  cancel_state:string;retry_count:number}
+const QUEUE_RESET_DELAY=300
+const MAX_QUEUE_RESETS=1
+
+// The public Kaggle status API often omits kernelSessionId. A notebook *version*
+// number is NOT a verified session ID; never use it to cancel an unrelated session.
+function sessionId(data:Record<string,unknown>):number|null{
+  const raw=data.kernelSessionId??data.kernel_session_id
+  const id=Number(raw)
+  return (raw!==undefined&&raw!==null&&Number.isSafeInteger(id)&&id>0)?id:null
+}
+async function watchKaggleQueue(env:QwenEnv,job:Job,statusData:Record<string,unknown>){
+  const db=env.MEMORY_DB
+  const now=Math.floor(Date.now()/1000)
+  const rows=await db.prepare('SELECT * FROM qwen_image21_queue_watch WHERE job_id=?')
+    .bind(job.id).all<QueueWatch>()
+  const watch=rows.results[0]
+  if(!watch||watch.version_number!==job.version_number){
+    await db.prepare('INSERT INTO qwen_image21_queue_watch '+
+      '(job_id,version_number,queued_since,alerted,cancel_state,retry_count) VALUES(?,?,?,0,?,?) '+
+      'ON CONFLICT(job_id) DO UPDATE SET version_number=excluded.version_number,'+
+      'queued_since=excluded.queued_since,alerted=0,cancel_state=excluded.cancel_state')
+      .bind(job.id,job.version_number||0,now,'none',watch?.retry_count||0).run()
+    return
+  }
+  if(now-watch.queued_since<QUEUE_RESET_DELAY||watch.alerted)return
+  const claim=await db.prepare('UPDATE qwen_image21_queue_watch SET alerted=1 '+
+    'WHERE job_id=? AND version_number=? AND alerted=0')
+    .bind(job.id,job.version_number||0).run()
+  if(claim.meta.changes!==1)return
+
+  if(watch.retry_count>=MAX_QUEUE_RESETS){
+    await tell(env,job.chat_id,'⚠️ Qwen #'+job.id+
+      ' is still queued after 5 minutes. Queue reset limit reached; no duplicate job was started.').catch(()=>{})
+    return
+  }
+  const id=sessionId(statusData)
+  if(!id){
+    // Kaggle returns QUEUED and versionNumber, but often no cancellable session ID.
+    // Do not guess, delete notebooks, or blindly repush over an active queue.
+    await tell(env,job.chat_id,'⚠️ Qwen #'+job.id+
+      ' has waited over 5 minutes for Kaggle GPU. Automatic queue reset is blocked: '+
+      'Kaggle did not expose a session ID for safe cancellation. '+
+      'Open Kaggle → Active Events → ⋯ → Stop Session. '+
+      'If Kaggle confirms cancellation, the bot can retry once automatically.').catch(()=>{})
+    return
+  }
+  try{
+    // Only if Kaggle returns a real positive session ID, check QUEUED again.
+    const current=await kaggle(env,'status',{
+      userName:OWNER,kernelSlug:SLUG,versionLabel:'v'+job.version_number})
+    if(String(current.status||current.state||'').toUpperCase()!=='QUEUED'||
+       sessionId(current)!==id)return
+    if(!env.KAGGLE_API_TOKEN)throw Error('Missing Kaggle API credential')
+    const resp=await fetch('https://www.kaggle.com/api/v1/kernels/cancel-session/'+id,{
+      method:'POST',headers:{Authorization:'Bearer '+env.KAGGLE_API_TOKEN,
+        Accept:'application/json','Content-Type':'application/json'},
+      body:'{}',signal:AbortSignal.timeout(16000)
+    })
+    const result=await resp.json().catch(()=>({})) as {errorMessage?:string;error_message?:string}
+    if(!resp.ok||result.errorMessage||result.error_message){
+      throw Error('Kaggle cancellation endpoint rejected the request (HTTP '+resp.status+')')
+    }
+    await db.prepare("UPDATE qwen_image21_queue_watch SET cancel_state='requested' WHERE job_id=?")
+      .bind(job.id).run()
+    await tell(env,job.chat_id,'♻️ Qwen #'+job.id+
+      ': cancellation requested after 5 minutes in Kaggle queue. '+
+      'Resubmission will happen only after Kaggle confirms cancellation.').catch(()=>{})
+  }catch(e){
+    console.warn('Qwen queue cancellation unavailable',e instanceof Error?e.name:'unknown')
+    await tell(env,job.chat_id,'⚠️ Kaggle rejected the queue cancellation request for Qwen #'+
+      job.id+'. No replacement was submitted, to avoid duplicate GPU jobs.').catch(()=>{})
+  }
+}
+async function retryAfterConfirmedCancellation(env:QwenEnv,job:Job){
+  const db=env.MEMORY_DB
+  const rows=await db.prepare('SELECT * FROM qwen_image21_queue_watch WHERE job_id=?')
+    .bind(job.id).all<QueueWatch>()
+  const watch=rows.results[0]
+  if(!watch||watch.version_number!==job.version_number||!watch.alerted||
+     watch.retry_count>=MAX_QUEUE_RESETS){
+    await db.prepare("UPDATE qwen_image21_jobs SET status='failed',"+
+      "error_message='Kaggle cancelled the run; automatic retry not authorized',updated_at=unixepoch() WHERE id=?")
+      .bind(job.id).run()
+    return
+  }
+  // The worker only resets after the backend says cancellation is ACKNOWLEDGED.
+  const claimed=await db.prepare("UPDATE qwen_image21_jobs SET status='queued',version_number=NULL,"+
+    "error_message=NULL,updated_at=unixepoch() WHERE id=? AND status IN ('submitted','kaggle-queued','running')")
+    .bind(job.id).run()
+  if(claimed.meta.changes!==1)return
+  await db.prepare('UPDATE qwen_image21_queue_watch SET retry_count=?,alerted=0,'+
+    "cancel_state='acknowledged' WHERE job_id=?").bind(watch.retry_count+1,job.id).run()
+  await tell(env,job.chat_id,'♻️ Kaggle confirmed cancellation of Qwen #'+job.id+
+    '. Requeued the same image request once; no additional Telegram prompt is needed.').catch(()=>{})
+}
+
 export function normalizePrompt(input:string):string{
   return input.replace(/\{argument\s+name=(?:"[^"]+"|'[^']+')\s+default=(?:"([^"]*)"|'([^']*)')\s*\}/gi,
     (_match,doubleQuoted,singleQuoted)=>doubleQuoted??singleQuoted??'')
@@ -369,6 +471,12 @@ export async function pollQwenImage21(env:QwenEnv):Promise<void>{
         userName:OWNER,kernelSlug:SLUG,versionLabel:'v'+job.version_number
       })
       const status=String(result.status||result.state||'').toUpperCase()
+      if(status.includes('CANCEL_ACKNOWLEDGED')||status.includes('CANCELLED')||
+         status.includes('CANCELED')){
+        await retryAfterConfirmedCancellation(env,job)
+        return
+      }
+      if(status.includes('CANCEL_REQUESTED'))return
       if(/ERROR|FAIL|CANCEL/.test(status)){
         await db.prepare("UPDATE qwen_image21_jobs SET status='failed',error_message=?,"+
           'updated_at=unixepoch() WHERE id=?').bind('Kaggle job failed: '+status,job.id).run()
@@ -406,6 +514,7 @@ export async function pollQwenImage21(env:QwenEnv):Promise<void>{
       }else if(status.includes('QUEUED')||status.includes('INITIALIZING')||status.includes('PENDING')){
         await db.prepare("UPDATE qwen_image21_jobs SET status='kaggle-queued',updated_at=unixepoch() WHERE id=?")
           .bind(job.id).run()
+        if(status.includes('QUEUED'))await watchKaggleQueue(env,job,result)
       }else if(status.includes('RUNNING')){
         await db.prepare("UPDATE qwen_image21_jobs SET status='running',updated_at=unixepoch() WHERE id=?")
           .bind(job.id).run()
@@ -445,6 +554,13 @@ export async function pollQwenImage21(env:QwenEnv):Promise<void>{
     if(!Number.isSafeInteger(version)||version<1)throw Error('Kaggle push response had no valid version')
     await db.prepare("UPDATE qwen_image21_jobs SET status='submitted',version_number=?,updated_at=unixepoch() WHERE id=? AND status='submitting'")
       .bind(version,next.id).run()
+    // Start the queue timer at submission, not when the Telegram prompt was received.
+    await db.prepare('INSERT INTO qwen_image21_queue_watch '+
+      '(job_id,version_number,queued_since,alerted,cancel_state,retry_count) '+
+      "VALUES(?,?,unixepoch(),0,'none',COALESCE((SELECT retry_count FROM qwen_image21_queue_watch WHERE job_id=?),0)) "+
+      'ON CONFLICT(job_id) DO UPDATE SET version_number=excluded.version_number,'+
+      'queued_since=excluded.queued_since,alerted=0,cancel_state=excluded.cancel_state')
+      .bind(next.id,version,next.id).run()
     await tell(env,next.chat_id,'🚀 Qwen image #'+next.id+' submitted to Kaggle v'+version+'. /qwenimage_status').catch(()=>{})
   }catch(e){
     const message=String(e instanceof Error?e.message:e).slice(0,160)

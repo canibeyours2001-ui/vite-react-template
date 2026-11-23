@@ -40,6 +40,13 @@ QWEN_KAGGLE_ENABLED is already set to 1 in the Worker configuration. This enable
 
 Batch verification includes command parsing, D1 queue insertion, Kaggle push payload construction, output-file matching, PNG validation, and Telegram media-album delivery using mocked API responses. A real batch generation is still required to verify Kaggle execution and end-to-end delivery. Do not treat mocked tests as a live GPU test.
 
+
+## Five-minute Kaggle queue watchdog
+
+A Cloudflare scheduled check monitors the active Kaggle submission each minute. If it stays in Kaggle's `QUEUED` state for five minutes, the bot sends a one-time alert. If the Kaggle status response contains a verified positive `kernelSessionId`, the bot can request cancellation and **only** resubmit the same job after Kaggle returns `CANCEL_ACKNOWLEDGED`. A maximum of one replacement submission is allowed. The watchdog never mistakes the notebook version number for a session ID, never deletes the notebook, and never blindly repushes while the old job remains queued or running.
+
+As tested on November 23, 2026, the Kaggle status API returns `QUEUED` **without a session ID**, and cancel requests constructed from notebook version 6 were rejected (400/404). Therefore automatic cancellation cannot be guaranteed: the live-safe behavior is a Telegram notice instructing the user to stop the queued session from **Kaggle > Active Events > ⋯ > Stop Session**. Once Kaggle confirms cancellation in status, the bot can requeue the same D1 job once. This safety guard prevents duplicate GPU runs and protects notebook history. Resetting a queue does **not** guarantee a faster GPU allocation.
+
 ## License
 
 Research/evaluation only. The Qwen Research License does not permit commercial use without separate permission. Do not use for paid Hypit or client work without a separate license.
