@@ -67,6 +67,20 @@ def setup():
     if not node.exists():
         sh("git", "clone", "--quiet", "--depth", "1", "https://github.com/city96/ComfyUI-GGUF.git", node, timeout=180)
     sh(sys.executable, "-m", "pip", "install", "-q", "-r", node / "requirements.txt", timeout=600)
+    # Upstream ComfyUI already implements QwenImage21; ComfyUI-GGUF's
+    # whitelist currently omits its GGUF architecture identifier. Permit it
+    # without renaming metadata so ComfyUI detects the native QwenImage21 model.
+    loader = node / "loader.py"
+    source = loader.read_text()
+    old = '"qwen_image"}'
+    new = '"qwen_image", "qwen_image21"}'
+    if "qwen_image21" not in source:
+        if old not in source:
+            raise RuntimeError("ComfyUI-GGUF architecture whitelist changed; refusing unsafe patch")
+        loader.write_text(source.replace(old, new, 1))
+        print("GGUF_ARCH_QWEN_IMAGE21_ENABLED", flush=True)
+    else:
+        print("GGUF_ARCH_QWEN_IMAGE21_ALREADY_ENABLED", flush=True)
     urllib.request.urlretrieve(
         "https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo/resolve/main/comfyui/viggle_turbo.py",
         COMFY / "custom_nodes" / "viggle_turbo.py")
