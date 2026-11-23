@@ -21,7 +21,7 @@ const SLUG='qwen-image-2-1-uncensored-gguf-6-step-t4-research'
 const KERNEL=OWNER+'/'+SLUG
 const API='https://api.kaggle.com/v1/kernels/'
 const SCRIPT_URL='https://raw.githubusercontent.com/canibeyours2001-ui/vite-react-template/99b7fbd/qwen-kaggle/generate.py'
-const ACTIVE="('submitting','submitted','running','delivering','submit-uncertain','needs-review')"
+const ACTIVE="('submitting','submitted','queued','running','delivering','submit-uncertain','needs-review')"
 const HELP='🖼️ Qwen Image 2.1 Uncensored, GGUF Q4_K_M, Viggle Turbo 6-step (research-only).\n'+
   'Text-to-image: /qwenimage A cinematic mountain village at dawn\n'+
   'Optional: /qwenimage --size=768 A realistic red sports car\n'+
@@ -188,7 +188,7 @@ export async function pollQwenImage21(env:QwenEnv):Promise<void>{
     ACTIVE+' ORDER BY id ASC LIMIT 1').bind().all<Job>()
   const job=rows.results[0]
   if(job){
-    if(!['submitted','running'].includes(job.status)||!job.version_number)return
+    if(!['submitted','queued','running'].includes(job.status)||!job.version_number)return
     try{
       const result=await kaggle(env,'status',{
         userName:OWNER,kernelSlug:SLUG,versionLabel:'v'+job.version_number
@@ -207,7 +207,7 @@ export async function pollQwenImage21(env:QwenEnv):Promise<void>{
         const url=outputUrl(files)
         if(!url)return
         const claim=await db.prepare("UPDATE qwen_image21_jobs SET status='delivering',"+
-          'updated_at=unixepoch() WHERE id=? AND status IN (\'submitted\',\'running\')'
+          'updated_at=unixepoch() WHERE id=? AND status IN (\'submitted\',\'queued\',\'running\')'
         ).bind(job.id).run()
         if(claim.meta.changes!==1)return
         try{
@@ -224,9 +224,14 @@ export async function pollQwenImage21(env:QwenEnv):Promise<void>{
       if(Math.floor(Date.now()/1000)-job.created_at>14400){
         await db.prepare("UPDATE qwen_image21_jobs SET status='needs-review',error_message='Kaggle still running after 4 hours; manual review required',updated_at=unixepoch() WHERE id=?")
           .bind(job.id).run()
-      }else{
-        await db.prepare("UPDATE qwen_image21_jobs SET status='running',updated_at=unixepoch() WHERE id=? AND status='submitted'")
+      }else if(status.includes('QUEUED')||status.includes('INITIALIZING')||status.includes('PENDING')){
+        await db.prepare("UPDATE qwen_image21_jobs SET status='queued',updated_at=unixepoch() WHERE id=?")
           .bind(job.id).run()
+      }else if(status.includes('RUNNING')){
+        await db.prepare("UPDATE qwen_image21_jobs SET status='running',updated_at=unixepoch() WHERE id=?")
+          .bind(job.id).run()
+      }else{
+        console.warn('Qwen Kaggle returned unrecognized status',status)
       }
     }catch(e){
       console.error('Qwen Kaggle poll error',e instanceof Error?e.name:'unknown')
