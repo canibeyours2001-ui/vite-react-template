@@ -984,7 +984,7 @@ export async function pollPyvt(env:VideoEnv):Promise<void>{
   return
  }
  const qwenBusy=await env.MEMORY_DB.prepare(
-  "SELECT id FROM qwen_image21_jobs WHERE status IN ('submitting','submitted','queued','running','delivering','submit-uncertain','needs-review') LIMIT 1"
+  "SELECT id FROM qwen_image21_jobs WHERE status IN ('submitting','submitted','kaggle-queued','running','delivering','submit-uncertain','needs-review') LIMIT 1"
  ).bind().all<{id:number}>()
  if(qwenBusy.results.length)return
  const locked=await env.MEMORY_DB.prepare(

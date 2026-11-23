@@ -22,7 +22,7 @@ const KERNEL = OWNER+'/'+SLUG
 const BASE = 'https://api.kaggle.com/v1/kernels/'
 const MAX_INPUT = 20*1024*1024
 const MAX_OUTPUT = 49*1024*1024
-const ACTIVE = "('submitting','submitted','queued','running','delivering','submit-uncertain','needs-review')"
+const ACTIVE = "('submitting','submitted','kaggle-queued','running','delivering','submit-uncertain','needs-review')"
 const HELP = '🎬 SeedVR2 Q8, T4 memory-safe beta\n' +
   'Reply to a video with /vsr 720 or /vsr 1080, or set the command as its caption.\n' +
   '1080p safe mode: AI enhances at 720p, then Lanczos resizes to 1080p.\n' +
@@ -267,7 +267,7 @@ export async function pollSeedVsr(env:VsrEnv):Promise<void>{
   for(const sql of [
     "SELECT id FROM pyvt_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering') LIMIT 1",
     "SELECT id FROM vox_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering') LIMIT 1",
-    "SELECT id FROM qwen_image21_jobs WHERE status IN ('submitting','submitted','queued','running','delivering','submit-uncertain','needs-review') LIMIT 1"
+    "SELECT id FROM qwen_image21_jobs WHERE status IN ('submitting','submitted','kaggle-queued','running','delivering','submit-uncertain','needs-review') LIMIT 1"
   ]){
     const other=await db.prepare(sql).bind().all<{id:number}>().catch(()=>({results:[]}))
     if(other.results.length)return

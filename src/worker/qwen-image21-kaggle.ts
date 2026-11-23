@@ -21,7 +21,8 @@ const SLUG='qwen-image-2-1-uncensored-gguf-6-step-t4-research'
 const KERNEL=OWNER+'/'+SLUG
 const API='https://api.kaggle.com/v1/kernels/'
 const SCRIPT_URL='https://raw.githubusercontent.com/canibeyours2001-ui/vite-react-template/99b7fbd/qwen-kaggle/generate.py'
-const ACTIVE="('submitting','submitted','queued','running','delivering','submit-uncertain','needs-review')"
+const ACTIVE="('submitting','submitted','kaggle-queued','running','delivering','submit-uncertain','needs-review')"
+const BLOCKING="('queued','submitting','submitted','kaggle-queued','running','delivering','submit-uncertain','needs-review')"
 const HELP='🖼️ Qwen Image 2.1 Uncensored, GGUF Q4_K_M, Viggle Turbo 6-step (research-only).\n'+
   'Text-to-image: /qwenimage A cinematic mountain village at dawn\n'+
   'Optional: /qwenimage --size=768 A realistic red sports car\n'+
@@ -141,7 +142,9 @@ export async function qwenImageCommand(env:QwenEnv,chat:string,messageId:number,
       'WHERE chat_id=? ORDER BY id DESC LIMIT 1'
     ).bind(chat).all<{id:number;status:string;width:number;height:number;version_number:number|null;error_message:string|null}>()
     const j=rows.results[0]
-    await send(j?'🖼️ Qwen #'+j.id+': '+j.status+' • '+j.width+'×'+j.height+
+    const shown=j?.status==='queued'?'waiting for submission':
+      j?.status==='kaggle-queued'?'waiting for Kaggle GPU':j?.status
+    await send(j?'🖼️ Qwen #'+j.id+': '+shown+' • '+j.width+'×'+j.height+
       (j.version_number?' • Kaggle v'+j.version_number:'')+
       (j.error_message?'\n'+j.error_message.slice(0,150):''):'No Qwen research jobs yet.\n'+HELP)
     return true
@@ -163,7 +166,7 @@ export async function qwenImageCommand(env:QwenEnv,chat:string,messageId:number,
     return true
   }
   const busy=await env.MEMORY_DB.prepare(
-    'SELECT id FROM qwen_image21_jobs WHERE chat_id=? AND status IN '+ACTIVE+' LIMIT 1'
+    'SELECT id FROM qwen_image21_jobs WHERE chat_id=? AND status IN '+BLOCKING+' LIMIT 1'
   ).bind(chat).all<{id:number}>()
   if(busy.results.length){
     await send('You already have an active Qwen job. Use /qwenimage_status.')
@@ -188,7 +191,7 @@ export async function pollQwenImage21(env:QwenEnv):Promise<void>{
     ACTIVE+' ORDER BY id ASC LIMIT 1').bind().all<Job>()
   const job=rows.results[0]
   if(job){
-    if(!['submitted','queued','running'].includes(job.status)||!job.version_number)return
+    if(!['submitted','kaggle-queued','running'].includes(job.status)||!job.version_number)return
     try{
       const result=await kaggle(env,'status',{
         userName:OWNER,kernelSlug:SLUG,versionLabel:'v'+job.version_number
@@ -207,7 +210,7 @@ export async function pollQwenImage21(env:QwenEnv):Promise<void>{
         const url=outputUrl(files)
         if(!url)return
         const claim=await db.prepare("UPDATE qwen_image21_jobs SET status='delivering',"+
-          'updated_at=unixepoch() WHERE id=? AND status IN (\'submitted\',\'queued\',\'running\')'
+          'updated_at=unixepoch() WHERE id=? AND status IN (\'submitted\',\'kaggle-queued\',\'running\')'
         ).bind(job.id).run()
         if(claim.meta.changes!==1)return
         try{
@@ -225,7 +228,7 @@ export async function pollQwenImage21(env:QwenEnv):Promise<void>{
         await db.prepare("UPDATE qwen_image21_jobs SET status='needs-review',error_message='Kaggle still running after 4 hours; manual review required',updated_at=unixepoch() WHERE id=?")
           .bind(job.id).run()
       }else if(status.includes('QUEUED')||status.includes('INITIALIZING')||status.includes('PENDING')){
-        await db.prepare("UPDATE qwen_image21_jobs SET status='queued',updated_at=unixepoch() WHERE id=?")
+        await db.prepare("UPDATE qwen_image21_jobs SET status='kaggle-queued',updated_at=unixepoch() WHERE id=?")
           .bind(job.id).run()
       }else if(status.includes('RUNNING')){
         await db.prepare("UPDATE qwen_image21_jobs SET status='running',updated_at=unixepoch() WHERE id=?")
@@ -240,8 +243,8 @@ export async function pollQwenImage21(env:QwenEnv):Promise<void>{
   }
   // Respect other Kaggle jobs already in this bot.
   for(const sql of [
-    "SELECT id FROM pyvt_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering') LIMIT 1",
-    "SELECT id FROM vox_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering') LIMIT 1",
+    "SELECT id FROM pyvt_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain','needs-review') LIMIT 1",
+    "SELECT id FROM vox_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain','needs-review') LIMIT 1",
     "SELECT id FROM seedvr2_jobs WHERE status IN ('submitting','submitted','running','delivering') LIMIT 1"
   ]){
     const other=await db.prepare(sql).bind().all<{id:number}>().catch(()=>({results:[]}))
