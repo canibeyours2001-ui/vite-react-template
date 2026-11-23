@@ -64,6 +64,11 @@ async function kaggle(env:QwenEnv,method:'push'|'status'|'output',data:Record<st
   if(!r.ok||v.error)throw Error('Kaggle '+method+' HTTP '+r.status)
   return v
 }
+export function normalizePrompt(input:string):string{
+  return input.replace(/\{argument\s+name=(?:"[^"]+"|'[^']+')\s+default=(?:"([^"]*)"|'([^']*)')\s*\}/gi,
+    (_match,doubleQuoted,singleQuoted)=>doubleQuoted??singleQuoted??'')
+    .replace(/\s+/g,' ').trim()
+}
 function source(task:Job){
   const payload={prompt:task.prompt,width:task.width,height:task.height,seed:task.seed}
   // JSON-encoded string literal is also valid as a Python string. No user input is evaluated.
@@ -141,7 +146,7 @@ export async function qwenImageCommand(env:QwenEnv,chat:string,messageId:number,
       (j.error_message?'\n'+j.error_message.slice(0,150):''):'No Qwen research jobs yet.\n'+HELP)
     return true
   }
-  let prompt=(m[2]||'').trim()
+  let prompt=normalizePrompt(m[2]||'')
   let dim=1024
   const opt=prompt.match(/^--size=(512|768|1024)\s+/)
   if(opt){dim=Number(opt[1]);prompt=prompt.slice(opt[0].length).trim()}

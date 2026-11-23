@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { qwenImageCommand, pollQwenImage21 } from '../src/worker/qwen-image21-kaggle.ts';
+import { qwenImageCommand, pollQwenImage21, normalizePrompt } from '../src/worker/qwen-image21-kaggle.ts';
 
 function envFor(flag='0', token=undefined) {
   const calls=[];
@@ -20,6 +20,7 @@ function envFor(flag='0', token=undefined) {
                  QWEN_KAGGLE_ENABLED:flag,KAGGLE_API_TOKEN:token}, calls };
 }
 async function main() {
+  assert.equal(normalizePrompt('A {argument name="nationality" default="Japanese"} girl with {argument name="hair style" default="long black hair"}'), 'A Japanese girl with long black hair');
   const {env,calls}=envFor();
   const sent=[];
   const send=async t => {sent.push(t);};
