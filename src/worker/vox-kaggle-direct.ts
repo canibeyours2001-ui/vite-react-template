@@ -379,6 +379,10 @@ export async function pollVoxKaggle(env:VoxEnv):Promise<void>{
   }
   return
  }
+ const qwenBusy=await env.MEMORY_DB.prepare(
+  "SELECT id FROM qwen_image21_jobs WHERE status IN ('submitting','submitted','queued','running','delivering','submit-uncertain','needs-review') LIMIT 1"
+ ).bind().all<{id:number}>()
+ if(qwenBusy.results.length)return
  const claimed=await env.MEMORY_DB.prepare(
  "UPDATE vox_kaggle_jobs SET status='submitting',updated_at=unixepoch() WHERE id=("+
  "SELECT id FROM vox_kaggle_jobs WHERE status='queued' ORDER BY id LIMIT 1)"+
