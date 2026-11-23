@@ -1,14 +1,16 @@
-# Kaggle research image generator for Hono Telegram
+# Kaggle Qwen-Image-2.1 research generator
 
-Implements Qwen-Image-2.1 Uncensored GGUF Q4_K_M with Viggle Turbo v0.3 LoRA, six steps, Euler sampler and its exact sigma schedule.
+- Base: KasugaiSakura Qwen-Image-2.1 Uncensored GGUF, Q4_K_M (SHA-256 verified)
+- Text encoder: Qwen3-VL 8B INT8 ConvRot
+- VAE: Qwen Image 2.1 BF16 VAE (CPU decode/offload)
+- Adapter: Viggle Turbo v0.3 six-step, **r256** (Space default), strength 1.0
+- Sampler: Euler, BasicGuider (no CFG), Viggle raw sigma schedule `1, 0.9375, 0.875, 0.75, 0.5, 0.25`
+- Default output: 1024 × 1024 PNG
+- ComfyUI checkout and model cache: `/tmp/qwen-comfy` (not included in Kaggle output)
+- Result: `/kaggle/working/qwen_image21_result.png` + JSON report
 
-This model uses the **Qwen Research License — non-commercial research/evaluation only**. Obtain separate permission for business use.
+Kaggle runs one private GPU kernel per image. It is not a persistent server. First run downloads several GB and installs ComfyUI; every fresh kernel run may repeat this work. GPU tested on Tesla T4 15.6 GB. A previous r128 test generated a valid 1024×1024 PNG in 294.64 seconds of ComfyUI execution. r256 is the Space default and is being validated separately.
 
-- Runs as one private Kaggle GPU T4 x2 script per request, not a persistent GPU endpoint.
-- Outputs `/kaggle/working/qwen_image21_result.png` and `qwen_image21_result.json`.
-- Environment variable: `QWEN_TASK_JSON` with fields `prompt`, `width`, `height`, `seed`.
-- Internet is required; first run must download ~16GB of model data and install the dependencies.
-- Uses one T4 with CPU low-memory offloading. Dual GPUs do not automatically make a 32GB pool.
-- A successful end-to-end GPU render must be observed before enabling the Telegram production job feature.
-- This phase supports text-to-image; video and image-edit commands remain untouched.
-- Uses ComfyUI, ComfyUI-GGUF, and Viggle Turbo's custom nodes fetched from upstream during the Kaggle run.
+The generator patches only the ComfyUI-GGUF image-architecture allowlist to accept `qwen_image21`, preserving the GGUF metadata so native ComfyUI QwenImage21 model detection works.
+
+Research-only: the Space's Qwen Research License prohibits commercial use without separate permission. Do not use for paid production until licensing is resolved.
