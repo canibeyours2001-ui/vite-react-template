@@ -18,7 +18,7 @@ import urllib.request
 
 OUT = Path("/kaggle/working" if Path("/kaggle/working").exists() else "/tmp/qwen-kaggle")
 OUT.mkdir(parents=True, exist_ok=True)
-COMFY = OUT / "ComfyUI"
+COMFY = Path("/kaggle/temp/ComfyUI") if Path("/kaggle/temp").exists() else OUT / "ComfyUI"
 RESULT = OUT / "qwen_image21_result.png"
 REPORT = OUT / "qwen_image21_result.json"
 GGUF = "qwen-image-2.1-UC-Q4_K_M.gguf"
