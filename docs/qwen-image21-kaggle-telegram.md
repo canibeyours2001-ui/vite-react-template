@@ -4,6 +4,8 @@
 
 Telegram command → Hono webhook → D1 job queue → minute cron → private Kaggle GPU kernel → ComfyUI Qwen-Image-2.1 GGUF Q4_K_M + Viggle Turbo r128 6-step → Kaggle PNG output → Telegram sendDocument.
 
+The repository's Cloudflare Workers Build trigger is preview-only and runs `wrangler deploy --dry-run`; it does not change production. Production release is a separate, verified deployment step.
+
 The Hono Worker reuses existing secrets/bindings: `KAGGLE_API_TOKEN`, `TELEGRAM_BOT_TOKEN`, `MEMORY_DB`. No API keys are stored in this repository or sent to Kaggle. Kaggle is a batch GPU runner, not an always-on API. One image requires one new kernel execution; first setup/model downloads add latency.
 
 ## Telegram commands
