@@ -983,6 +983,10 @@ export async function pollPyvt(env:VideoEnv):Promise<void>{
   }
   return
  }
+ const qwenBusy=await env.MEMORY_DB.prepare(
+  "SELECT id FROM qwen_image21_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain','delivery-uncertain','needs-review') LIMIT 1"
+ ).bind().all<{id:number}>()
+ if(qwenBusy.results.length)return
  const locked=await env.MEMORY_DB.prepare(
   "UPDATE pyvt_kaggle_jobs SET status='submitting',updated_at=unixepoch() WHERE id=("+
   "SELECT id FROM pyvt_kaggle_jobs WHERE status='queued' ORDER BY id LIMIT 1) "+
