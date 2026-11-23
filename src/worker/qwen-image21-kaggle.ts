@@ -20,14 +20,16 @@ const OWNER='cyawzin'
 const SLUG='qwen-image-2-1-uncensored-gguf-6-step-t4-research'
 const KERNEL=OWNER+'/'+SLUG
 const API='https://api.kaggle.com/v1/kernels/'
-const SCRIPT_URL='https://raw.githubusercontent.com/canibeyours2001-ui/vite-react-template/99b7fbd/qwen-kaggle/generate.py'
+const SCRIPT_URL='https://raw.githubusercontent.com/canibeyours2001-ui/vite-react-template/7c568fd36c788dfa99f753017163ba9f34380c06/qwen-kaggle/generate.py'
+const BATCH_PREFIX='__QWEN_IMAGE21_BATCH_V1__:'
 const ACTIVE="('submitting','submitted','kaggle-queued','running','delivering','submit-uncertain','needs-review')"
-const BLOCKING="('queued','submitting','submitted','kaggle-queued','running','delivering','submit-uncertain','needs-review')"
+const BLOCKING="('queued','submitting','submitted','kaggle-queued','running','delivering','submit-uncertain','needs-review','delivery-uncertain')"
 const HELP='🖼️ Qwen Image 2.1 Uncensored, GGUF Q4_K_M, Viggle Turbo 6-step (research-only).\n'+
   'Text-to-image: /qwenimage A cinematic mountain village at dawn\n'+
   'Optional: /qwenimage --size=768 A realistic red sports car\n'+
-  'Status: /qwenimage_status. Supported sizes: 512, 768, 1024.\n'+
-  'Kaggle starts a separate GPU job for each image; first run downloads large model files.\n'+
+  'Batch: /qwenbatch --size=1024 followed by 2–4 prompts, one per line.\n'+
+  'Status: /qwenimage_status or /qwenbatch_status. Supported sizes: 512, 768, 1024.\n'+
+  'A batch reuses one Kaggle session and loaded models; first run downloads large model files.\n'+
   'Qwen Research License prohibits commercial use without separate permission.'
 
 async function schema(db:Db){
@@ -70,16 +72,41 @@ export function normalizePrompt(input:string):string{
     (_match,doubleQuoted,singleQuoted)=>doubleQuoted??singleQuoted??'')
     .replace(/\s+/g,' ').trim()
 }
+function batchPrompts(value:string):string[]|null{
+  if(!value.startsWith(BATCH_PREFIX))return null
+  const parsed=JSON.parse(value.slice(BATCH_PREFIX.length))
+  if(!Array.isArray(parsed)||parsed.length<2||parsed.length>4||
+     parsed.some(x=>typeof x!=='string'||x.length<3||x.length>1400)){
+    throw Error('Stored Qwen batch payload is invalid')
+  }
+  return parsed
+}
 function source(task:Job){
-  const payload={prompt:task.prompt,width:task.width,height:task.height,seed:task.seed}
+  const prompts=batchPrompts(task.prompt)
+  const payload=prompts
+    ? prompts.map((prompt,index)=>({prompt,width:task.width,height:task.height,
+        seed:(task.seed+index*104729)>>>0}))
+    : {prompt:task.prompt,width:task.width,height:task.height,seed:task.seed}
   // JSON-encoded string literal is also valid as a Python string. No user input is evaluated.
   const literal=JSON.stringify(JSON.stringify(payload))
+  const variable=prompts?'QWEN_TASKS_JSON':'QWEN_TASK_JSON'
   return 'import os, pathlib, urllib.request\n'+
-    'os.environ["QWEN_TASK_JSON"] = '+literal+'\n'+
+    'os.environ['+JSON.stringify(variable)+'] = '+literal+'\n'+
     'source = '+JSON.stringify(SCRIPT_URL)+'\n'+
     'path = pathlib.Path("/kaggle/working/qwen_generate.py")\n'+
     'urllib.request.urlretrieve(source, path)\n'+
     'exec(compile(path.read_bytes(), str(path), "exec"), {"__name__":"__main__"})\n'
+}
+
+function safeOutputUrl(value:unknown):string|null{
+  if(typeof value!=='string')return null
+  try{
+    const u=new URL(value),h=u.hostname.toLowerCase()
+    if(u.protocol==='https:'&&(h==='storage.googleapis.com'||h==='api.kaggle.com'||
+      h==='www.kaggle.com'||h.endsWith('.kaggleusercontent.com')||
+      h.endsWith('.googleapis.com')))return u.toString()
+  }catch{/* ignore invalid URL */}
+  return null
 }
 function outputUrl(data:Record<string,unknown>):string|null{
   const files=data.files||data.outputFiles
@@ -87,17 +114,27 @@ function outputUrl(data:Record<string,unknown>):string|null{
   for(const item of files){
     if(!item||typeof item!=='object')continue
     const f=item as Record<string,unknown>
-    if(String(f.fileName||f.file_name)!=='qwen_image21_result.png'||typeof f.url!=='string')continue
-    try{
-      const u=new URL(f.url)
-      const h=u.hostname.toLowerCase()
-      if(u.protocol==='https:'&&(h==='storage.googleapis.com'||h==='api.kaggle.com'||
-        h==='www.kaggle.com'||h.endsWith('.kaggleusercontent.com')||
-        h.endsWith('.googleapis.com')))return u.toString()
-    }catch{/* ignore invalid URL */}
+    if(String(f.fileName||f.file_name)==='qwen_image21_result.png'){
+      const url=safeOutputUrl(f.url)
+      if(url)return url
+    }
   }
   return null
 }
+function outputUrls(data:Record<string,unknown>,names:string[]):(string|null)[]{
+  const files=data.files||data.outputFiles
+  if(!Array.isArray(files))return names.map(()=>null)
+  const byName=new Map<string,string>()
+  for(const item of files){
+    if(!item||typeof item!=='object')continue
+    const f=item as Record<string,unknown>
+    const name=String(f.fileName||f.file_name||'')
+    const url=safeOutputUrl(f.url)
+    if(name&&url)byName.set(name,url)
+  }
+  return names.map(name=>byName.get(name)||null)
+}
+
 async function deliver(env:QwenEnv,job:Job,url:string){
   const r=await fetch(url,{redirect:'follow',signal:AbortSignal.timeout(65000)})
   if(!r.ok||Number(r.headers.get('content-length')||0)>25*1024*1024){
@@ -126,6 +163,67 @@ async function deliver(env:QwenEnv,job:Job,url:string){
   const receipt=await sent.json().catch(()=>({})) as {ok?:boolean}
   if(!sent.ok||receipt.ok!==true)throw Error('Telegram PNG delivery unconfirmed')
 }
+
+async function deliverBatch(env:QwenEnv,job:Job,urls:string[],prompts:string[]){
+  if(urls.length!==prompts.length||urls.length<2||urls.length>4){
+    throw Error('Qwen batch output count does not match the requested batch')
+  }
+  const images=await Promise.all(urls.map(async(url,index)=>{
+    const r=await fetch(url,{redirect:'follow',signal:AbortSignal.timeout(65000)})
+    const length=Number(r.headers.get('content-length')||0)
+    if(!r.ok||length>15*1024*1024){
+      await r.body?.cancel()
+      throw Error('Kaggle batch PNG download failed or exceeded 15 MiB')
+    }
+    const data=new Uint8Array(await r.arrayBuffer())
+    const signature=[137,80,78,71,13,10,26,10]
+    if(data.length<4096||data.length>15*1024*1024||
+       signature.some((byte,i)=>data[i]!==byte)){
+      throw Error('Batch item '+(index+1)+' is not a valid PNG')
+    }
+    const view=new DataView(data.buffer,data.byteOffset,data.byteLength)
+    if(view.getUint32(16)!==job.width||view.getUint32(20)!==job.height){
+      throw Error('Batch item '+(index+1)+' has unexpected PNG dimensions')
+    }
+    return {data,name:'qwen-image21-'+job.id+'-'+String(index+1).padStart(2,'0')+'.png',
+      caption:'✅ Qwen Image 2.1 batch #'+job.id+' • '+(index+1)+'/'+urls.length+
+        ' • '+job.width+'×'+job.height+' • Q4_K_M • Viggle 6 steps • seed '+((job.seed+index*104729)>>>0)}
+  }))
+  const total=images.reduce((sum,item)=>sum+item.data.length,0)
+  if(total>40*1024*1024)throw Error('Qwen batch output exceeds the 40 MiB delivery safety limit')
+  if(images.every(item=>item.data.length<=9*1024*1024)){
+    const form=new FormData()
+    form.set('chat_id',job.chat_id)
+    const media=images.map((item,index)=>({
+      type:'photo',media:'attach://image'+(index+1),caption:item.caption
+    }))
+    form.set('media',JSON.stringify(media))
+    images.forEach((item,index)=>{
+      form.set('image'+(index+1),new Blob([item.data],{type:'image/png'}),item.name)
+    })
+    const sent=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendMediaGroup',{
+      method:'POST',body:form,signal:AbortSignal.timeout(65000)
+    })
+    const receipt=await sent.json().catch(()=>({})) as {ok?:boolean;result?:unknown[]}
+    if(!sent.ok||receipt.ok!==true||!Array.isArray(receipt.result)||receipt.result.length!==images.length){
+      throw Error('Telegram batch album delivery was not confirmed')
+    }
+    return
+  }
+  // Larger PNGs are sent as documents individually to avoid Telegram photo limits.
+  for(const item of images){
+    const form=new FormData()
+    form.set('chat_id',job.chat_id)
+    form.set('caption',item.caption)
+    form.set('document',new Blob([item.data],{type:'image/png'}),item.name)
+    const sent=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendDocument',{
+      method:'POST',body:form,signal:AbortSignal.timeout(65000)
+    })
+    const receipt=await sent.json().catch(()=>({})) as {ok?:boolean}
+    if(!sent.ok||receipt.ok!==true)throw Error('Telegram batch document delivery was not confirmed')
+  }
+}
+
 export async function qwenImageCommand(env:QwenEnv,chat:string,messageId:number,text:string,
  send:(message:string)=>Promise<unknown>):Promise<boolean>{
   const m=text.match(/^\/(qwenimage|qwenimage_status|qwenimage_help)(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]*))?$/i)
@@ -138,13 +236,14 @@ export async function qwenImageCommand(env:QwenEnv,chat:string,messageId:number,
   }
   if(command==='qwenimage_status'){
     const rows=await env.MEMORY_DB.prepare(
-      'SELECT id,status,width,height,version_number,error_message FROM qwen_image21_jobs '+
+      'SELECT id,status,width,height,prompt,version_number,error_message FROM qwen_image21_jobs '+
       'WHERE chat_id=? ORDER BY id DESC LIMIT 1'
-    ).bind(chat).all<{id:number;status:string;width:number;height:number;version_number:number|null;error_message:string|null}>()
+    ).bind(chat).all<{id:number;status:string;width:number;height:number;prompt:string;version_number:number|null;error_message:string|null}>()
     const j=rows.results[0]
+    const batch=j?batchPrompts(j.prompt):null
     const shown=j?.status==='queued'?'waiting for submission':
       j?.status==='kaggle-queued'?'waiting for Kaggle GPU':j?.status
-    await send(j?'🖼️ Qwen #'+j.id+': '+shown+' • '+j.width+'×'+j.height+
+    await send(j?'🖼️ Qwen '+(batch?'batch #'+j.id+' ('+batch.length+' images)':'#'+j.id)+': '+shown+' • '+j.width+'×'+j.height+
       (j.version_number?' • Kaggle v'+j.version_number:'')+
       (j.error_message?'\n'+j.error_message.slice(0,150):''):'No Qwen research jobs yet.\n'+HELP)
     return true
@@ -182,6 +281,79 @@ export async function qwenImageCommand(env:QwenEnv,chat:string,messageId:number,
   await send('✅ Research image #'+(row.results[0]?.id||'?')+' queued on Kaggle. /qwenimage_status')
   return true
 }
+
+export async function qwenBatchCommand(env:QwenEnv,chat:string,messageId:number,text:string,
+ send:(message:string)=>Promise<unknown>):Promise<boolean>{
+  const m=text.match(/^\/(qwenbatch|qwenbatch_status|qwenbatch_help)(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]*))?$/i)
+  if(!m)return false
+  await schema(env.MEMORY_DB)
+  const command=m[1].toLowerCase()
+  if(command==='qwenbatch_help'){
+    await send('🖼️ Qwen batch research generation.\n'+
+      'Use /qwenbatch --size=1024, then put one prompt on each line (2–4 prompts).\n'+
+      'Example:\n/qwenbatch\nA cinematic mountain village at dawn\nA red sports car in the rain\n'+
+      'The model loads once and generates images sequentially in one Kaggle T4 session.\n'+
+      'Check: /qwenbatch_status. Research-only; Qwen Research License prohibits commercial use without separate permission.')
+    return true
+  }
+  if(command==='qwenbatch_status'){
+    const rows=await env.MEMORY_DB.prepare(
+      'SELECT id,status,width,height,prompt,version_number,error_message FROM qwen_image21_jobs '+
+      'WHERE chat_id=? AND substr(prompt,1,?)=? ORDER BY id DESC LIMIT 1'
+    ).bind(chat,BATCH_PREFIX.length,BATCH_PREFIX).all<{
+      id:number;status:string;width:number;height:number;prompt:string;
+      version_number:number|null;error_message:string|null
+    }>()
+    const j=rows.results[0]
+    if(!j){await send('No Qwen batches yet. Use /qwenbatch_help for instructions.');return true}
+    const prompts=batchPrompts(j.prompt)||[]
+    const shown=j.status==='queued'?'waiting for submission':
+      j.status==='kaggle-queued'?'waiting for Kaggle GPU':j.status
+    await send('🖼️ Qwen batch #'+j.id+': '+shown+' • '+prompts.length+
+      ' images • '+j.width+'×'+j.height+
+      (j.version_number?' • Kaggle v'+j.version_number:'')+
+      (j.error_message?'\n'+j.error_message.slice(0,150):''))
+    return true
+  }
+  const lines=(m[2]||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean)
+  let dim=1024
+  const opt=lines[0]?.match(/^--size=(512|768|1024)$/)
+  if(opt){dim=Number(opt[1]);lines.shift()}
+  const prompts=lines.map(line=>normalizePrompt(line.replace(/^(?:[-*•]|\d+[.)])\s*/,'')))
+    .filter(Boolean)
+  if(prompts.length<2||prompts.length>4||prompts.some(x=>x.length<3||x.length>1400)){
+    await send('Provide 2–4 prompts, one per line. Each prompt must contain 3–1400 characters.\n'+
+      'Example:\n/qwenbatch --size=1024\nA cinematic mountain village at dawn\nA red sports car in the rain\n'+
+      'Help: /qwenbatch_help')
+    return true
+  }
+  if(env.QWEN_KAGGLE_ENABLED!=='1'){
+    await send('🧪 Qwen Kaggle backend is locked until the GPU test succeeds.')
+    return true
+  }
+  if(!env.KAGGLE_API_TOKEN){
+    await send('Kaggle API credential is not configured in the Worker.')
+    return true
+  }
+  const busy=await env.MEMORY_DB.prepare(
+    'SELECT id FROM qwen_image21_jobs WHERE chat_id=? AND status IN '+BLOCKING+' LIMIT 1'
+  ).bind(chat).all<{id:number}>()
+  if(busy.results.length){
+    await send('You already have an active Qwen image or batch job. Use /qwenimage_status or /qwenbatch_status.')
+    return true
+  }
+  const seed=crypto.getRandomValues(new Uint32Array(1))[0]
+  await env.MEMORY_DB.prepare(
+    'INSERT OR IGNORE INTO qwen_image21_jobs(chat_id,message_id,prompt,width,height,seed) VALUES(?,?,?,?,?,?)'
+  ).bind(chat,messageId,BATCH_PREFIX+JSON.stringify(prompts),dim,dim,seed).run()
+  const row=await env.MEMORY_DB.prepare(
+    'SELECT id FROM qwen_image21_jobs WHERE chat_id=? AND message_id=?'
+  ).bind(chat,messageId).all<{id:number}>()
+  await send('✅ Qwen batch #'+(row.results[0]?.id||'?')+' queued: '+prompts.length+
+    ' images at '+dim+'×'+dim+'. They will run sequentially in one Kaggle session. /qwenbatch_status')
+  return true
+}
+
 export async function pollQwenImage21(env:QwenEnv):Promise<void>{
   if(env.QWEN_KAGGLE_ENABLED!=='1'||!env.KAGGLE_API_TOKEN||!env.MEMORY_DB)return
   await schema(env.MEMORY_DB)
@@ -207,14 +379,18 @@ export async function pollQwenImage21(env:QwenEnv):Promise<void>{
         const files=await kaggle(env,'output',{
           userName:OWNER,kernelSlug:SLUG,versionLabel:'v'+job.version_number
         })
-        const url=outputUrl(files)
-        if(!url)return
+        const prompts=batchPrompts(job.prompt)
+        const batchNames=prompts?prompts.map((_p,index)=>'qwen_image21_'+String(index+1).padStart(2,'0')+'.png'):[]
+        const urls=prompts?outputUrls(files,batchNames):[]
+        const url=prompts?null:outputUrl(files)
+        if(prompts?urls.some(x=>!x):!url)return
         const claim=await db.prepare("UPDATE qwen_image21_jobs SET status='delivering',"+
           'updated_at=unixepoch() WHERE id=? AND status IN (\'submitted\',\'kaggle-queued\',\'running\')'
         ).bind(job.id).run()
         if(claim.meta.changes!==1)return
         try{
-          await deliver(env,job,url)
+          if(prompts)await deliverBatch(env,job,urls as string[],prompts)
+          else await deliver(env,job,url as string)
           await db.prepare("UPDATE qwen_image21_jobs SET status='done',updated_at=unixepoch() WHERE id=?").bind(job.id).run()
         }catch(e){
           const reason=String(e instanceof Error?e.message:e).slice(0,150)

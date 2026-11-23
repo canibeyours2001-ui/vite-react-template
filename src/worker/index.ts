@@ -11,7 +11,7 @@ import {pollWanAuto} from './wan-auto'
 import {handleLtxCommand,pollLtxJobs} from './hf-ltx-video'
 import { handleMediaStudioMessage, handleMediaStudioCallback, pollMediaStudio, mediaStudioCommands } from './media-studio'
 import {vsrCommand,vsrSignedFile,pollSeedVsr} from './seedvr2-kaggle'
-import {qwenImageCommand,pollQwenImage21} from './qwen-image21-kaggle'
+import {qwenImageCommand,qwenBatchCommand,pollQwenImage21} from './qwen-image21-kaggle'
 import { Hono } from 'hono'
 import { handleAudioTelegram, pollAudioJobs, mvsepStatus, checkMvsepAccount } from './audio-tools'
 import { handleVoiceMessage, handleVoiceCallback, processQwenVoiceJobs, voiceAssistantContext } from './voice-profiles'
@@ -325,6 +325,7 @@ app.post('/telegram/webhook', async (c) => {
       // LTX-2.5 ZeroGPU explicit commands take priority over the generic AI router.
       // This remains isolated from the existing WAN and dubbing handlers.
       if (await vsrCommand(c.env,msg,key,text,send)) return
+      if (await qwenBatchCommand(c.env,key,msg.message_id,text,send)) return
       if (await qwenImageCommand(c.env,key,msg.message_id,text,send)) return
       if(await handleLtxCommand(c.env,msg,key,text))return
       // Review prompts (including /video) before any billable generation.
@@ -721,6 +722,9 @@ app.post('/telegram/webhook', async (c) => {
           '/vsr_status — SeedVR2 job status\n' +
           '/qwenimage PROMPT — research Qwen-Image-2.1 on Kaggle\n' +
           '/qwenimage_status — check research image job\n' +
+          '/qwenbatch — generate 2–4 images in one Kaggle session\n' +
+          '/qwenbatch_status — check Qwen batch progress\n' +
+          '/qwenbatch_help — batch usage and limits\n' +
           '/dub_upload — upload large videos up to 1 GiB in your browser\n' +
           '/voxvoices — show five saved VoxCPM2 voices\n' +
           '/voxvoice 1 TEXT — generate with saved VoxCPM2 voice\n' +
@@ -1053,6 +1057,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'qwenimage',description:'Qwen 2.1 research image on Kaggle'},
         {command:'qwenimage_status',description:'Check Qwen research image job'},
         {command:'qwenimage_help',description:'Qwen Kaggle image limitations'},
+        {command:'qwenbatch',description:'Generate 2–4 Qwen images in one Kaggle session'},
+        {command:'qwenbatch_status',description:'Check Qwen batch progress'},
+        {command:'qwenbatch_help',description:'Qwen batch usage instructions'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
         {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
@@ -1123,6 +1130,9 @@ async function registerTelegramWebhook(env: Bindings): Promise<void> {
         {command:'qwenimage',description:'Qwen 2.1 research image on Kaggle'},
         {command:'qwenimage_status',description:'Check Qwen research image job'},
         {command:'qwenimage_help',description:'Qwen Kaggle image limitations'},
+        {command:'qwenbatch',description:'Generate 2–4 Qwen images in one Kaggle session'},
+        {command:'qwenbatch_status',description:'Check Qwen batch progress'},
+        {command:'qwenbatch_help',description:'Qwen batch usage instructions'},
         {command:'voxvoices',description:'Show saved VoxCPM2 voices'},
         {command:'voxvoice',description:'Generate using a saved VoxCPM2 voice'},
         {command:'voxrename',description:'Rename VoxCPM2 saved voice'},
