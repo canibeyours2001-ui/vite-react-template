@@ -380,7 +380,7 @@ export async function pollVoxKaggle(env:VoxEnv):Promise<void>{
   return
  }
  const qwenBusy=await env.MEMORY_DB.prepare(
-  "SELECT id FROM qwen_image21_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain','delivery-uncertain','needs-review') LIMIT 1"
+  "SELECT id FROM qwen_image21_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain','needs-review') LIMIT 1"
  ).bind().all<{id:number}>()
  if(qwenBusy.results.length)return
  const claimed=await env.MEMORY_DB.prepare(
