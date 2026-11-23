@@ -20,7 +20,7 @@ const OWNER='cyawzin'
 const SLUG='qwen-image-2-1-uncensored-gguf-6-step-t4-research'
 const KERNEL=OWNER+'/'+SLUG
 const API='https://api.kaggle.com/v1/kernels/'
-const SCRIPT_URL='https://raw.githubusercontent.com/canibeyours2001-ui/vite-react-template/4e40a3c/qwen-kaggle/generate.py'
+const SCRIPT_URL='https://raw.githubusercontent.com/canibeyours2001-ui/vite-react-template/99b7fbd/qwen-kaggle/generate.py'
 const ACTIVE="('submitting','submitted','running','delivering','submit-uncertain','needs-review')"
 const HELP='🖼️ Qwen Image 2.1 Uncensored, GGUF Q4_K_M, Viggle Turbo 6-step (research-only).\n'+
   'Text-to-image: /qwenimage A cinematic mountain village at dawn\n'+
