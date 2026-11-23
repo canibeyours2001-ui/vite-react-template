@@ -103,12 +103,18 @@ async function deliver(env:QwenEnv,job:Job,url:string){
   if(data.length<4096||data.length>25*1024*1024||png.some((byte,i)=>data[i]!==byte)){
     throw Error('Output is not a valid PNG')
   }
+  const view=new DataView(data.buffer,data.byteOffset,data.byteLength)
+  if(view.getUint32(16)!==job.width||view.getUint32(20)!==job.height){
+    throw Error('PNG dimensions do not match the requested output')
+  }
+  const asPhoto=data.length<=9*1024*1024
+  const method=asPhoto?'sendPhoto':'sendDocument'
   const form=new FormData()
   form.set('chat_id',job.chat_id)
   form.set('caption','✅ Qwen Image 2.1 research render #'+job.id+
     ' • '+job.width+'×'+job.height+' • Q4_K_M • Viggle 6 steps • seed '+job.seed)
-  form.set('document',new Blob([data],{type:'image/png'}),'qwen-image21-'+job.id+'.png')
-  const sent=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendDocument',{
+  form.set(asPhoto?'photo':'document',new Blob([data],{type:'image/png'}),'qwen-image21-'+job.id+'.png')
+  const sent=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/'+method,{
     method:'POST',body:form,signal:AbortSignal.timeout(65000)
   })
   const receipt=await sent.json().catch(()=>({})) as {ok?:boolean}
