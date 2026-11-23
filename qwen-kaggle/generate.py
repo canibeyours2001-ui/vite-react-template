@@ -150,6 +150,7 @@ def api_request(method, path, payload=None, timeout=30):
 
 
 def main():
+    execution_deadline = time.monotonic() + 13200  # leave 20 minutes inside Kaggle's 4-hour session limit
     tasks = get_tasks()
     print("CONFIG", {"count": len(tasks), "dimensions": tasks[0]["width"],
           "steps": 6, "model": "uncensored-Q4_K_M", "lora": "viggle-v0.3-r128"}, flush=True)
@@ -187,7 +188,7 @@ def main():
             pid = response.get("prompt_id")
             if not pid:
                 raise RuntimeError("ComfyUI did not accept prompt: " + str(response)[:1000])
-            deadline = time.monotonic() + 4800
+            deadline = min(time.monotonic() + 4800, execution_deadline)
             while time.monotonic() < deadline:
                 history = api_request("GET", "/history/" + pid, timeout=20).get(pid)
                 if history:
