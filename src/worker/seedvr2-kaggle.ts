@@ -266,7 +266,8 @@ export async function pollSeedVsr(env:VsrEnv):Promise<void>{
   // Avoid simultaneous free GPU consumption with other bot Kaggle video/voice jobs.
   for(const sql of [
     "SELECT id FROM pyvt_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering') LIMIT 1",
-    "SELECT id FROM vox_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering') LIMIT 1"
+    "SELECT id FROM vox_kaggle_jobs WHERE status IN ('submitting','submitted','running','delivering') LIMIT 1",
+    "SELECT id FROM qwen_image21_jobs WHERE status IN ('submitting','submitted','running','delivering','submit-uncertain','delivery-uncertain','needs-review') LIMIT 1"
   ]){
     const other=await db.prepare(sql).bind().all<{id:number}>().catch(()=>({results:[]}))
     if(other.results.length)return
